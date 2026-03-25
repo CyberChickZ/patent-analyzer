@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "patent-analyzer"
+version = "0.1.0"
+description = "Automated patent novelty analysis pipeline with SerpAPI search and LLM evaluation"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "certifi",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+patent-search = "patent_analyzer.searcher:main"
+patent-prefilter = "patent_analyzer.prefilter:main"
+patent-report = "patent_analyzer.report_generator:main"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
