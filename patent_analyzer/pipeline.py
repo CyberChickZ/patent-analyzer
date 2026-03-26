@@ -1,77 +1,76 @@
 """
-Main pipeline orchestrator.
+Patent Analysis Pipeline — complete flow.
 
-Shows which steps are deterministic (FIXED) vs LLM-dependent (LLM).
+All steps are either FIXED (deterministic code) or LLM (prompt template).
+Nothing runs ad-hoc in the terminal — every step is a script.
 
-Phase 1: IDCA
-  [LLM] Invention detection → parse first word (FIXED routing)
-  [LLM] Document type classification → parse first word (FIXED routing)
-  [LLM] Invention summary
-  [LLM] Invention category → parse first word (FIXED routing)
+═══════════════════════════════════════════════════════════════
+PHASE 1: IDCA (Invention Detection & Classification)
+═══════════════════════════════════════════════════════════════
+  [LLM]   Read paper → detect invention status (present/implied/absent)
+  [FIXED] Parse first word → route (absent → END)
+  [LLM]   Classify document type, summarize invention, categorize
+  [FIXED] Parse first word → save phase1.json
 
-Phase 2: Decomposition
-  [LLM] Unstructured decomposition
-  [LLM] Checklist generation (→ JSON parse is FIXED)
-  [LLM] Delegation planning (→ JSON parse is FIXED)
-  [FIXED] Query generation from delegation output
+═══════════════════════════════════════════════════════════════
+PHASE 2: Decomposition & Planning
+═══════════════════════════════════════════════════════════════
+  [LLM]   Unstructured decomposition (UCD)
+  [LLM]   Checklist generation (20-30 items)
+  [LLM]   Delegation planning (atoms + search groups)
+  [FIXED] query_builder.py → generate queries.json from delegation
 
-Phase 3: Search
-  [FIXED] SerpAPI search with retry + incremental save
-  [FIXED] Deduplication by pub_num/title
-  [FIXED] PDF download with retry
-  [FIXED] Pre-filtering by keyword relevance (top N selection)
+═══════════════════════════════════════════════════════════════
+PHASE 3: Search & Download
+═══════════════════════════════════════════════════════════════
+  [FIXED] searcher.py → SerpAPI search with retry + incremental save
+  [FIXED] searcher.py → PDF download with retry
+  [FIXED] fetch_abstracts.py → OpenAlex API for real abstracts
+  [FIXED] prefilter.py → keyword relevance ranking → top N
 
-Phase 4: Evaluation
-  [LLM] Per-document checklist evaluation
-  [FIXED] Score computation (matches / total)
-  [FIXED] Risk classification (threshold-based)
-  [FIXED] Aggregation + sorting
+═══════════════════════════════════════════════════════════════
+PHASE 4: Deep Evaluation (read full PDFs)
+═══════════════════════════════════════════════════════════════
+  [FIXED] deep_evaluator.py prepare → create eval_tasks/*.json
+          Each task = invention description + ONE prior art PDF + checklist
+          NOT batched — 1 target × 1 prior art per task
 
-Phase 5: Report
-  [LLM] Overall summary generation
-  [FIXED] HTML report generation from JSON data
-  [FIXED] Markdown export (client-side JS)
+  [LLM]   For each task: read target description + read prior art PDF
+          → evaluate each checklist item with evidence citations
+          → assess 102 anticipation + 103 key teachings
+          → save result into task file
+
+  [FIXED] deep_evaluator.py merge → aggregate all task results
+          → deduplicate, filter self-refs, compute scores
+          → enrich with snippets/abstracts
+          → save results.json
+
+═══════════════════════════════════════════════════════════════
+PHASE 5: Report Generation
+═══════════════════════════════════════════════════════════════
+  [FIXED] report_generator.py → static HTML from results.json
+
+═══════════════════════════════════════════════════════════════
+
+CLI Commands (all fixed code):
+
+  # Phase 3
+  patent-search --queries-file queries.json --output search.json --log-file search.log
+  patent-prefilter --search-results search.json --checklist-file phase2.json --output top200.json
+
+  # Phase 3b: abstracts
+  python -m patent_analyzer.fetch_abstracts --results results.json --limit 50
+
+  # Phase 4
+  python -m patent_analyzer.deep_evaluator prepare \\
+      --search-results search.json --phase1 phase1.json --phase2 phase2.json \\
+      --output-dir ./output --limit 20
+
+  # (LLM agents run on eval_tasks/*.json — each reads 1 PDF)
+
+  python -m patent_analyzer.deep_evaluator merge \\
+      --output-dir ./output --search-results search.json
+
+  # Phase 5
+  patent-report --input results.json --output report.html
 """
-
-import json
-from pathlib import Path
-
-from .config import EVAL_LIMIT, OUTPUT_DIR
-from .query_builder import build_all_queries
-from .prefilter import score_document, tokenize, bigrams
-from .scorer import aggregate_evaluations, merge_into_final_results, classify_risk
-
-
-def run_phase3_fixed(delegation: dict, api_key: str, output_dir: str = OUTPUT_DIR) -> dict:
-    """
-    Phase 3: All deterministic.
-    1. Build queries from delegation (FIXED)
-    2. Run SerpAPI search (FIXED)
-    3. Pre-filter top N (FIXED)
-    """
-    queries = build_all_queries(delegation)
-
-    # Save queries
-    queries_path = Path(output_dir) / "queries.json"
-    with open(queries_path, "w") as f:
-        json.dump(queries, f, indent=2)
-
-    # Search would be run via searcher.py CLI
-    # Pre-filter would be run via prefilter.py CLI
-    return queries
-
-
-def run_phase4_fixed(eval_batches: list[dict]) -> dict:
-    """
-    Phase 4 aggregation: All deterministic.
-    Takes LLM evaluation outputs and computes final scores.
-    """
-    return aggregate_evaluations(eval_batches)
-
-
-def run_phase5_fixed(phase1: dict, phase2: dict, search: dict, evaluation: dict) -> dict:
-    """
-    Phase 5 data assembly: All deterministic.
-    Report HTML generation is also deterministic (generate_report.py).
-    """
-    return merge_into_final_results(phase1, phase2, search, evaluation)
