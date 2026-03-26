@@ -133,7 +133,7 @@ body{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
   <div class="sec-b"><p>The manuscript discloses Dense Object Nets, a system comprising:</p><ul class="sum-list"><li>A fully-convolutional neural network (34-layer stride-8 ResNet) that maps full-resolution RGB images to dense descriptor spaces providing a D-dimensional descriptor vector per pixel</li><li>A self-supervised training procedure using pixelwise contrastive loss with pixel matches/non-matches generated automatically from 3D RGBD reconstructions</li><li>Object masking via 3D reconstruction-based change detection to focus learning on objects of interest</li><li>Background domain randomization using autonomously acquired object masks to enforce cross-scene descriptor consistency</li><li>Hard-negative scaling that adaptively normalizes the non-match loss by the number of active hard negatives rather than total non-matches</li><li>Multi-object distinct descriptor learning via three strategies: cross-object loss, direct training on multi-object scenes, and synthetic multi-object scenes via mask layering</li><li>Selective class generalization or instance specificity achieved by modifying the loss function and sampling procedure</li><li>Application to robotic manipulation: grasping specific points on deformed objects by finding best descriptor matches via L2 nearest-neighbor lookup, with class-general and instance-specific variants.</li></ul></div>
 </div>
 
-<div class="sec"><div class="sec-t">Search Overview</div><div class="sec-b">Deep PDF analysis of 18 prior art documents. Highest overlap: 76%. Top match: &quot;Fully Self-Supervised Class Awareness in Dense Object Descriptors&quot; — but it builds ON TOP of the invention (post-publication). No single document anticipates the full invention under 35 USC 102. Several documents teach individual components useful for 103 obviousness analysis.</div></div>
+<div class="sec"><div class="sec-t">Search Overview</div><div class="sec-b">Deep PDF analysis of 17 prior art documents (full paper reading, not just title/snippet). Highest checklist overlap: 76%. No single document anticipates the full invention under 35 USC 102. Top match &quot;Fully Self-Supervised Class Awareness in Dense Object Descriptors&quot; scores 76% but explicitly builds on the invention as subsequent work. Strongest independent prior art is 3DMatch (self-supervised correspondence from RGB-D) but it operates on 3D volumetric patches, not dense 2D pixel descriptors.</div></div>
 
 <div class="sec">
   <div class="sec-t tog" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">Search Groups (6)</div>
@@ -161,15 +161,15 @@ body{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
 <div class="bar">
   <div class="bar-title">Possible Matches</div>
   <div class="bar-actions">
-    <button class="fbtn" onclick="showAll(this)">All (18)</button>
+    <button class="fbtn" onclick="showAll(this)">All (17)</button>
     <button class="fbtn on" onclick="showHits(this)">With Overlap (13)</button>
-    <button class="fbtn" onclick="showNone(this)">No Overlap (5)</button>
+    <button class="fbtn" onclick="showNone(this)">No Overlap (4)</button>
     <div class="dropdown">
       <button class="fbtn fbtn-accent" onclick="this.parentElement.classList.toggle('open')">Copy as MD &#x25BE;</button>
       <div class="dropdown-menu">
         <button onclick="copyReportMd('hits')">With Overlap (13)</button>
-        <button onclick="copyReportMd('all')">All Documents (18)</button>
-        <button onclick="copyReportMd('none')">No Overlap Only (5)</button>
+        <button onclick="copyReportMd('all')">All Documents (17)</button>
+        <button onclick="copyReportMd('none')">No Overlap Only (4)</button>
         <hr>
         <button onclick="dlReportMd('hits')">Download With Overlap .md</button>
         <button onclick="dlReportMd('all')">Download All .md</button>
@@ -915,31 +915,6 @@ body{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
   </div>
   
   <div class="card-snippet"><span class="snip-short">One-shot transfer of dexterous grasps to novel scenes with object and context variations has been a challenging problem. While distilled feature fields from large vision models have enabled semantic c...</span><span class="snip-full">One-shot transfer of dexterous grasps to novel scenes with object and context variations has been a challenging problem. While distilled feature fields from large vision models have enabled semantic correspondences across 3D scenes, their features are point-based and restricted to object surfaces, limiting their capability of modeling complex semantic feature distributions for hand-object interactions. In this work, we propose the \textit{neural attention field} for representing semantic-aware dense feature fields in the 3D space by modeling inter-point relevance instead of individual point features. Core to it is a transformer decoder that computes the cross-attention between any 3D query point with all the scene points, and provides the query point feature with an attention-based aggregation. We further propose a self-supervised framework for training the transformer decoder from only a few 3D pointclouds without hand demonstrations. Post-training, the attention field can be applied to novel scenes for semantics-aware dexterous grasping from one-shot demonstration. Experiments show that our method provides better optimization landscapes by encouraging the end-effector to focus on task-relevant scene regions, resulting in significant improvements in success rates on real robots compared with the feature-field-based methods.</span></div>
-  <div class="detail-panel"></div>
-</div>
-<div class="card card-none" data-hits="0" data-md="# 3DMatch: Learning Local Geometric Descriptors from RGB-D Reconstructions
-- **ID**: 
-- **Type**: Paper
-- **Matched**: 0/25
-
-## Evaluation
-">
-  <div class="card-top" onclick="toggle(this.parentElement)">
-    <div class="card-left">
-      <span class="type-dot dot-paper"></span>
-      <div>
-        <div class="card-title">3DMatch: Learning Local Geometric Descriptors from RGB-D Reconstructions</div>
-        <div class="card-id">Paper</div>
-      </div>
-    </div>
-    <div class="card-right">
-      <span class="no-badge">&mdash;</span>
-      
-      <button class="md-btn" onclick="event.stopPropagation();showMd(this.closest('.card'))">MD</button>
-    </div>
-  </div>
-  
-  <div class="card-snippet"><span class="snip-short">Matching local geometric features on real-world depth images is a challenging task due to the noisy, low-resolution, and incomplete nature of 3D scan data. These difficulties limit the performance of ...</span><span class="snip-full">Matching local geometric features on real-world depth images is a challenging task due to the noisy, low-resolution, and incomplete nature of 3D scan data. These difficulties limit the performance of current state-of-art methods, which are typically based on histograms over geometric properties. In this paper, we present 3DMatch, a data-driven model that learns a local volumetric patch descriptor for establishing correspondences between partial 3D data. To amass training data for our model, we propose a self-supervised feature learning method that leverages the millions of correspondence labels found in existing RGB-D reconstructions. Experiments show that our descriptor is not only able to match local geometry in new scenes for reconstruction, but also generalize to different tasks and spatial scales (e.g. instance-level object model alignment for the Amazon Picking Challenge, and mesh surface correspondence). Results show that 3DMatch consistently outperforms other state-of-the-art approaches by a significant margin. Code, data, benchmarks, and pre-trained models are available online at http://3dmatch.cs.princeton.edu.</span></div>
   <div class="detail-panel"></div>
 </div>
 <div class="card card-none" data-hits="0" data-md="# SAM: Self-supervised Learning of Pixel-wise Anatomical Embeddings in Radiological Images
