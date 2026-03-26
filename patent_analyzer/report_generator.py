@@ -99,7 +99,12 @@ def generate_html(data: dict) -> str:
         mid = esc(m.get("id", ""))
         mtype = m.get("manuscript_type", "Document")
         url = m.get("url", "")
-        snippet = esc(m.get("snippet", ""))
+        # Prefer real abstract over search snippet
+        abstract = m.get("abstract", "")
+        raw_snippet = m.get("snippet", "")
+        display_text = esc(abstract if abstract else raw_snippet)
+        snippet_short = display_text[:200] + "..." if len(display_text) > 200 else display_text
+        snippet = display_text
 
         evals = m.get("similarity_categories", m.get("evaluations", {}))
         matched = []
@@ -120,12 +125,13 @@ def generate_html(data: dict) -> str:
         total = len(evals) if evals else len(checklist)
         score_num = hit_count / total if total > 0 else 0
 
-        # Tags for hover (short labels, green)
-        tags_html = ""
+        # Hover zone: full checklist lines, one per row
+        hover_html = ""
         if matched:
-            tags_html = '<div class="hover-tags">' + "".join(
-                f'<span class="tag tag-hit">{s}</span>' for s, _, _ in matched
-            ) + '</div>'
+            hover_html = '<div class="hover-hits">'
+            for short, full, analysis in matched:
+                hover_html += f'<div class="hv-item"><span class="hv-icon">&#x2705;</span> {esc(full)}</div>'
+            hover_html += '</div>'
 
         # Expanded detail
         detail_html = '<div class="detail-panel">'
@@ -173,8 +179,8 @@ def generate_html(data: dict) -> str:
       <button class="md-btn" onclick="event.stopPropagation();showMd(this.closest(\'.card\'))">MD</button>
     </div>
   </div>
-  {tags_html}
-  {f'<div class="card-snippet">{snippet}</div>' if snippet else ''}
+  {hover_html}
+  {f'<div class="card-snippet"><span class="snip-short">{snippet_short}</span><span class="snip-full">{snippet}</span></div>' if snippet else ''}
   {detail_html}
 </div>'''
 
@@ -241,8 +247,19 @@ body{{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
 /* Filter bar */
 .bar{{display:flex;gap:0.5rem;margin:1.5rem 0 1rem;align-items:center}}
 .bar-title{{font-size:1rem;font-weight:600;flex:1}}
+.bar-actions{{display:flex;gap:0.5rem;align-items:center}}
 .fbtn{{font-size:0.78rem;padding:0.3rem 0.75rem;border-radius:7px;border:1px solid var(--border);background:var(--card);color:var(--text2);cursor:pointer}}
 .fbtn.on{{background:var(--accent);border-color:var(--accent);color:#fff}}
+.fbtn-accent{{border-color:var(--accent);color:var(--accent)}}
+.fbtn-accent:hover{{background:var(--accent);color:#fff}}
+
+/* Dropdown */
+.dropdown{{position:relative}}
+.dropdown-menu{{display:none;position:absolute;right:0;top:calc(100% + 4px);background:var(--card);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.1);z-index:50;min-width:220px;padding:0.3rem 0;overflow:hidden}}
+.dropdown.open .dropdown-menu{{display:block}}
+.dropdown-menu button{{display:block;width:100%;text-align:left;padding:0.45rem 0.9rem;font-size:0.8rem;border:none;background:none;color:var(--text);cursor:pointer}}
+.dropdown-menu button:hover{{background:#f0f3f7}}
+.dropdown-menu hr{{border:none;border-top:1px solid var(--border);margin:0.25rem 0}}
 .bar-note{{font-size:0.78rem;color:var(--text2);margin-bottom:1rem}}
 
 /* Cards */
@@ -266,14 +283,19 @@ body{{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
 .card:hover .md-btn{{opacity:1}}
 .md-btn:hover{{background:var(--accent);color:#fff}}
 
-/* Hover tags — 300ms delay to avoid flicker on scroll */
-.hover-tags{{padding:0.4rem 1rem 0.6rem;gap:0.35rem;flex-wrap:wrap;display:flex;opacity:0;max-height:0;overflow:hidden;transition:opacity .2s ease .3s,max-height .2s ease .3s}}
-.card:hover .hover-tags{{opacity:1;max-height:200px}}
-.card.open .hover-tags{{opacity:0;max-height:0;transition:none}}
-.tag{{font-size:0.72rem;padding:0.15rem 0.5rem;border-radius:5px}}
-.tag-hit{{background:#dcfce7;color:#14532d;font-weight:500}}
+/* Hover checklist — full lines, 300ms delay */
+.hover-hits{{padding:0 1rem 0.5rem;opacity:0;max-height:0;overflow:hidden;transition:opacity .2s ease .3s,max-height .25s ease .3s}}
+.card:hover .hover-hits{{opacity:1;max-height:500px}}
+.card.open .hover-hits{{opacity:0;max-height:0;transition:none}}
+.hv-item{{font-size:0.82rem;color:#166534;padding:0.2rem 0;display:flex;align-items:flex-start;gap:0.3rem;line-height:1.5}}
+.hv-icon{{flex-shrink:0}}
 
-.card-snippet{{font-size:0.82rem;color:var(--text2);padding:0.3rem 1rem 0.6rem;line-height:1.55;border-top:1px solid var(--border);margin:0 0}}
+.card-snippet{{font-size:0.82rem;color:var(--text2);padding:0.3rem 1rem 0.6rem;line-height:1.55;border-top:1px solid var(--border)}}
+.snip-full{{display:none}}
+.card:hover .snip-short{{display:none}}
+.card:hover .snip-full{{display:inline}}
+.card.open .snip-short{{display:none}}
+.card.open .snip-full{{display:inline}}
 
 /* Detail panel (click to expand) */
 .detail-panel{{display:none;padding:0.5rem 1rem 1rem;border-top:1px solid var(--border)}}
@@ -324,11 +346,24 @@ body{{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
 
 <div class="bar">
   <div class="bar-title">Possible Matches</div>
-  <button class="fbtn" onclick="showAll(this)">All ({len(scoring_report)})</button>
-  <button class="fbtn on" onclick="showHits(this)">With Overlap ({len(hits_docs)})</button>
-  <button class="fbtn" onclick="showNone(this)">No Overlap ({len(no_hits_docs)})</button>
+  <div class="bar-actions">
+    <button class="fbtn" onclick="showAll(this)">All ({len(scoring_report)})</button>
+    <button class="fbtn on" onclick="showHits(this)">With Overlap ({len(hits_docs)})</button>
+    <button class="fbtn" onclick="showNone(this)">No Overlap ({len(no_hits_docs)})</button>
+    <div class="dropdown">
+      <button class="fbtn fbtn-accent" onclick="this.parentElement.classList.toggle('open')">Copy as MD &#x25BE;</button>
+      <div class="dropdown-menu">
+        <button onclick="copyReportMd('hits')">With Overlap ({len(hits_docs)})</button>
+        <button onclick="copyReportMd('all')">All Documents ({len(scoring_report)})</button>
+        <button onclick="copyReportMd('none')">No Overlap Only ({len(no_hits_docs)})</button>
+        <hr>
+        <button onclick="dlReportMd('hits')">Download With Overlap .md</button>
+        <button onclick="dlReportMd('all')">Download All .md</button>
+      </div>
+    </div>
+  </div>
 </div>
-<div class="bar-note">Hover for matched points &middot; Click to expand full evaluation &middot; MD to export Markdown</div>
+<div class="bar-note">Hover for matched points &middot; Click to expand full evaluation</div>
 
 <div id="hits">{hits_html}</div>
 <div id="nohits" style="display:none">{nohits_html}</div>
@@ -363,6 +398,44 @@ function setFilter(btn){{document.querySelectorAll('.fbtn').forEach(b=>b.classLi
 function showAll(b){{setFilter(b);document.getElementById('hits').style.display='';document.getElementById('nohits').style.display=''}}
 function showHits(b){{setFilter(b);document.getElementById('hits').style.display='';document.getElementById('nohits').style.display='none'}}
 function showNone(b){{setFilter(b);document.getElementById('hits').style.display='none';document.getElementById('nohits').style.display=''}}
+
+// Close dropdown on outside click
+document.addEventListener('click',e=>{{if(!e.target.closest('.dropdown'))document.querySelectorAll('.dropdown.open').forEach(d=>d.classList.remove('open'))}});
+
+function buildReportMd(mode){{
+  const cards=document.querySelectorAll(mode==='hits'?'#hits .card':mode==='none'?'#nohits .card':'#hits .card, #nohits .card');
+  let out='# Prior Art Search Report\\n\\n';
+  out+='| # | Title | Type | Match |\\n|---|-------|------|-------|\\n';
+  let idx=1;
+  cards.forEach(c=>{{
+    const t=c.querySelector('.card-title')?.textContent||'';
+    const tp=c.querySelector('.card-id')?.textContent||'';
+    const pct=c.querySelector('.hit-pct')?.textContent||c.querySelector('.no-badge')?.textContent||'0';
+    out+=`| ${{idx++}} | ${{t}} | ${{tp}} | ${{pct}} |\\n`;
+  }});
+  out+='\\n---\\n\\n';
+  idx=1;
+  cards.forEach(c=>{{
+    const raw=c.getAttribute('data-md')||'';
+    const decoded=raw.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#x27;/g,"'");
+    if(decoded)out+=decoded+'\\n\\n---\\n\\n';
+  }});
+  return out;
+}}
+function copyReportMd(mode){{
+  const text=buildReportMd(mode);
+  navigator.clipboard.writeText(text).then(()=>{{
+    const btn=event.target;btn.textContent='Copied!';setTimeout(()=>btn.textContent=btn.dataset.label||btn.textContent,1200);
+  }});
+  document.querySelectorAll('.dropdown.open').forEach(d=>d.classList.remove('open'));
+}}
+function dlReportMd(mode){{
+  const text=buildReportMd(mode);
+  const b=new Blob([text],{{type:'text/markdown'}});
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);
+  a.download=`prior-art-${{mode}}.md`;a.click();
+  document.querySelectorAll('.dropdown.open').forEach(d=>d.classList.remove('open'));
+}}
 
 document.addEventListener('keydown',e=>{{if(e.key==='Escape')closeMd()}});
 </script>
