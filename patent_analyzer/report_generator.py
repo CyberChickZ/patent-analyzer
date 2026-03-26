@@ -2,19 +2,26 @@
 """
 Generate a self-contained static HTML report from patent analysis results.
 
+UI design:
+- NO standalone checklist section — checklist lives inside match cards
+- Match cards: scrollable list, sorted by match count descending
+- Hover a card → show only MATCHED checklist items (green hits)
+- Click a card → expand to show ALL checklist items (hits + misses)
+- Click "Export" → Markdown modal with copy/download
+- Framing: "Possible Matches" for lawyer/staff review, NOT judgment
+
 Usage:
-    python3 generate_report.py --input results.json --output report.html
+    python3 report_generator.py --input results.json --output report.html
 """
 
 import argparse
 import json
-import html
-import sys
+import html as html_mod
 from datetime import datetime, timezone
 
 
 def escape(text: str) -> str:
-    return html.escape(str(text)) if text else ""
+    return html_mod.escape(str(text)) if text else ""
 
 
 def score_color(score: float) -> str:
@@ -22,17 +29,13 @@ def score_color(score: float) -> str:
         return "#ff3b30"
     if score > 0.4:
         return "#ff9500"
-    return "#34c759"
+    return "#0a84ff"
 
 
-def risk_level(score: float) -> tuple[str, str]:
-    if score > 0.7:
-        return "HIGH", "#ff3b30"
-    if score > 0.4:
-        return "MEDIUM", "#ff9500"
-    if score > 0.2:
-        return "LOW", "#34c759"
-    return "CLEAR", "#30d158"
+def match_count_label(hits: int, total: int) -> str:
+    if hits == 0:
+        return "No overlap detected"
+    return f"{hits}/{total} points matched"
 
 
 def generate_html(data: dict) -> str:
@@ -41,70 +44,87 @@ def generate_html(data: dict) -> str:
     search = data.get("search", {})
     evaluation = data.get("evaluation", {})
 
-    # IDCA info
     status = phase1.get("status", "unknown")
     doc_mode = phase1.get("doc_mode", "unknown")
     summary_text = phase1.get("summary", "No summary available.")
     invention_type = phase1.get("invention_type", "Unknown")
-    category_reasoning = phase1.get("reasoning", "")
 
-    # Checklist
     checklist = phase2.get("checklist", [])
-    atoms = phase2.get("delegation", {}).get("atoms", [])
-    groups = phase2.get("delegation", {}).get("groups", [])
-
-    # Search results
     search_groups = search.get("groups", [])
     total_patents = search.get("summary", {}).get("total_patents", 0)
     total_papers = search.get("summary", {}).get("total_papers", 0)
 
-    # Evaluation
     scoring_report = evaluation.get("scoring_report", [])
     overall_summary = evaluation.get("summary", "")
-    overall_reasoning = evaluation.get("reasoning", "")
-    agent_report = search_groups
-
-    # Risk
-    top_score = max((m.get("similarity_score", 0) or 0 for m in scoring_report), default=0)
-    risk, risk_color = risk_level(top_score)
 
     generated_at = data.get("generated_at", datetime.now(timezone.utc).isoformat())
 
-    # Build match cards HTML
+    # Count matches with >0 hits
+    docs_with_hits = [m for m in scoring_report if (m.get("similarity_score", 0) or 0) > 0]
+
+    # Build match cards — each card has hover (hits only) + click (expand all)
     match_cards_html = ""
     for i, m in enumerate(scoring_report):
         title = escape(m.get("title", "Unknown"))
         mid = escape(m.get("id", ""))
         mtype = escape(m.get("manuscript_type", "Document"))
         score_num = m.get("similarity_score", 0) or 0
-        s_color = score_color(score_num)
         snippet = escape(m.get("snippet", ""))
         url = m.get("url", "")
 
         evals = m.get("similarity_categories", m.get("evaluations", {}))
-        evals_html = ""
+
+        # Separate matched vs unmatched
+        matched_items = []
+        unmatched_items = []
         md_lines = []
+        total_items = len(evals) if evals else len(checklist)
+        hit_count = 0
+
         if evals:
-            evals_html = '<div class="eval-list">'
             for req, ev in evals.items():
                 is_match = ev.get("match", False) if isinstance(ev, dict) else False
-                icon = "&#x2705;" if is_match else "&#x274C;"
-                icon_class = "eval-true" if is_match else "eval-false"
                 analysis = escape(ev.get("analysis", "")) if isinstance(ev, dict) else ""
-                evals_html += f'''
-                <div class="eval-item">
-                  <div class="eval-req"><span class="{icon_class}">{icon}</span> {escape(req)}</div>
-                  {f'<div class="eval-analysis">{analysis}</div>' if analysis else ''}
-                </div>'''
+                if is_match:
+                    hit_count += 1
+                    matched_items.append((req, analysis))
+                else:
+                    unmatched_items.append((req, analysis))
                 md_status = "MATCH" if is_match else "NO MATCH"
                 md_lines.append(f"- [{md_status}] **{escape(req)}**: {analysis}")
-            evals_html += "</div>"
 
-        # Build markdown for this match
+        s_color = score_color(score_num)
+
+        # Hover zone: only matched items
+        hover_html = ""
+        if matched_items:
+            hover_html = '<div class="hover-hits">'
+            for req, analysis in matched_items:
+                hover_html += f'<div class="hit-item"><span class="hit-icon">&#x2705;</span> {escape(req)}'
+                if analysis:
+                    hover_html += f'<div class="hit-analysis">{analysis}</div>'
+                hover_html += '</div>'
+            hover_html += '</div>'
+
+        # Expanded zone: ALL items (shown on click)
+        expanded_html = '<div class="expanded-evals">'
+        for req, analysis in matched_items:
+            expanded_html += f'<div class="eval-item"><span class="eval-true">&#x2705;</span> {escape(req)}'
+            if analysis:
+                expanded_html += f'<div class="eval-analysis">{analysis}</div>'
+            expanded_html += '</div>'
+        for req, analysis in unmatched_items:
+            expanded_html += f'<div class="eval-item"><span class="eval-false">&#x274C;</span> {escape(req)}'
+            if analysis:
+                expanded_html += f'<div class="eval-analysis">{analysis}</div>'
+            expanded_html += '</div>'
+        expanded_html += '</div>'
+
+        # Markdown for export
         md_content = f"""# {title}
 - **ID**: {mid}
 - **Type**: {mtype}
-- **Score**: {score_num:.0%}
+- **Matched Points**: {hit_count}/{total_items}
 {f'- **URL**: {url}' if url else ''}
 {f'- **Snippet**: {snippet}' if snippet else ''}
 
@@ -113,29 +133,33 @@ def generate_html(data: dict) -> str:
 
         md_escaped = escape(md_content).replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
 
+        # Card visibility class
+        card_class = "match-card has-hits" if hit_count > 0 else "match-card no-hits"
+
         match_cards_html += f'''
-        <div class="match-card" onclick="showMarkdown(this)" data-md="{md_escaped}">
-          <div class="mc-header">
+        <div class="{card_class}" data-hits="{hit_count}" data-md="{md_escaped}">
+          <div class="mc-header" onclick="toggleCard(this.parentElement)">
             <div class="mc-title-row">
               <div class="mc-title" title="{title}">{title}</div>
-              <div class="mc-score" style="color:{s_color}">{score_num:.0%} Match</div>
+              <div class="mc-hits" style="color:{s_color}">{match_count_label(hit_count, total_items)}</div>
             </div>
             <div class="mc-meta">
               <span class="mc-badge">{mtype}</span>
               <span class="mc-id">{mid}</span>
               {f'<a class="mc-link" href="{escape(url)}" target="_blank" onclick="event.stopPropagation()">View PDF</a>' if url else ''}
+              <button class="mc-export" onclick="event.stopPropagation(); showMarkdown(this.closest(\'.match-card\'))">Export MD</button>
             </div>
           </div>
           {f'<div class="mc-snippet">&ldquo;{snippet}&rdquo;</div>' if snippet else ''}
-          {evals_html}
+          {hover_html}
+          {expanded_html}
         </div>'''
 
-    # Build agent report cards
+    # Search summary cards
     agent_cards_html = ""
-    for ar in agent_report:
+    for ar in search_groups:
         gid = escape(ar.get("group_id", ""))
         label = escape(ar.get("label", ""))
-        excerpt_text = escape(ar.get("excerpt", ""))
         pq = escape(ar.get("patent_query", ""))
         pm = ar.get("patent_matches_found", 0)
         sq = escape(ar.get("paper_query", ""))
@@ -145,270 +169,153 @@ def generate_html(data: dict) -> str:
         <div class="ar-card">
           <div class="ar-card-header"><span class="ar-group-id">{gid}</span></div>
           {f'<div class="ar-label">{label}</div>' if label else ''}
-          {f'<div class="ar-excerpt">&ldquo;{excerpt_text}&rdquo;</div>' if excerpt_text else ''}
-          {f'''<div class="ar-query-section">
-            <div class="ar-query-title">Patent Query <span>{pm} matches</span></div>
-            <div class="ar-query-text">{pq}</div>
-          </div>''' if pq else ''}
-          {f'''<div class="ar-query-section">
-            <div class="ar-query-title">Paper Query <span>{sm} matches</span></div>
-            <div class="ar-query-text">{sq}</div>
-          </div>''' if sq else ''}
+          {f'<div class="ar-query-section"><div class="ar-query-title">Patent <span>{pm}</span></div><div class="ar-query-text">{pq}</div></div>' if pq else ''}
+          {f'<div class="ar-query-section"><div class="ar-query-title">Scholar <span>{sm}</span></div><div class="ar-query-text">{sq}</div></div>' if sq else ''}
         </div>'''
-
-    # Atoms table
-    atoms_html = ""
-    if atoms:
-        atoms_html = '<table class="atoms-table"><thead><tr><th>ID</th><th>Name</th><th>Core</th><th>Distinct</th><th>Keywords</th></tr></thead><tbody>'
-        for atom in atoms:
-            kws = ", ".join(atom.get("keywords", [])[:6])
-            atoms_html += f'''<tr>
-              <td>{escape(atom.get("id",""))}</td>
-              <td>{escape(atom.get("name",""))}</td>
-              <td>{atom.get("core_score",0):.2f}</td>
-              <td>{atom.get("distinctiveness_score",0):.2f}</td>
-              <td class="kw-cell">{escape(kws)}</td>
-            </tr>'''
-        atoms_html += "</tbody></table>"
-
-    # Checklist HTML
-    checklist_html = ""
-    if checklist:
-        checklist_html = '<ol class="checklist-list">'
-        for item in checklist:
-            checklist_html += f"<li>{escape(item)}</li>"
-        checklist_html += "</ol>"
 
     return f'''<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Patent Analysis Report</title>
+<title>Prior Art Search Report</title>
 <style>
 :root {{
-  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
   line-height: 1.5;
-  --bg: #0b0e13;
-  --card: #0f141c;
-  --border: #1b2533;
-  --text: #e7eef7;
-  --text2: #8899aa;
-  --accent: #0a84ff;
+  --bg: #0b0e13; --card: #0f141c; --border: #1b2533;
+  --text: #e7eef7; --text2: #8899aa; --accent: #0a84ff;
+  --hit: #34c759; --miss: #48505a;
 }}
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
 body {{ background: var(--bg); color: var(--text); padding: 2rem; }}
 .container {{ max-width: 1100px; margin: 0 auto; }}
 
-/* Header */
-.report-header {{
-  text-align: center; padding: 2rem 0; border-bottom: 1px solid var(--border); margin-bottom: 2rem;
-}}
-.report-header h1 {{ font-size: 1.8rem; font-weight: 700; margin-bottom: 0.5rem; }}
-.report-header .meta {{ color: var(--text2); font-size: 0.85rem; }}
-
-/* Pills */
-.pill-row {{ display: flex; gap: 0.75rem; flex-wrap: wrap; justify-content: center; margin: 1rem 0; }}
-.pill {{
-  display: inline-flex; align-items: center; gap: 0.4rem;
-  padding: 0.35rem 0.9rem; border-radius: 99px;
-  background: #1a2233; font-size: 0.82rem; color: var(--text2);
-}}
+.report-header {{ text-align: center; padding: 2rem 0; border-bottom: 1px solid var(--border); margin-bottom: 2rem; }}
+.report-header h1 {{ font-size: 1.6rem; font-weight: 700; margin-bottom: 0.3rem; }}
+.report-header .subtitle {{ color: var(--text2); font-size: 0.9rem; margin-bottom: 1rem; }}
+.pill-row {{ display: flex; gap: 0.75rem; flex-wrap: wrap; justify-content: center; margin: 0.75rem 0; }}
+.pill {{ display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.3rem 0.8rem; border-radius: 99px; background: #1a2233; font-size: 0.8rem; color: var(--text2); }}
 .pill strong {{ color: var(--text); }}
 
-/* Sections */
-.section {{
-  margin: 1.5rem 0; padding: 1.25rem; border: 1px solid var(--border);
-  border-radius: 12px; background: var(--card);
-}}
-.section-title {{
-  font-size: 1.1rem; font-weight: 600; margin-bottom: 1rem;
-  padding-bottom: 0.5rem; border-bottom: 1px solid var(--border);
-}}
-.section-body {{ font-size: 0.92rem; color: var(--text2); line-height: 1.65; }}
-.section-body p {{ margin-bottom: 0.75rem; }}
-
-/* Summary */
-.exec-text {{ font-size: 0.95rem; color: var(--text); }}
-.exec-reasoning {{ margin-top: 0.75rem; padding: 0.75rem; background: #111822; border-radius: 8px; font-size: 0.88rem; }}
-
-/* Agent report grid */
-.ar-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 1rem; }}
-.ar-card {{
-  border: 1px solid var(--border); border-radius: 10px; padding: 1rem;
-  background: #111822; transition: border-color 0.2s;
-}}
-.ar-card:hover {{ border-color: var(--accent); }}
-.ar-card-header {{ margin-bottom: 0.5rem; }}
-.ar-group-id {{ font-weight: 600; color: var(--accent); }}
-.ar-label {{ font-size: 0.88rem; color: var(--text); margin-bottom: 0.4rem; }}
-.ar-excerpt {{ font-size: 0.82rem; color: var(--text2); font-style: italic; margin-bottom: 0.75rem; }}
-.ar-query-section {{ margin-top: 0.5rem; }}
-.ar-query-title {{
-  font-size: 0.78rem; font-weight: 600; color: var(--text2); text-transform: uppercase;
-  display: flex; justify-content: space-between;
-}}
-.ar-query-title span {{ color: var(--accent); }}
-.ar-query-text {{
-  font-size: 0.82rem; padding: 0.4rem 0.6rem; background: #0b0e13;
-  border-radius: 6px; margin-top: 0.25rem; font-family: "SF Mono", Monaco, monospace;
-  word-break: break-all;
-}}
-
-/* Match cards */
-.matches-header {{ font-size: 1.1rem; font-weight: 600; margin: 1.5rem 0 1rem; }}
-.match-card {{
-  border: 1px solid var(--border); border-radius: 12px; padding: 1rem;
-  background: var(--card); margin-bottom: 1rem; cursor: pointer;
-  transition: border-color 0.2s, box-shadow 0.2s;
-}}
-.match-card:hover {{ border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }}
-.mc-header {{ margin-bottom: 0.5rem; }}
-.mc-title-row {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }}
-.mc-title {{ font-weight: 600; font-size: 0.95rem; flex: 1; }}
-.mc-score {{ font-weight: 700; font-size: 0.95rem; white-space: nowrap; }}
-.mc-meta {{ display: flex; gap: 0.6rem; align-items: center; margin-top: 0.35rem; flex-wrap: wrap; }}
-.mc-badge {{
-  display: inline-block; padding: 0.15rem 0.5rem; border-radius: 6px;
-  background: #1a2233; font-size: 0.75rem; color: var(--text2);
-}}
-.mc-id {{ font-size: 0.78rem; color: var(--text2); font-family: "SF Mono", Monaco, monospace; }}
-.mc-link {{ font-size: 0.78rem; color: var(--accent); text-decoration: none; }}
-.mc-link:hover {{ text-decoration: underline; }}
-.mc-snippet {{
-  font-size: 0.85rem; color: var(--text2); font-style: italic;
-  margin: 0.5rem 0; padding: 0.5rem 0.75rem; background: #111822; border-radius: 8px;
-}}
-
-/* Evaluation items */
-.eval-list {{ margin-top: 0.75rem; }}
-.eval-item {{ padding: 0.4rem 0; border-top: 1px solid #1a2233; }}
-.eval-item:first-child {{ border-top: none; }}
-.eval-req {{ font-size: 0.85rem; display: flex; align-items: flex-start; gap: 0.4rem; }}
-.eval-true {{ color: #34c759; }}
-.eval-false {{ color: #ff3b30; }}
-.eval-analysis {{ font-size: 0.8rem; color: var(--text2); margin-left: 1.6rem; margin-top: 0.15rem; }}
-
-/* Atoms table */
-.atoms-table {{
-  width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.5rem;
-}}
-.atoms-table th {{
-  text-align: left; padding: 0.5rem; border-bottom: 2px solid var(--border);
-  color: var(--text2); font-size: 0.78rem; text-transform: uppercase;
-}}
-.atoms-table td {{ padding: 0.5rem; border-bottom: 1px solid var(--border); }}
-.kw-cell {{ font-size: 0.8rem; color: var(--text2); }}
-
-/* Checklist */
-.checklist-list {{ padding-left: 1.5rem; }}
-.checklist-list li {{ margin-bottom: 0.4rem; font-size: 0.88rem; }}
-
-/* Modal */
-.modal-overlay {{
-  display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7);
-  z-index: 1000; justify-content: center; align-items: center; padding: 2rem;
-}}
-.modal-overlay.active {{ display: flex; }}
-.modal-content {{
-  background: var(--card); border: 1px solid var(--border); border-radius: 16px;
-  padding: 1.5rem; max-width: 800px; width: 100%; max-height: 80vh; overflow-y: auto;
-  position: relative;
-}}
-.modal-close {{
-  position: absolute; top: 1rem; right: 1rem; background: none; border: none;
-  color: var(--text2); cursor: pointer; font-size: 1.2rem;
-}}
-.modal-close:hover {{ color: var(--text); }}
-.modal-actions {{ display: flex; gap: 0.75rem; margin-bottom: 1rem; }}
-.modal-btn {{
-  padding: 0.4rem 1rem; border-radius: 8px; border: 1px solid var(--border);
-  background: #1a2233; color: var(--text); cursor: pointer; font-size: 0.85rem;
-}}
-.modal-btn:hover {{ background: var(--accent); border-color: var(--accent); }}
-.modal-md {{
-  white-space: pre-wrap; font-family: "SF Mono", Monaco, Consolas, monospace;
-  font-size: 0.85rem; line-height: 1.6; color: var(--text2);
-  padding: 1rem; background: #0b0e13; border-radius: 8px;
-}}
-
-/* Collapsible */
-.collapsible-header {{
-  cursor: pointer; display: flex; align-items: center; gap: 0.5rem;
-}}
-.collapsible-header::before {{ content: "\\25B6"; font-size: 0.7rem; transition: transform 0.2s; }}
+.section {{ margin: 1.5rem 0; padding: 1.25rem; border: 1px solid var(--border); border-radius: 12px; background: var(--card); }}
+.section-title {{ font-size: 1.05rem; font-weight: 600; margin-bottom: 0.75rem; padding-bottom: 0.4rem; border-bottom: 1px solid var(--border); }}
+.section-body {{ font-size: 0.9rem; color: var(--text2); line-height: 1.65; }}
+.collapsible-header {{ cursor: pointer; display: flex; align-items: center; gap: 0.5rem; }}
+.collapsible-header::before {{ content: "\\25B6"; font-size: 0.65rem; transition: transform 0.2s; }}
 .collapsible-header.open::before {{ transform: rotate(90deg); }}
 .collapsible-body {{ display: none; margin-top: 0.75rem; }}
 .collapsible-body.open {{ display: block; }}
 
-/* Risk badge */
-.risk-badge {{
-  display: inline-block; padding: 0.3rem 1rem; border-radius: 99px;
-  font-weight: 700; font-size: 0.9rem; letter-spacing: 0.05em;
+.ar-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0.75rem; }}
+.ar-card {{ border: 1px solid var(--border); border-radius: 10px; padding: 0.75rem; background: #111822; }}
+.ar-group-id {{ font-weight: 600; color: var(--accent); font-size: 0.85rem; }}
+.ar-label {{ font-size: 0.82rem; color: var(--text); margin: 0.3rem 0; }}
+.ar-query-section {{ margin-top: 0.4rem; }}
+.ar-query-title {{ font-size: 0.72rem; font-weight: 600; color: var(--text2); text-transform: uppercase; display: flex; justify-content: space-between; }}
+.ar-query-title span {{ color: var(--accent); }}
+.ar-query-text {{ font-size: 0.78rem; padding: 0.3rem 0.5rem; background: #0b0e13; border-radius: 5px; margin-top: 0.2rem; font-family: "SF Mono", Monaco, monospace; word-break: break-all; }}
+
+/* ========== Match Cards ========== */
+.matches-header {{ font-size: 1.05rem; font-weight: 600; margin: 1.5rem 0 0.5rem; }}
+.matches-note {{ font-size: 0.82rem; color: var(--text2); margin-bottom: 1rem; }}
+
+.match-card {{
+  border: 1px solid var(--border); border-radius: 12px; padding: 1rem;
+  background: var(--card); margin-bottom: 0.75rem; transition: border-color 0.2s;
 }}
+.match-card.has-hits {{ border-left: 3px solid var(--accent); }}
+.match-card:hover {{ border-color: var(--accent); }}
+
+.mc-header {{ cursor: pointer; }}
+.mc-title-row {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; }}
+.mc-title {{ font-weight: 600; font-size: 0.92rem; flex: 1; }}
+.mc-hits {{ font-weight: 600; font-size: 0.85rem; white-space: nowrap; }}
+.mc-meta {{ display: flex; gap: 0.5rem; align-items: center; margin-top: 0.3rem; flex-wrap: wrap; }}
+.mc-badge {{ padding: 0.12rem 0.45rem; border-radius: 5px; background: #1a2233; font-size: 0.72rem; color: var(--text2); }}
+.mc-id {{ font-size: 0.75rem; color: var(--text2); font-family: "SF Mono", Monaco, monospace; }}
+.mc-link {{ font-size: 0.75rem; color: var(--accent); text-decoration: none; }}
+.mc-export {{ font-size: 0.72rem; color: var(--accent); background: none; border: 1px solid var(--accent); border-radius: 5px; padding: 0.1rem 0.5rem; cursor: pointer; }}
+.mc-export:hover {{ background: var(--accent); color: #fff; }}
+.mc-snippet {{ font-size: 0.82rem; color: var(--text2); font-style: italic; margin: 0.4rem 0; padding: 0.4rem 0.6rem; background: #111822; border-radius: 6px; }}
+
+/* Hover zone: only matched items, visible on hover */
+.hover-hits {{ display: none; margin-top: 0.6rem; padding: 0.5rem; background: #111822; border-radius: 8px; border-left: 2px solid var(--hit); }}
+.match-card:hover .hover-hits {{ display: block; }}
+.match-card.expanded .hover-hits {{ display: none; }}
+.hit-item {{ padding: 0.25rem 0; font-size: 0.82rem; display: flex; align-items: flex-start; gap: 0.3rem; }}
+.hit-icon {{ color: var(--hit); flex-shrink: 0; }}
+.hit-analysis {{ font-size: 0.78rem; color: var(--text2); margin-left: 1.4rem; }}
+
+/* Expanded zone: ALL items, visible on click */
+.expanded-evals {{ display: none; margin-top: 0.6rem; }}
+.match-card.expanded .expanded-evals {{ display: block; }}
+.eval-item {{ padding: 0.3rem 0; font-size: 0.82rem; display: flex; align-items: flex-start; gap: 0.3rem; border-top: 1px solid #1a2233; }}
+.eval-item:first-child {{ border-top: none; }}
+.eval-true {{ color: var(--hit); flex-shrink: 0; }}
+.eval-false {{ color: var(--miss); flex-shrink: 0; }}
+.eval-analysis {{ font-size: 0.78rem; color: var(--text2); margin-left: 1.4rem; margin-top: 0.1rem; }}
+
+/* Filter controls */
+.filter-bar {{ display: flex; gap: 0.75rem; align-items: center; margin-bottom: 1rem; flex-wrap: wrap; }}
+.filter-btn {{ padding: 0.3rem 0.8rem; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text2); cursor: pointer; font-size: 0.82rem; }}
+.filter-btn.active {{ background: var(--accent); border-color: var(--accent); color: #fff; }}
+
+/* Modal */
+.modal-overlay {{ display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 1000; justify-content: center; align-items: center; padding: 2rem; }}
+.modal-overlay.active {{ display: flex; }}
+.modal-content {{ background: var(--card); border: 1px solid var(--border); border-radius: 16px; padding: 1.5rem; max-width: 800px; width: 100%; max-height: 80vh; overflow-y: auto; position: relative; }}
+.modal-close {{ position: absolute; top: 1rem; right: 1rem; background: none; border: none; color: var(--text2); cursor: pointer; font-size: 1.2rem; }}
+.modal-actions {{ display: flex; gap: 0.75rem; margin-bottom: 1rem; }}
+.modal-btn {{ padding: 0.4rem 1rem; border-radius: 8px; border: 1px solid var(--border); background: #1a2233; color: var(--text); cursor: pointer; font-size: 0.85rem; }}
+.modal-btn:hover {{ background: var(--accent); border-color: var(--accent); }}
+.modal-md {{ white-space: pre-wrap; font-family: "SF Mono", Monaco, monospace; font-size: 0.82rem; line-height: 1.6; color: var(--text2); padding: 1rem; background: #0b0e13; border-radius: 8px; }}
 </style>
 </head>
 <body>
 <div class="container">
 
-  <!-- Header -->
   <div class="report-header">
-    <h1>Patent Novelty Analysis Report</h1>
-    <div class="meta">Generated: {escape(generated_at)}</div>
+    <h1>Prior Art Search Report</h1>
+    <div class="subtitle">Possible matches for attorney/staff review &mdash; not a legal determination</div>
     <div class="pill-row">
-      <span class="pill">Status: <strong>{escape(status.upper())}</strong></span>
       <span class="pill">Type: <strong>{escape(doc_mode)}</strong></span>
       <span class="pill">Category: <strong>{escape(invention_type)}</strong></span>
-      <span class="pill">Prior Art: <strong>{total_patents} patents, {total_papers} papers</strong></span>
-      <span class="risk-badge" style="background:{risk_color}22;color:{risk_color}">Risk: {risk}</span>
+      <span class="pill">Searched: <strong>{total_patents} patents, {total_papers} papers</strong></span>
+      <span class="pill">Candidates: <strong>{len(docs_with_hits)} with overlap</strong></span>
     </div>
   </div>
 
-  <!-- Executive Summary -->
   <div class="section">
-    <div class="section-title">Executive Summary</div>
-    <div class="section-body">
-      <p class="exec-text">{escape(overall_summary) if overall_summary else escape(summary_text)}</p>
-      {f'<div class="exec-reasoning"><strong>Reasoning:</strong> {escape(overall_reasoning)}</div>' if overall_reasoning else ''}
-      {f'<div class="exec-reasoning" style="margin-top:0.5rem"><strong>Category Reasoning:</strong> {escape(category_reasoning)}</div>' if category_reasoning else ''}
-    </div>
+    <div class="section-title">Invention Summary</div>
+    <div class="section-body"><p>{escape(summary_text)}</p></div>
   </div>
 
-  <!-- Invention Summary -->
-  <div class="section">
-    <div class="section-title collapsible-header" onclick="toggleCollapse(this)">Invention Summary</div>
-    <div class="collapsible-body">
-      <div class="section-body"><p>{escape(summary_text)}</p></div>
-    </div>
-  </div>
-
-  <!-- Checklist -->
-  <div class="section">
-    <div class="section-title collapsible-header" onclick="toggleCollapse(this)">Evaluation Checklist ({len(checklist)} items)</div>
-    <div class="collapsible-body">
-      {checklist_html}
-    </div>
-  </div>
-
-  <!-- Atoms -->
   {f"""<div class="section">
-    <div class="section-title collapsible-header" onclick="toggleCollapse(this)">Atomic Components ({len(atoms)} atoms)</div>
-    <div class="collapsible-body">{atoms_html}</div>
-  </div>""" if atoms else ""}
+    <div class="section-title">Search Overview</div>
+    <div class="section-body"><p>{escape(overall_summary)}</p></div>
+  </div>""" if overall_summary else ""}
 
-  <!-- Subagent Search Summary -->
   {f"""<div class="section">
-    <div class="section-title">Search Summary</div>
-    <div class="ar-grid">{agent_cards_html}</div>
+    <div class="section-title collapsible-header" onclick="toggleCollapse(this)">Search Groups ({len(search_groups)})</div>
+    <div class="collapsible-body"><div class="ar-grid">{agent_cards_html}</div></div>
   </div>""" if agent_cards_html else ""}
 
-  <!-- Prior Art Matches -->
-  {f"""<div class="matches-header">Prior Art Matches ({len(scoring_report)} evaluated)</div>
-  {match_cards_html}""" if scoring_report else '<div class="section"><div class="section-body">No prior art matches evaluated.</div></div>'}
+  <div class="matches-header">Possible Matches ({len(scoring_report)} evaluated, {len(docs_with_hits)} with overlap)</div>
+  <div class="matches-note">Hover to see matched points. Click to expand full evaluation. These are candidates for professional review.</div>
+
+  <div class="filter-bar">
+    <button class="filter-btn active" onclick="filterCards('all', this)">All ({len(scoring_report)})</button>
+    <button class="filter-btn" onclick="filterCards('hits', this)">With Overlap ({len(docs_with_hits)})</button>
+    <button class="filter-btn" onclick="filterCards('none', this)">No Overlap ({len(scoring_report) - len(docs_with_hits)})</button>
+  </div>
+
+  <div id="cardContainer">
+    {match_cards_html}
+  </div>
 
 </div>
 
-<!-- Markdown Modal -->
 <div class="modal-overlay" id="mdModal" onclick="if(event.target===this)closeModal()">
   <div class="modal-content">
     <button class="modal-close" onclick="closeModal()">&times;</button>
@@ -423,6 +330,10 @@ body {{ background: var(--bg); color: var(--text); padding: 2rem; }}
 <script>
 let currentMd = '';
 
+function toggleCard(card) {{
+  card.classList.toggle('expanded');
+}}
+
 function showMarkdown(card) {{
   const raw = card.getAttribute('data-md');
   currentMd = raw.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#x27;/g,"'");
@@ -430,15 +341,12 @@ function showMarkdown(card) {{
   document.getElementById('mdModal').classList.add('active');
 }}
 
-function closeModal() {{
-  document.getElementById('mdModal').classList.remove('active');
-}}
+function closeModal() {{ document.getElementById('mdModal').classList.remove('active'); }}
 
 function copyMarkdown() {{
   navigator.clipboard.writeText(currentMd).then(() => {{
-    const btn = event.target;
-    btn.textContent = 'Copied!';
-    setTimeout(() => btn.textContent = 'Copy Markdown', 1500);
+    event.target.textContent = 'Copied!';
+    setTimeout(() => event.target.textContent = 'Copy Markdown', 1500);
   }});
 }}
 
@@ -452,13 +360,22 @@ function downloadMarkdown() {{
 
 function toggleCollapse(header) {{
   header.classList.toggle('open');
-  const body = header.nextElementSibling;
-  body.classList.toggle('open');
+  header.nextElementSibling.classList.toggle('open');
+}}
+
+function filterCards(mode, btn) {{
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.match-card').forEach(card => {{
+    const hits = parseInt(card.getAttribute('data-hits') || '0');
+    if (mode === 'all') card.style.display = '';
+    else if (mode === 'hits') card.style.display = hits > 0 ? '' : 'none';
+    else card.style.display = hits === 0 ? '' : 'none';
+  }});
 }}
 
 document.addEventListener('keydown', e => {{ if (e.key === 'Escape') closeModal(); }});
 </script>
-
 </body>
 </html>'''
 
