@@ -21,6 +21,18 @@ def esc(text: str) -> str:
     return html_mod.escape(str(text)) if text else ""
 
 
+def score_color(score: float) -> str:
+    if score > 0.7:
+        return "#dc2626"
+    if score > 0.4:
+        return "#ea580c"
+    if score > 0.2:
+        return "#d97706"
+    if score > 0:
+        return "#2563eb"
+    return "#9ca3af"
+
+
 def shorten_checklist(item: str, max_len: int = 60) -> str:
     """Shorten a checklist item to a readable tag."""
     # Remove common prefixes
@@ -80,6 +92,7 @@ def generate_html(data: dict) -> str:
 
         hit_count = len(matched)
         total = len(evals) if evals else len(checklist)
+        score_num = hit_count / total if total > 0 else 0
 
         # Tags for hover (short labels, green)
         tags_html = ""
@@ -129,7 +142,7 @@ def generate_html(data: dict) -> str:
       </div>
     </div>
     <div class="card-right">
-      {f'<span class="hit-badge">{hit_count}/{total}</span>' if hit_count > 0 else '<span class="no-badge">0</span>'}
+      {f'<span class="hit-pct" style="color:{score_color(score_num)}">{score_num:.0%}</span>' if hit_count > 0 else '<span class="no-badge">&mdash;</span>'}
       {f'<a class="pdf-link" href="{esc(url)}" target="_blank" onclick="event.stopPropagation()">PDF</a>' if url else ''}
       <button class="md-btn" onclick="event.stopPropagation();showMd(this.closest(\'.card\'))">MD</button>
     </div>
@@ -217,16 +230,17 @@ body{{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
 .card-title{{font-size:0.88rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .card-id{{font-size:0.72rem;color:var(--text2);font-family:"SF Mono",Monaco,monospace}}
 .card-right{{display:flex;align-items:center;gap:0.5rem;flex-shrink:0}}
-.hit-badge{{background:var(--accent);color:#fff;font-size:0.72rem;font-weight:700;padding:0.15rem 0.55rem;border-radius:6px}}
-.no-badge{{color:var(--miss);font-size:0.72rem}}
+.hit-pct{{font-size:0.88rem;font-weight:700}}
+.no-badge{{color:var(--miss);font-size:0.78rem}}
 .pdf-link{{font-size:0.72rem;color:var(--accent);text-decoration:none}}
-.md-btn{{font-size:0.68rem;color:var(--accent);background:none;border:1px solid var(--accent);border-radius:5px;padding:0.1rem 0.4rem;cursor:pointer}}
+.md-btn{{font-size:0.68rem;color:var(--accent);background:none;border:1px solid var(--accent);border-radius:5px;padding:0.1rem 0.4rem;cursor:pointer;opacity:0;transition:opacity .15s}}
+.card:hover .md-btn{{opacity:1}}
 .md-btn:hover{{background:var(--accent);color:#fff}}
 
-/* Hover tags */
-.hover-tags{{display:none;padding:0.4rem 1rem 0.6rem;gap:0.35rem;flex-wrap:wrap}}
-.card:hover .hover-tags{{display:flex}}
-.card.open .hover-tags{{display:none}}
+/* Hover tags — 300ms delay to avoid flicker on scroll */
+.hover-tags{{padding:0.4rem 1rem 0.6rem;gap:0.35rem;flex-wrap:wrap;display:flex;opacity:0;max-height:0;overflow:hidden;transition:opacity .2s ease .3s,max-height .2s ease .3s}}
+.card:hover .hover-tags{{opacity:1;max-height:200px}}
+.card.open .hover-tags{{opacity:0;max-height:0;transition:none}}
 .tag{{font-size:0.72rem;padding:0.15rem 0.5rem;border-radius:5px}}
 .tag-hit{{background:#dcfce7;color:#166534}}
 
