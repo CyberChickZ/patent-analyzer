@@ -33,6 +33,32 @@ def score_color(score: float) -> str:
     return "#9ca3af"
 
 
+def format_summary(text: str) -> str:
+    """Split numbered items like (1)...(2)... into an HTML list for readability."""
+    # Check if text contains numbered items like (1)...(2)...
+    parts = re.split(r'\s*\((\d+)\)\s*', text)
+    if len(parts) < 3:
+        # No numbered items, just split on semicolons or periods for paragraphs
+        sentences = re.split(r'(?<=[.;])\s+', text)
+        if len(sentences) > 3:
+            return '<ul class="sum-list">' + ''.join(f'<li>{esc(s.strip())}</li>' for s in sentences if s.strip()) + '</ul>'
+        return f'<p>{esc(text)}</p>'
+
+    # parts = [preamble, "1", text1, "2", text2, ...]
+    preamble = parts[0].strip().rstrip(':;,')
+    items_html = '<ul class="sum-list">'
+    for i in range(1, len(parts) - 1, 2):
+        num = parts[i]
+        item_text = parts[i + 1].strip().rstrip(';,')
+        if item_text:
+            items_html += f'<li>{esc(item_text)}</li>'
+    items_html += '</ul>'
+
+    if preamble:
+        return f'<p>{esc(preamble)}:</p>{items_html}'
+    return items_html
+
+
 def shorten_checklist(item: str, max_len: int = 60) -> str:
     """Shorten a checklist item to a readable tag."""
     # Remove common prefixes
@@ -138,7 +164,7 @@ def generate_html(data: dict) -> str:
       <span class="type-dot {'dot-patent' if badge_type == 'Patent' else 'dot-paper'}"></span>
       <div>
         <div class="card-title">{title}</div>
-        <div class="card-id">{esc(badge_type)} &middot; {mid}</div>
+        <div class="card-id">{esc(badge_type)}{f' &middot; {mid}' if badge_type == 'Patent' and mid and not mid.startswith(('_', 'x', 'X')) and len(mid) < 20 else ''}</div>
       </div>
     </div>
     <div class="card-right">
@@ -148,7 +174,7 @@ def generate_html(data: dict) -> str:
     </div>
   </div>
   {tags_html}
-  {f'<div class="card-snippet">{snippet}</div>' if snippet and hit_count > 0 else ''}
+  {f'<div class="card-snippet">{snippet}</div>' if snippet else ''}
   {detail_html}
 </div>'''
 
@@ -177,7 +203,7 @@ def generate_html(data: dict) -> str:
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
 :root{{
-  --bg:#f7f8fa;--card:#fff;--border:#e2e6ec;--text:#1a1d23;--text2:#6b7280;
+  --bg:#f7f8fa;--card:#fff;--border:#e2e6ec;--text:#111318;--text2:#4b5563;
   --accent:#2563eb;--hit:#16a34a;--miss:#9ca3af;--patent:#8b5cf6;--paper:#0ea5e9;
   font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif;
 }}
@@ -196,6 +222,9 @@ body{{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
 .sec{{margin:1.5rem 0;padding:1rem 1.25rem;border:1px solid var(--border);border-radius:10px;background:var(--card)}}
 .sec-t{{font-size:0.95rem;font-weight:600;margin-bottom:0.5rem}}
 .sec-b{{font-size:0.88rem;color:var(--text2);line-height:1.7}}
+.sec-b p{{margin-bottom:0.5rem}}
+.sum-list{{padding-left:1.3rem;margin:0.4rem 0}}
+.sum-list li{{margin-bottom:0.35rem;line-height:1.65;color:var(--text)}}
 .tog{{cursor:pointer;user-select:none}}
 .tog::before{{content:'\\25B8';margin-right:0.4rem;font-size:0.7rem;display:inline-block;transition:transform .15s}}
 .tog.open::before{{transform:rotate(90deg)}}
@@ -242,9 +271,9 @@ body{{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
 .card:hover .hover-tags{{opacity:1;max-height:200px}}
 .card.open .hover-tags{{opacity:0;max-height:0;transition:none}}
 .tag{{font-size:0.72rem;padding:0.15rem 0.5rem;border-radius:5px}}
-.tag-hit{{background:#dcfce7;color:#166534}}
+.tag-hit{{background:#dcfce7;color:#14532d;font-weight:500}}
 
-.card-snippet{{font-size:0.8rem;color:var(--text2);padding:0 1rem 0.6rem;font-style:italic;line-height:1.5}}
+.card-snippet{{font-size:0.82rem;color:var(--text2);padding:0.3rem 1rem 0.6rem;line-height:1.55;border-top:1px solid var(--border);margin:0 0}}
 
 /* Detail panel (click to expand) */
 .detail-panel{{display:none;padding:0.5rem 1rem 1rem;border-top:1px solid var(--border)}}
@@ -283,7 +312,7 @@ body{{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
 
 <div class="sec">
   <div class="sec-t">Invention Summary</div>
-  <div class="sec-b">{esc(summary_text)}</div>
+  <div class="sec-b">{format_summary(summary_text)}</div>
 </div>
 
 {f'<div class="sec"><div class="sec-t">Search Overview</div><div class="sec-b">{esc(overall_summary)}</div></div>' if overall_summary else ''}
