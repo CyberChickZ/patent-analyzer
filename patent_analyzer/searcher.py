@@ -54,11 +54,13 @@ def serpapi_search(
     all_results: list[dict[str, Any]] = []
 
     for page in range(1, max_pages + 1):
+        # Google Patents requires num >= 10
+        actual_num = max(10, num_per_page)
         params = {
             "engine": engine,
             "q": query,
             "api_key": api_key,
-            "num": str(num_per_page),
+            "num": str(actual_num),
             "page": str(page),
         }
         url = f"{SERPAPI_URL}?{urllib.parse.urlencode(params)}"
@@ -109,6 +111,15 @@ def serpapi_search(
                 result["pub_num"] = item.get("publication_number", "")
                 result["pdf_link"] = item.get("pdf", "")
                 result["match_type"] = "Patent"
+                # Full patent metadata
+                result["patent_link"] = item.get("patent_link", "")
+                result["filing_date"] = item.get("filing_date", "")
+                result["grant_date"] = item.get("grant_date", "")
+                result["priority_date"] = item.get("priority_date", "")
+                result["publication_date"] = item.get("publication_date", "")
+                result["inventor"] = item.get("inventor", "")
+                result["assignee"] = item.get("assignee", "")
+                result["country_status"] = item.get("country_status", {})
             else:
                 result["pub_num"] = item.get("result_id", "")
                 result["match_type"] = "Paper"

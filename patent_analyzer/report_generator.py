@@ -163,6 +163,28 @@ def generate_html(data: dict) -> str:
         badge_type = "Patent" if mtype == "Patent" else "Paper"
         card_cls = "card card-hit" if hit_count > 0 else "card card-none"
 
+        # Patent-specific metadata
+        filing = esc(m.get("filing_date", ""))
+        grant = esc(m.get("grant_date", ""))
+        inventor = esc(m.get("inventor", ""))
+        assignee = esc(m.get("assignee", ""))
+        authors_str = esc(m.get("authors", ""))
+        year = m.get("year", "")
+        patent_link = m.get("patent_link", "")
+
+        # Build subtitle line
+        if badge_type == "Patent":
+            sub_parts = [mid] if mid and len(mid) < 25 else []
+            if assignee: sub_parts.append(assignee)
+            if filing: sub_parts.append(f"Filed {filing}")
+            if grant: sub_parts.append(f"Granted {grant}")
+            subtitle = " &middot; ".join(sub_parts) if sub_parts else "Patent"
+        else:
+            sub_parts = []
+            if authors_str: sub_parts.append(authors_str)
+            if year: sub_parts.append(str(year))
+            subtitle = " &middot; ".join(sub_parts) if sub_parts else "Paper"
+
         return f'''
 <div class="{card_cls}" data-hits="{hit_count}" data-md="{md_esc}">
   <div class="card-top" onclick="toggle(this.parentElement)">
@@ -170,11 +192,12 @@ def generate_html(data: dict) -> str:
       <span class="type-dot {'dot-patent' if badge_type == 'Patent' else 'dot-paper'}"></span>
       <div>
         <div class="card-title">{title}</div>
-        <div class="card-id">{esc(badge_type)}{f' &middot; {mid}' if badge_type == 'Patent' and mid and not mid.startswith(('_', 'x', 'X')) and len(mid) < 20 else ''}</div>
+        <div class="card-id">{subtitle}</div>
       </div>
     </div>
     <div class="card-right">
       {f'<span class="hit-pct" style="color:{score_color(score_num)}">{score_num:.0%}</span>' if hit_count > 0 else '<span class="no-badge">&mdash;</span>'}
+      {f'<a class="pdf-link" href="{esc(patent_link)}" target="_blank" onclick="event.stopPropagation()">Patent</a>' if patent_link and badge_type == 'Patent' else ''}
       {f'<a class="pdf-link" href="{esc(url)}" target="_blank" onclick="event.stopPropagation()">PDF</a>' if url else ''}
       <button class="md-btn" onclick="event.stopPropagation();showMd(this.closest(\'.card\'))">MD</button>
     </div>
