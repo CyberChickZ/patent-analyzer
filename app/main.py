@@ -149,15 +149,15 @@ async def run_pipeline(job_id: str):
         else:
             paper_text = Path(input_path).read_text()
 
-        detection = await detect_invention(paper_text)
+        detection = detect_invention(paper_text)
         if detection["status"] == "absent":
             update("phase1", "completed", {"status": "absent", "raw": detection["raw"]})
             job["status"] = "completed"
             return
 
-        doc_type = await classify_document(paper_text)
+        doc_type = classify_document(paper_text, os.path.basename(input_path))
         summary = await summarize_invention(paper_text)
-        category = await classify_category(summary)
+        category = classify_category(summary)
 
         phase1 = {
             "status": detection["status"],
