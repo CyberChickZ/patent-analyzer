@@ -34,29 +34,85 @@ def score_color(score: float) -> str:
 
 
 def format_summary(text: str) -> str:
-    """Split numbered items like (1)...(2)... into an HTML list for readability."""
-    # Check if text contains numbered items like (1)...(2)...
+    """Format summary with numbered list + keyword highlighting."""
+    # Technical keywords to highlight
+    KW = [
+        "dense descriptor", "dense object", "contrastive loss", "self-supervised",
+        "pixel correspondence", "3D reconstruction", "TSDF", "RGBD", "RGB-D",
+        "object mask", "change detection", "domain randomization", "hard negative",
+        "cross-object", "multi-object", "descriptor space", "robotic grasping",
+        "visual descriptor", "nearest neighbor", "ResNet", "FCN",
+        "prior art", "novelty", "anticipat", "obvious", "102", "103",
+        "manipulation", "deformed", "class generalization", "instance specific",
+    ]
+
+    def highlight(t: str) -> str:
+        """Add <mark> tags around keywords."""
+        result = esc(t)
+        for kw in KW:
+            pattern = re.compile(re.escape(esc(kw)), re.IGNORECASE)
+            result = pattern.sub(lambda m: f'<mark>{m.group()}</mark>', result)
+        return result
+
+    # Check for numbered items like (1)...(2)...
     parts = re.split(r'\s*\((\d+)\)\s*', text)
-    if len(parts) < 3:
-        # No numbered items, just split on semicolons or periods for paragraphs
-        sentences = re.split(r'(?<=[.;])\s+', text)
-        if len(sentences) > 3:
-            return '<ul class="sum-list">' + ''.join(f'<li>{esc(s.strip())}</li>' for s in sentences if s.strip()) + '</ul>'
-        return f'<p>{esc(text)}</p>'
+    if len(parts) >= 3:
+        preamble = parts[0].strip().rstrip(':;,')
+        items_html = '<ol class="sum-list">'
+        for i in range(1, len(parts) - 1, 2):
+            item_text = parts[i + 1].strip().rstrip(';,')
+            if item_text:
+                items_html += f'<li>{highlight(item_text)}</li>'
+        items_html += '</ol>'
+        if preamble:
+            return f'<p class="sum-preamble">{highlight(preamble)}:</p>{items_html}'
+        return items_html
 
-    # parts = [preamble, "1", text1, "2", text2, ...]
-    preamble = parts[0].strip().rstrip(':;,')
-    items_html = '<ul class="sum-list">'
-    for i in range(1, len(parts) - 1, 2):
-        num = parts[i]
-        item_text = parts[i + 1].strip().rstrip(';,')
-        if item_text:
-            items_html += f'<li>{esc(item_text)}</li>'
-    items_html += '</ul>'
+    # Check for markdown bold **text**
+    text_clean = text.replace('**', '')
 
-    if preamble:
-        return f'<p>{esc(preamble)}:</p>{items_html}'
-    return items_html
+    # Split into paragraphs on double newline or sentence boundaries
+    paragraphs = re.split(r'\n\n+', text_clean)
+    if len(paragraphs) <= 1:
+        paragraphs = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text_clean)
+
+    html = ""
+    for p in paragraphs:
+        p = p.strip()
+        if not p:
+            continue
+        html += f'<p class="sum-para">{highlight(p)}</p>'
+    return html if html else f'<p class="sum-para">{highlight(text)}</p>'
+
+
+def format_eval_summary(text: str) -> str:
+    """Format evaluation summary with keyword highlighting and paragraph breaks."""
+    KW = [
+        "prior art", "novelty", "novel", "anticipated", "obvious", "102", "103",
+        "overlap", "coverage", "unique", "distinguishing", "closest",
+        "dense descriptor", "contrastive", "self-supervised", "robotic",
+        "3D reconstruction", "object mask", "domain randomization",
+    ]
+
+    def hl(t: str) -> str:
+        result = esc(t)
+        for kw in KW:
+            pattern = re.compile(re.escape(esc(kw)), re.IGNORECASE)
+            result = pattern.sub(lambda m: f'<mark>{m.group()}</mark>', result)
+        return result
+
+    text_clean = text.replace('**', '')
+    paragraphs = re.split(r'\n\n+', text_clean)
+    if len(paragraphs) <= 1:
+        paragraphs = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text_clean)
+
+    html = ""
+    for p in paragraphs:
+        p = p.strip()
+        if not p:
+            continue
+        html += f'<p class="eval-para">{hl(p)}</p>'
+    return html if html else f'<p class="eval-para">{hl(text)}</p>'
 
 
 def shorten_checklist(item: str, max_len: int = 60) -> str:
@@ -249,11 +305,32 @@ body{{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
 
 /* Sections */
 .sec{{margin:1.5rem 0;padding:1rem 1.25rem;border:1px solid var(--border);border-radius:10px;background:var(--card)}}
-.sec-t{{font-size:0.95rem;font-weight:600;margin-bottom:0.5rem}}
+.sec-t{{font-size:0.95rem;font-weight:600;margin-bottom:0.5rem;color:var(--text)}}
+.sec-t-lg{{font-size:1.15rem;font-weight:700;letter-spacing:-0.01em}}
+.sec-count{{font-size:0.78rem;font-weight:400;color:var(--text2);margin-left:0.4rem}}
+.sec-note{{font-size:0.8rem;color:var(--text2);margin-bottom:0.75rem;line-height:1.5;font-style:italic}}
 .sec-b{{font-size:0.88rem;color:var(--text2);line-height:1.7}}
 .sec-b p{{margin-bottom:0.5rem}}
+
+/* Invention summary */
+.sum-preamble{{font-size:0.92rem;font-weight:600;color:var(--text);margin-bottom:0.4rem}}
 .sum-list{{padding-left:1.3rem;margin:0.4rem 0}}
-.sum-list li{{margin-bottom:0.35rem;line-height:1.65;color:var(--text)}}
+.sum-list li{{margin-bottom:0.5rem;line-height:1.65;color:var(--text);font-size:0.9rem}}
+.sum-para{{margin-bottom:0.6rem;line-height:1.7;color:var(--text);font-size:0.9rem}}
+
+/* Evaluation summary */
+.eval-sec{{border-left:3px solid var(--accent)}}
+.eval-para{{margin-bottom:0.6rem;line-height:1.75;color:var(--text);font-size:0.9rem}}
+
+/* Keyword highlight */
+mark{{background:#fef3c7;color:#92400e;padding:0.05rem 0.2rem;border-radius:3px;font-weight:500}}
+
+/* Checklist section */
+.checklist-sec{{background:#fafbfc}}
+.cl-list{{padding-left:1.5rem;margin:0;counter-reset:cl}}
+.cl-item{{margin-bottom:0.45rem;line-height:1.6;font-size:0.85rem;color:var(--text);padding:0.3rem 0.5rem;border-radius:6px}}
+.cl-item:nth-child(odd){{background:#f3f4f6}}
+.cl-item::marker{{color:var(--accent);font-weight:700}}
 .tog{{cursor:pointer;user-select:none}}
 .tog::before{{content:'\\25B8';margin-right:0.4rem;font-size:0.7rem;display:inline-block;transition:transform .15s}}
 .tog.open::before{{transform:rotate(90deg)}}
@@ -360,7 +437,15 @@ body{{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
   <div class="sec-b">{format_summary(summary_text)}</div>
 </div>
 
-{f'<div class="sec"><div class="sec-t">Search Overview</div><div class="sec-b">{esc(overall_summary)}</div></div>' if overall_summary else ''}
+{f'<div class="sec eval-sec"><div class="sec-t sec-t-lg">Novelty Assessment</div><div class="sec-b">{format_eval_summary(overall_summary)}</div></div>' if overall_summary else ''}
+
+<div class="sec checklist-sec">
+  <div class="sec-t sec-t-lg">Evaluation Checklist <span class="sec-count">{len(checklist)} items</span></div>
+  <div class="sec-note">Each item is an atomic, testable requirement derived from the invention disclosure. Prior art is evaluated against every item.</div>
+  <ol class="cl-list">
+    {"".join(f'<li class="cl-item">{esc(item)}</li>' for item in checklist)}
+  </ol>
+</div>
 
 {f'''<div class="sec">
   <div class="sec-t tog" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">Search Groups ({len(search_groups)})</div>
