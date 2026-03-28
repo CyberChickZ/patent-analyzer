@@ -1,0 +1,36 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: patent-analyzer
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/maxScale: "3"
+        run.googleapis.com/cpu-throttling: "false"
+    spec:
+      containerConcurrency: 1
+      timeoutSeconds: 900
+      containers:
+        - image: gcr.io/PROJECT_ID/patent-analyzer:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: anthropic-api-key
+                  key: latest
+            - name: SERPAPI_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: serpapi-key
+                  key: latest
+            - name: ANTHROPIC_MODEL
+              value: "claude-sonnet-4-20250514"
+            - name: OUTPUT_DIR
+              value: "/tmp/outputs"
+          resources:
+            limits:
+              memory: "4Gi"
+              cpu: "2"
