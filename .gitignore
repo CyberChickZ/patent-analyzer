@@ -5,6 +5,7 @@ dist/
 build/
 .eggs/
 patent-analysis-output/
+outputs/
 *.pdf
 .env
 .keys/
