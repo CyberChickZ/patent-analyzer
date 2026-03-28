@@ -15,9 +15,18 @@ def _quote(term: str) -> str:
     return f'"{term}"'
 
 
-def _or_group(terms: list[str]) -> str:
+def _or_group(terms: list) -> str:
     """Build: ("term1" OR "term2" OR "term3"), max MAX_OR_TERMS."""
-    limited = terms[:MAX_OR_TERMS]
+    # Flatten any nested lists and ensure all items are strings
+    flat = []
+    for t in terms:
+        if isinstance(t, list):
+            flat.extend(str(x) for x in t if x)
+        elif isinstance(t, str) and t.strip():
+            flat.append(t)
+    limited = flat[:MAX_OR_TERMS]
+    if not limited:
+        return ""
     inner = " OR ".join(_quote(t) for t in limited)
     return f"({inner})"
 
@@ -39,8 +48,17 @@ def build_patent_queries(group: dict) -> list[str]:
 
     Output: list of Boolean query strings, max MAX_QUERIES_PER_GROUP.
     """
-    anchors = group.get("anchor_terms", [])
-    expansions = group.get("expansion_terms", [])
+    # Handle variant key names from different LLMs (e.g. "anchor_terms[][]")
+    anchors = group.get("anchor_terms") or group.get("anchor_terms[][]") or []
+    expansions = group.get("expansion_terms") or group.get("expansion_terms[][]") or []
+    # Flatten if LLM returned flat list of strings instead of list of lists
+    if anchors and isinstance(anchors[0], str):
+        anchors = [anchors]
+    if expansions and isinstance(expansions[0], str):
+        expansions = [expansions]
+    # Filter empty sublists
+    anchors = [a for a in anchors if a and any(a)]
+    expansions = [e for e in expansions if e and any(e)]
 
     if not anchors:
         return []
@@ -75,8 +93,17 @@ def build_scholar_queries(group: dict) -> list[str]:
     Generate natural-language queries for Google Scholar.
     Scholar works better with plain keyword strings.
     """
-    anchors = group.get("anchor_terms", [])
-    expansions = group.get("expansion_terms", [])
+    # Handle variant key names from different LLMs (e.g. "anchor_terms[][]")
+    anchors = group.get("anchor_terms") or group.get("anchor_terms[][]") or []
+    expansions = group.get("expansion_terms") or group.get("expansion_terms[][]") or []
+    # Flatten if LLM returned flat list of strings instead of list of lists
+    if anchors and isinstance(anchors[0], str):
+        anchors = [anchors]
+    if expansions and isinstance(expansions[0], str):
+        expansions = [expansions]
+    # Filter empty sublists
+    anchors = [a for a in anchors if a and any(a)]
+    expansions = [e for e in expansions if e and any(e)]
 
     queries = []
 
