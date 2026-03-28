@@ -1,8 +1,19 @@
 """
-LLM calls via Anthropic API — replaces Claude Code Agent.
+LLM calls via OpenAI-compatible API.
 
-Each function = one LLM call with structured prompt + response parsing.
-All prompts from patent_analyzer/prompts/*.py are used here.
+Supports ANY OpenAI-compatible provider:
+  - OpenAI (GPT-4o, o1, etc.)
+  - Google Gemini (via OpenAI compat endpoint)
+  - DeepSeek
+  - Groq
+  - Together AI
+  - Local (Ollama, vLLM, etc.)
+  - Anthropic (via proxy like LiteLLM)
+
+Environment variables:
+  LLM_API_KEY      — API key (required)
+  LLM_BASE_URL     — Base URL (default: https://api.openai.com/v1)
+  LLM_MODEL        — Model name (default: gpt-4o)
 """
 
 import json
@@ -13,19 +24,20 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-import anthropic
+from openai import AsyncOpenAI
 
-MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+MODEL = os.getenv("LLM_MODEL", "gpt-4o")
 MAX_TOKENS = 8192
 
-_client: anthropic.AsyncAnthropic | None = None
+_client: AsyncOpenAI | None = None
 
 
-def get_client() -> anthropic.AsyncAnthropic:
+def get_client() -> AsyncOpenAI:
     global _client
     if _client is None:
-        _client = anthropic.AsyncAnthropic(
-            api_key=os.environ["ANTHROPIC_API_KEY"],
+        _client = AsyncOpenAI(
+            api_key=os.environ["LLM_API_KEY"],
+            base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
         )
     return _client
 
@@ -33,41 +45,39 @@ def get_client() -> anthropic.AsyncAnthropic:
 async def call_llm(system: str, user: str, max_tokens: int = MAX_TOKENS) -> str:
     """Single LLM call. Returns response text."""
     client = get_client()
-    msg = await client.messages.create(
+    resp = await client.chat.completions.create(
         model=MODEL,
         max_tokens=max_tokens,
-        system=system,
-        messages=[{"role": "user", "content": user}],
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
     )
-    return msg.content[0].text
+    return resp.choices[0].message.content or ""
 
 
 async def call_llm_with_pdf(system: str, user: str, pdf_path: str, max_tokens: int = MAX_TOKENS) -> str:
-    """LLM call with PDF attachment via base64."""
-    client = get_client()
-    pdf_bytes = Path(pdf_path).read_bytes()
-    pdf_b64 = base64.standard_b64encode(pdf_bytes).decode()
+    """
+    LLM call with PDF content.
 
-    msg = await client.messages.create(
-        model=MODEL,
-        max_tokens=max_tokens,
-        system=system,
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "document",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "application/pdf",
-                        "data": pdf_b64,
-                    },
-                },
-                {"type": "text", "text": user},
-            ],
-        }],
-    )
-    return msg.content[0].text
+    Strategy: extract text from PDF via PyMuPDF, send as text.
+    This works with ALL providers (not just those supporting document uploads).
+    """
+    import fitz
+    doc = fitz.open(pdf_path)
+    pages_text = []
+    for page in doc[:10]:  # First 10 pages
+        pages_text.append(page.get_text())
+    doc.close()
+    pdf_text = "\n\n---PAGE BREAK---\n\n".join(pages_text)
+
+    # Truncate if too long (most models have 128K context)
+    if len(pdf_text) > 60000:
+        pdf_text = pdf_text[:60000] + "\n\n[... truncated ...]"
+
+    full_prompt = f"{user}\n\n--- PRIOR ART DOCUMENT (extracted text) ---\n\n{pdf_text}"
+
+    return await call_llm(system, full_prompt, max_tokens)
 
 
 # ─── Phase 1: IDCA ─────────────────────────────────────────────────
@@ -153,7 +163,6 @@ Output as JSON array of strings.
 <summary>{summary}</summary>
 <breakdown>{ucd}</breakdown>""",
     )
-    # Parse JSON from response
     match = re.search(r'\[.*\]', resp, re.DOTALL)
     if match:
         return json.loads(match.group())
@@ -204,8 +213,8 @@ async def evaluate_single_document(
     prior_art_type: str,
 ) -> dict:
     """
-    Evaluate ONE prior art PDF against checklist.
-    This is the 1:1 comparison — target description + ONE prior art.
+    Evaluate ONE prior art document against checklist.
+    1:1 comparison — target description + ONE prior art.
     """
     checklist_text = "\n".join(f"{i+1}. {item}" for i, item in enumerate(checklist))
 
@@ -216,7 +225,7 @@ async def evaluate_single_document(
 CHECKLIST ({len(checklist)} items):
 {checklist_text}
 
-The attached PDF is the prior art document: "{prior_art_title}" ({prior_art_type}).
+The document below is the prior art: "{prior_art_title}" ({prior_art_type}).
 Read it carefully (especially abstract, introduction, methodology, claims if patent).
 
 For EACH checklist item, determine if this document CLEARLY discloses that requirement.
@@ -262,10 +271,7 @@ async def evaluate_batch(
     documents: list[dict],
     max_concurrent: int = 5,
 ) -> list[dict]:
-    """
-    Evaluate multiple documents in parallel, each 1:1.
-    Uses asyncio.Semaphore to limit concurrency.
-    """
+    """Evaluate multiple documents in parallel, each 1:1."""
     sem = asyncio.Semaphore(max_concurrent)
 
     async def eval_one(doc: dict) -> dict:

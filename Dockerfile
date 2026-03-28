@@ -10,7 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Python deps
 COPY pyproject.toml .
 RUN pip install --no-cache-dir \
-    fastapi uvicorn[standard] anthropic pymupdf \
+    fastapi uvicorn[standard] openai pymupdf \
     sentence-transformers certifi && \
     pip install --no-cache-dir -e .
 
