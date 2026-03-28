@@ -1,25 +1,24 @@
 """
-LLM calls via OpenAI-compatible API.
+LLM calls via OpenAI-compatible API — MINIMAL token usage.
 
-Supports ANY OpenAI-compatible provider:
-  - OpenAI (GPT-4o, o1, etc.)
-  - Google Gemini (via OpenAI compat endpoint)
-  - DeepSeek
-  - Groq
-  - Together AI
-  - Local (Ollama, vLLM, etc.)
-  - Anthropic (via proxy like LiteLLM)
+Design principle: tokens go to PDF analysis, not routing.
+Only 6 LLM calls in entire pipeline (was 10):
+  1. summarize_invention     — must be LLM
+  2. decompose_invention     — must be LLM
+  3. generate_checklist       — must be LLM
+  4. plan_delegation          — must be LLM
+  5. evaluate_single_document — must be LLM × N (bulk of tokens, as intended)
+  6. generate_overall_summary — must be LLM
 
-Environment variables:
-  LLM_API_KEY      — API key (required)
-  LLM_BASE_URL     — Base URL (default: https://api.openai.com/v1)
-  LLM_MODEL        — Model name (default: gpt-4o)
+Removed (replaced with deterministic code):
+  - detect_invention → keyword rules
+  - classify_document → PyMuPDF metadata
+  - classify_category → keyword rules on summary
 """
 
 import json
 import os
 import re
-import base64
 import asyncio
 from pathlib import Path
 from typing import Any
@@ -43,7 +42,6 @@ def get_client() -> AsyncOpenAI:
 
 
 async def call_llm(system: str, user: str, max_tokens: int = MAX_TOKENS) -> str:
-    """Single LLM call. Returns response text."""
     client = get_client()
     resp = await client.chat.completions.create(
         model=MODEL,
@@ -57,126 +55,155 @@ async def call_llm(system: str, user: str, max_tokens: int = MAX_TOKENS) -> str:
 
 
 async def call_llm_with_pdf(system: str, user: str, pdf_path: str, max_tokens: int = MAX_TOKENS) -> str:
-    """
-    LLM call with PDF content.
-
-    Strategy: extract text from PDF via PyMuPDF, send as text.
-    This works with ALL providers (not just those supporting document uploads).
-    """
+    """Extract PDF text via PyMuPDF, send as text. Works with ALL providers."""
     import fitz
     doc = fitz.open(pdf_path)
-    pages_text = []
-    for page in doc[:10]:  # First 10 pages
-        pages_text.append(page.get_text())
+    pages = [page.get_text() for page in doc[:10]]
     doc.close()
-    pdf_text = "\n\n---PAGE BREAK---\n\n".join(pages_text)
-
-    # Truncate if too long (most models have 128K context)
+    pdf_text = "\n\n---PAGE---\n\n".join(pages)
     if len(pdf_text) > 60000:
-        pdf_text = pdf_text[:60000] + "\n\n[... truncated ...]"
-
-    full_prompt = f"{user}\n\n--- PRIOR ART DOCUMENT (extracted text) ---\n\n{pdf_text}"
-
-    return await call_llm(system, full_prompt, max_tokens)
+        pdf_text = pdf_text[:60000] + "\n[truncated]"
+    return await call_llm(system, f"{user}\n\n--- DOCUMENT ---\n\n{pdf_text}", max_tokens)
 
 
-# ─── Phase 1: IDCA ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════
+# DETERMINISTIC: Zero LLM tokens
+# ═══════════════════════════════════════════════════════════════
 
-async def detect_invention(paper_text: str) -> dict:
-    """Detect if paper contains a patentable invention."""
-    system = "You are an expert patent analyst under US patent law (35 USC)."
-    prompt = f"""Analyze this manuscript and determine if it discloses a concrete, useful invention.
-
-Your response MUST begin with exactly one word (lowercase):
-  present  — concrete invention clearly disclosed
-  implied  — invention suggested but key details missing
-  absent   — no concrete invention disclosed
-
-Follow with 2-3 sentences explaining why.
-
-<manuscript>
-{paper_text[:15000]}
-</manuscript>"""
-
-    resp = await call_llm(system, prompt)
-    first_word = resp.strip().split()[0].lower().rstrip(".:,;")
-    status = first_word if first_word in ("present", "implied", "absent") else "implied"
-    return {"status": status, "raw": resp}
+def detect_invention(paper_text: str) -> dict:
+    """DETERMINISTIC. Checks for method/system/apparatus/composition keywords."""
+    lower = paper_text[:10000].lower()
+    invention_kw = [
+        "we propose", "we present", "we introduce", "we develop", "we design",
+        "novel method", "novel system", "novel approach", "novel framework",
+        "our method", "our system", "our approach", "this paper presents",
+        "we demonstrate", "we show that", "we achieve",
+        "apparatus", "device", "composition", "manufacture",
+        "claims", "embodiment", "wherein",
+    ]
+    hits = sum(1 for kw in invention_kw if kw in lower)
+    if hits >= 3:
+        return {"status": "present"}
+    if hits >= 1:
+        return {"status": "implied"}
+    return {"status": "absent"}
 
 
-async def classify_document(paper_text: str) -> str:
-    """Classify as patent/paper/other."""
-    resp = await call_llm(
-        "You are a document classifier.",
-        f"Classify this document. Respond with one word: patent, paper, or other.\n\n{paper_text[:5000]}",
-        max_tokens=50,
-    )
-    first = resp.strip().split()[0].lower().rstrip(".:,;")
-    return first if first in ("patent", "paper", "other") else "other"
+def classify_document(paper_text: str, filename: str = "") -> str:
+    """DETERMINISTIC. Uses filename + content patterns."""
+    lower = paper_text[:5000].lower()
+    fn = filename.lower()
 
+    # Patent indicators
+    if any(x in lower for x in ["claims", "embodiment", "wherein", "applicant", "assignee"]):
+        return "patent"
+    if any(x in fn for x in ["us", "ep", "cn", "wo", "jp"]) and any(c.isdigit() for c in fn):
+        return "patent"
+
+    # Paper indicators
+    if any(x in lower for x in ["abstract", "introduction", "related work", "methodology", "references", "arxiv"]):
+        return "paper"
+
+    return "other"
+
+
+def classify_category(summary: str) -> dict:
+    """DETERMINISTIC. Keyword-based classification under 35 USC §101."""
+    lower = summary.lower()
+
+    scores = {
+        "Process": 0,
+        "Machine": 0,
+        "Manufacture": 0,
+        "Composition": 0,
+        "Design": 0,
+    }
+
+    process_kw = ["method", "step", "process", "procedure", "algorithm", "pipeline", "training", "learning", "computing"]
+    machine_kw = ["system", "device", "apparatus", "sensor", "processor", "robot", "hardware", "module", "circuit"]
+    manufacture_kw = ["article", "product", "component", "fabricat", "manufactur", "assem"]
+    composition_kw = ["compound", "mixture", "composition", "formulation", "material", "substance"]
+    design_kw = ["ornamental", "design", "appearance", "shape", "visual design"]
+
+    for kw in process_kw:
+        if kw in lower:
+            scores["Process"] += 1
+    for kw in machine_kw:
+        if kw in lower:
+            scores["Machine"] += 1
+    for kw in manufacture_kw:
+        if kw in lower:
+            scores["Manufacture"] += 1
+    for kw in composition_kw:
+        if kw in lower:
+            scores["Composition"] += 1
+    for kw in design_kw:
+        if kw in lower:
+            scores["Design"] += 1
+
+    best = max(scores, key=scores.get)
+    if scores[best] == 0:
+        best = "None"
+
+    return {"invention_type": best, "reasoning": f"Keyword classification: {best} ({scores[best]} keyword hits)"}
+
+
+# ═══════════════════════════════════════════════════════════════
+# LLM CALLS: Where tokens SHOULD be spent
+# ═══════════════════════════════════════════════════════════════
 
 async def summarize_invention(paper_text: str) -> str:
-    """Produce invention summary."""
+    """LLM CALL #1: Invention summary."""
     return await call_llm(
-        "You are an expert patent analyst.",
-        f"""Summarize the invention(s) in this manuscript. Focus on WHAT is built/done, not WHY.
-Use the paper's own terminology. If multiple inventions, list each as (1)...(2)...
-200-400 words.
+        "You are a patent analyst. Be concise.",
+        f"""Summarize the invention(s). Focus on WHAT is built/done.
+Use the paper's terminology. List as (1)...(2)... if multiple.
+200-400 words. No preamble.
 
-<manuscript>
-{paper_text[:15000]}
-</manuscript>""",
+{paper_text[:15000]}""",
     )
 
 
-async def classify_category(summary: str) -> dict:
-    """Classify under 35 USC §101."""
-    resp = await call_llm(
-        "You are a patent classification expert.",
-        f"""Classify the primary invention under 35 USC §101.
+async def decompose_invention(paper_text: str) -> str:
+    """LLM CALL #2: Technical breakdown."""
+    return await call_llm(
+        "You are a patent analyst. Be concise.",
+        f"""Bullet-list the invention's key technical elements:
+components, steps, interfaces, materials, algorithms.
+Use the paper's terminology. No novelty assessment.
 
-Your response MUST begin with one word:
-  Process | Machine | Manufacture | Composition | Design | None
-
-Follow with 2-3 sentences of reasoning.
-
-<invention_summary>
-{summary}
-</invention_summary>""",
+{paper_text[:15000]}""",
     )
-    first = resp.strip().split()[0].rstrip(".:,;")
-    valid = {"Process", "Machine", "Manufacture", "Composition", "Design", "None"}
-    category = first if first in valid else "None"
-    return {"invention_type": category, "reasoning": resp}
 
-
-# ─── Phase 2: Decomposition ────────────────────────────────────────
 
 async def generate_checklist(summary: str, ucd: str) -> list[str]:
-    """Generate 20-30 testable checklist items."""
+    """LLM CALL #3: Checklist generation."""
     resp = await call_llm(
-        "You are a patent claim analyst.",
-        f"""Derive 20-30 concrete, testable checklist requirements from this invention.
-Each item: specific, atomic, testable. "The system includes X that performs Y."
-Output as JSON array of strings.
+        "You are a patent claim analyst. Output JSON only.",
+        f"""Derive 20-30 testable checklist items from this invention.
+Each: atomic, specific, testable. "The system includes X that performs Y."
+Output as JSON array of strings. No explanation.
 
 <summary>{summary}</summary>
 <breakdown>{ucd}</breakdown>""",
     )
     match = re.search(r'\[.*\]', resp, re.DOTALL)
     if match:
-        return json.loads(match.group())
-    return [line.strip("- ").strip() for line in resp.split("\n") if line.strip().startswith(("-", "•"))]
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+    return [line.strip("- •").strip() for line in resp.split("\n") if line.strip().startswith(("-", "•", "*"))]
 
 
 async def plan_delegation(summary: str, ucd: str, invention_type: str) -> dict:
-    """Create atoms + search groups."""
+    """LLM CALL #4: Search delegation planning."""
     resp = await call_llm(
-        "You are a USPTO patent examiner planning a prior art search.",
-        f"""Decompose into 8-20 atoms and 3-6 search groups following USPTO methodology.
-Output as JSON with keys: a_core, atoms[], groups[].
-Each atom: id, name, keywords[], core_score, distinctiveness_score.
-Each group: group_id, atoms[], label, intent, anchor_terms[][], expansion_terms[][].
+        "You are a USPTO examiner. Output JSON only.",
+        f"""Create search plan. Output JSON with: a_core, atoms[], groups[].
+atoms: id, name, keywords[], core_score, distinctiveness_score.
+groups: group_id, atoms[], label, intent, anchor_terms[][], expansion_terms[][].
+8-20 atoms, 3-6 groups. Follow 102/103 methodology.
 
 <summary>{summary}</summary>
 <breakdown>{ucd}</breakdown>
@@ -185,25 +212,12 @@ Each group: group_id, atoms[], label, intent, anchor_terms[][], expansion_terms[
     )
     match = re.search(r'\{.*\}', resp, re.DOTALL)
     if match:
-        return json.loads(match.group())
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
     return {"atoms": [], "groups": []}
 
-
-async def decompose_invention(paper_text: str) -> str:
-    """Unstructured decomposition."""
-    return await call_llm(
-        "You are a patent analyst.",
-        f"""Extract a bullet-list technical breakdown of the invention.
-Components, steps, interfaces, materials, algorithms.
-Use the paper's own terminology. Do NOT assess novelty.
-
-<manuscript>
-{paper_text[:15000]}
-</manuscript>""",
-    )
-
-
-# ─── Phase 4: Deep PDF Evaluation ──────────────────────────────────
 
 async def evaluate_single_document(
     invention_summary: str,
@@ -212,56 +226,38 @@ async def evaluate_single_document(
     prior_art_title: str,
     prior_art_type: str,
 ) -> dict:
-    """
-    Evaluate ONE prior art document against checklist.
-    1:1 comparison — target description + ONE prior art.
-    """
-    checklist_text = "\n".join(f"{i+1}. {item}" for i, item in enumerate(checklist))
+    """LLM CALL #5 (× N): Per-document evaluation. This is where tokens SHOULD go."""
+    cl_text = "\n".join(f"{i+1}. {c}" for i, c in enumerate(checklist))
 
-    system = "You are a US patent examiner evaluating prior art under 35 USC 102/103."
-    prompt = f"""INVENTION UNDER REVIEW:
-{invention_summary}
+    system = "You are a US patent examiner. Output JSON only."
+    prompt = f"""INVENTION: {invention_summary[:3000]}
 
 CHECKLIST ({len(checklist)} items):
-{checklist_text}
+{cl_text}
 
-The document below is the prior art: "{prior_art_title}" ({prior_art_type}).
-Read it carefully (especially abstract, introduction, methodology, claims if patent).
+Evaluate the attached document "{prior_art_title}" ({prior_art_type}).
+For EACH item: match=true only with explicit evidence. Cite section/quote.
 
-For EACH checklist item, determine if this document CLEARLY discloses that requirement.
-- match=true ONLY with explicit evidence (cite section/page/quote)
-- match=false if missing or unclear
-
-Also assess:
-- 102 anticipation: does this SINGLE document disclose ALL elements?
-- 103 key teachings: what elements could be combined with other references?
-
-Output as JSON:
+JSON output:
 {{
-  "anticipation_assessment": "...",
-  "key_teachings": "...",
+  "anticipation_assessment": "102 analysis in 1-2 sentences",
+  "key_teachings": "103 relevant elements in 1-2 sentences",
   "checklist_results": {{
-    "<item text>": {{"analysis": "evidence...", "match": true/false}},
-    ...
+    "<item>": {{"analysis": "evidence", "match": true/false}},
+    ...all {len(checklist)} items...
   }}
 }}"""
 
     try:
         resp = await call_llm_with_pdf(system, prompt, prior_art_pdf_path, max_tokens=16384)
-        match = re.search(r'\{.*\}', resp, re.DOTALL)
-        if match:
-            result = json.loads(match.group())
+        m = re.search(r'\{.*\}', resp, re.DOTALL)
+        if m:
+            result = json.loads(m.group())
             result["title"] = prior_art_title
             result["match_type"] = prior_art_type
             return result
     except Exception as e:
-        return {
-            "title": prior_art_title,
-            "match_type": prior_art_type,
-            "error": str(e),
-            "checklist_results": {},
-        }
-
+        return {"title": prior_art_title, "match_type": prior_art_type, "error": str(e), "checklist_results": {}}
     return {"title": prior_art_title, "checklist_results": {}}
 
 
@@ -271,49 +267,32 @@ async def evaluate_batch(
     documents: list[dict],
     max_concurrent: int = 5,
 ) -> list[dict]:
-    """Evaluate multiple documents in parallel, each 1:1."""
+    """Run N evaluations in parallel with semaphore."""
     sem = asyncio.Semaphore(max_concurrent)
 
-    async def eval_one(doc: dict) -> dict:
+    async def one(doc):
         async with sem:
-            pdf_path = doc.get("local_pdf", "")
-            if not pdf_path or not Path(pdf_path).exists():
-                return {
-                    "title": doc.get("title", ""),
-                    "match_type": doc.get("match_type", ""),
-                    "error": "PDF not available",
-                    "checklist_results": {},
-                }
+            pdf = doc.get("local_pdf", "")
+            if not pdf or not Path(pdf).exists():
+                return {"title": doc.get("title", ""), "match_type": doc.get("match_type", ""), "checklist_results": {}}
             return await evaluate_single_document(
-                invention_summary,
-                checklist,
-                pdf_path,
-                doc.get("title", ""),
-                doc.get("match_type", "Paper"),
+                invention_summary, checklist, pdf,
+                doc.get("title", ""), doc.get("match_type", "Paper"),
             )
 
-    results = await asyncio.gather(*[eval_one(d) for d in documents])
-    return list(results)
+    return list(await asyncio.gather(*[one(d) for d in documents]))
 
 
-async def generate_overall_summary(
-    invention_summary: str,
-    top_matches: list[dict],
-) -> str:
-    """Generate executive summary of novelty assessment."""
-    matches_text = "\n".join(
-        f"- {m.get('title','')}: {m.get('similarity_score',0):.0%} overlap"
-        for m in top_matches[:10]
-    )
+async def generate_overall_summary(invention_summary: str, top_matches: list[dict]) -> str:
+    """LLM CALL #6: Executive summary."""
+    matches = "\n".join(f"- {m.get('title','')}: {m.get('similarity_score',0):.0%}" for m in top_matches[:10])
     return await call_llm(
-        "You are a patent novelty analyst.",
-        f"""Write an executive summary of the novelty assessment.
+        "You are a patent novelty analyst. Be structured and concise.",
+        f"""Executive summary of novelty assessment. 200-300 words.
+Assess: which aspects have prior art, which are novel.
+Structure as numbered points.
 
-<invention>{invention_summary}</invention>
-<top_matches>
-{matches_text}
-</top_matches>
-
-Assess: which aspects have prior art coverage, which appear novel.
-200-300 words.""",
+INVENTION: {invention_summary[:2000]}
+TOP MATCHES:
+{matches}""",
     )
