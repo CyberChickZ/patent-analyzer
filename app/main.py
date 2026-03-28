@@ -2,7 +2,7 @@
 Patent Analyzer — Standalone FastAPI Web Service.
 
 Standalone web service. Only needs:
-  - ANTHROPIC_API_KEY (for Claude API)
+  - LLM_API_KEY (any OpenAI-compatible: OpenAI, Gemini, DeepSeek, Groq, etc.)
   - SERPAPI_KEY (for patent/paper search)
 
 Free (no key): OpenAlex (abstracts), sentence-transformers (embeddings)
