@@ -302,6 +302,7 @@ body{{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
 .pills{{display:flex;gap:0.5rem;justify-content:center;flex-wrap:wrap}}
 .pill{{font-size:0.75rem;padding:0.25rem 0.7rem;border-radius:99px;background:#eef1f5;color:var(--text2)}}
 .pill b{{color:var(--text)}}
+.hdr-actions{{margin-top:0.75rem}}
 
 /* Sections */
 .sec{{margin:1.5rem 0;padding:1rem 1.25rem;border:1px solid var(--border);border-radius:10px;background:var(--card)}}
@@ -458,17 +459,6 @@ mark{{background:#fef3c7;color:#92400e;padding:0.05rem 0.2rem;border-radius:3px;
     <button class="fbtn" onclick="showAll(this)">All ({len(scoring_report)})</button>
     <button class="fbtn on" onclick="showHits(this)">With Overlap ({len(hits_docs)})</button>
     <button class="fbtn" onclick="showNone(this)">No Overlap ({len(no_hits_docs)})</button>
-    <div class="dropdown">
-      <button class="fbtn fbtn-accent" onclick="this.parentElement.classList.toggle('open')">Copy as MD &#x25BE;</button>
-      <div class="dropdown-menu">
-        <button onclick="copyReportMd('hits')">With Overlap ({len(hits_docs)})</button>
-        <button onclick="copyReportMd('all')">All Documents ({len(scoring_report)})</button>
-        <button onclick="copyReportMd('none')">No Overlap Only ({len(no_hits_docs)})</button>
-        <hr>
-        <button onclick="dlReportMd('hits')">Download With Overlap .md</button>
-        <button onclick="dlReportMd('all')">Download All .md</button>
-      </div>
-    </div>
   </div>
 </div>
 <div class="bar-note">Hover for matched points &middot; Click to expand full evaluation</div>
@@ -542,6 +532,52 @@ function dlReportMd(mode){{
   const b=new Blob([text],{{type:'text/markdown'}});
   const a=document.createElement('a');a.href=URL.createObjectURL(b);
   a.download=`prior-art-${{mode}}.md`;a.click();
+  document.querySelectorAll('.dropdown.open').forEach(d=>d.classList.remove('open'));
+}}
+
+// Full report MD — copies EVERYTHING (summary + checklist + all matches)
+function buildFullMd(mode){{
+  let out='# Prior Art Search Report\\n\\n';
+  // Invention summary
+  const sumSec=document.querySelector('.sec .sec-b');
+  if(sumSec)out+='## Invention Summary\\n\\n'+sumSec.textContent.trim()+'\\n\\n';
+  // Eval summary
+  const evalSec=document.querySelector('.eval-sec .sec-b');
+  if(evalSec)out+='## Novelty Assessment\\n\\n'+evalSec.textContent.trim()+'\\n\\n';
+  // Checklist
+  const clItems=document.querySelectorAll('.cl-item');
+  if(clItems.length){{
+    out+='## Evaluation Checklist\\n\\n';
+    clItems.forEach((li,i)=>out+=`${{i+1}}. ${{li.textContent.trim()}}\\n`);
+    out+='\\n';
+  }}
+  // Matches table
+  const cards=mode==='hits'?document.querySelectorAll('#hits .card'):document.querySelectorAll('#hits .card, #nohits .card');
+  out+='## Matches\\n\\n| # | Title | Score |\\n|---|-------|-------|\\n';
+  let idx=1;
+  cards.forEach(c=>{{
+    const t=c.querySelector('.card-title')?.textContent||'';
+    const pct=c.querySelector('.hit-pct')?.textContent||'—';
+    out+=`| ${{idx++}} | ${{t}} | ${{pct}} |\\n`;
+  }});
+  out+='\\n---\\n\\n';
+  // Per-doc details
+  cards.forEach(c=>{{
+    const raw=c.getAttribute('data-md')||'';
+    const decoded=raw.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#x27;/g,"'");
+    if(decoded)out+=decoded+'\\n\\n---\\n\\n';
+  }});
+  return out;
+}}
+function copyFullMd(mode){{
+  navigator.clipboard.writeText(buildFullMd(mode||'all')).then(()=>{{
+    event.target.textContent='Copied!';setTimeout(()=>event.target.textContent=event.target.dataset.orig||event.target.textContent,1500);
+  }});
+  document.querySelectorAll('.dropdown.open').forEach(d=>d.classList.remove('open'));
+}}
+function dlFullMd(mode){{
+  const b=new Blob([buildFullMd(mode||'all')],{{type:'text/markdown'}});
+  const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='patent-analysis-report.md';a.click();
   document.querySelectorAll('.dropdown.open').forEach(d=>d.classList.remove('open'));
 }}
 

@@ -14,6 +14,7 @@ GCP:    gcloud run deploy   (see deploy/cloudrun.yaml)
 import asyncio
 import json
 import os
+import re
 import shutil
 import uuid
 from datetime import datetime, timezone
@@ -234,9 +235,10 @@ async def run_pipeline(job_id: str):
                 links = [links]
             elif not isinstance(links, list):
                 continue
-            pub = doc.get("pub_num", "unknown").replace("/", "_").replace(" ", "_")
+            title_clean = re.sub(r'[^\w\s-]', '', doc.get("title", "")).strip()[:80]
+            fname = re.sub(r'\s+', '_', title_clean) or doc.get("pub_num", "x").replace("/", "_")
             for i, link in enumerate(links[:1]):
-                local = download_pdf(link, papers_dir, f"{pub}.pdf")
+                local = download_pdf(link, papers_dir, f"{fname}.pdf")
                 if local:
                     doc["local_pdf"] = local
                     break

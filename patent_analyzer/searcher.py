@@ -300,10 +300,12 @@ def main():
                 links_list = links
             else:
                 continue
-            pub = doc.get("pub_num", "unknown").replace("/", "_").replace(" ", "_")
+            import re as _re
+            _tc = _re.sub(r'[^\w\s-]', '', doc.get("title", "")).strip()[:80]
+            fname = _re.sub(r'\s+', '_', _tc) or doc.get("pub_num", "x").replace("/", "_")
             for i, link in enumerate(links_list):
                 suffix = f"_{i}" if i > 0 else ""
-                local = download_pdf(link, papers_dir, f"{pub}{suffix}.pdf", lf)
+                local = download_pdf(link, papers_dir, f"{fname}{suffix}.pdf", lf)
                 if local:
                     doc["local_pdf"] = local
                     downloaded += 1
