@@ -7,7 +7,7 @@ name = "patent-analyzer"
 version = "0.2.0"
 description = "Standalone patent novelty analysis — Claude API + SerpAPI + semantic search"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "PolyForm-Noncommercial-1.0.0"}
 requires-python = ">=3.10"
 dependencies = [
     "certifi",
