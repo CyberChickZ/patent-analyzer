@@ -9,25 +9,22 @@ spec:
         autoscaling.knative.dev/maxScale: "3"
         run.googleapis.com/cpu-throttling: "false"
     spec:
+      serviceAccountName: amie-backend-sa@aime-hello-world.iam.gserviceaccount.com
       containerConcurrency: 1
       timeoutSeconds: 900
       containers:
-        - image: gcr.io/PROJECT_ID/patent-analyzer:latest
+        - image: gcr.io/aime-hello-world/patent-analyzer:latest
           ports:
             - containerPort: 8000
           env:
-            - name: ANTHROPIC_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: anthropic-api-key
-                  key: latest
+            - name: GC_PROJECT
+              value: "aime-hello-world"
+            - name: LLM_MODEL
+              value: "gemini-2.0-flash"
             - name: SERPAPI_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: serpapi-key
-                  key: latest
-            - name: ANTHROPIC_MODEL
-              value: "claude-sonnet-4-20250514"
+              value: "CHANGE_ME"
+            - name: OPENALEX_KEY
+              value: "CHANGE_ME"
             - name: OUTPUT_DIR
               value: "/tmp/outputs"
           resources:

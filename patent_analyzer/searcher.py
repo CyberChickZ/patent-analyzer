@@ -49,9 +49,18 @@ def serpapi_search(
     log_file: str | None = None,
     max_pages: int = 1,
     num_per_page: int = 100,
-) -> list[dict[str, Any]]:
-    """Perform a paginated SerpAPI search with retry."""
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Perform a paginated SerpAPI search with retry.
+
+    Returns (results, error) where error is None on success (even if 0 results)
+    or a short human-readable string when something went wrong (HTTP error,
+    network failure, SerpAPI error message, etc.).
+    """
     all_results: list[dict[str, Any]] = []
+    error: str | None = None
+
+    if not api_key:
+        return all_results, "SERPAPI_KEY not set"
 
     for page in range(1, max_pages + 1):
         # Google Patents requires num >= 10
@@ -66,6 +75,7 @@ def serpapi_search(
         url = f"{SERPAPI_URL}?{urllib.parse.urlencode(params)}"
 
         data = None
+        last_exc: str | None = None
         for attempt in range(MAX_RETRIES):
             try:
                 req = urllib.request.Request(url, method="GET")
@@ -73,29 +83,34 @@ def serpapi_search(
                     data = json.loads(resp.read().decode())
                 break  # success
             except urllib.error.HTTPError as e:
+                last_exc = f"HTTP {e.code}"
                 log(f"  [HTTP {e.code}] attempt {attempt+1}/{MAX_RETRIES}: {query[:60]}...", log_file)
                 if e.code == 401:
                     log("  [FATAL] Invalid API key", log_file)
-                    return all_results
+                    return all_results, "HTTP 401 (invalid SerpAPI key or quota exhausted)"
+                if e.code == 429:
+                    return all_results, "HTTP 429 (rate limited by SerpAPI)"
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_BACKOFF[attempt])
             except Exception as e:
-                log(f"  [NET ERROR] attempt {attempt+1}/{MAX_RETRIES}: {type(e).__name__}: {e}", log_file)
+                last_exc = f"{type(e).__name__}: {e}"
+                log(f"  [NET ERROR] attempt {attempt+1}/{MAX_RETRIES}: {last_exc}", log_file)
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_BACKOFF[attempt])
 
         if data is None:
             log(f"  [SKIP] All retries failed for: {query[:60]}...", log_file)
-            break
+            return all_results, f"network failure after {MAX_RETRIES} retries: {last_exc or 'unknown'}"
 
         if "error" in data:
-            log(f"  [SERPAPI] {data['error']}", log_file)
-            # If no results for this query, try next page won't help
-            break
+            err_msg = str(data.get("error", "unknown SerpAPI error"))
+            log(f"  [SERPAPI] {err_msg}", log_file)
+            return all_results, f"SerpAPI error: {err_msg[:200]}"
 
         organic = data.get("organic_results", [])
         if not organic:
             log(f"  [EMPTY] No organic results for: {query[:60]}...", log_file)
+            # Genuine 0 results — not an error, just no matches
             break
 
         total = data.get("search_information", {}).get("total_results", 0)
@@ -111,7 +126,7 @@ def serpapi_search(
                 result["pub_num"] = item.get("publication_number", "")
                 result["pdf_link"] = item.get("pdf", "")
                 result["match_type"] = "Patent"
-                # Full patent metadata
+                result["url"] = item.get("patent_link", "") or item.get("link", "")
                 result["patent_link"] = item.get("patent_link", "")
                 result["filing_date"] = item.get("filing_date", "")
                 result["grant_date"] = item.get("grant_date", "")
@@ -123,6 +138,9 @@ def serpapi_search(
             else:
                 result["pub_num"] = item.get("result_id", "")
                 result["match_type"] = "Paper"
+                result["url"] = item.get("link", "")
+                result["authors"] = ", ".join(a.get("name", "") for a in item.get("publication_info", {}).get("authors", []))
+                result["year"] = item.get("publication_info", {}).get("summary", "").split(",")[-1].strip() if item.get("publication_info") else ""
                 pdf_links = []
                 for resource in item.get("resources", []):
                     if resource.get("file_format", "").upper() == "PDF":
@@ -138,7 +156,7 @@ def serpapi_search(
 
         time.sleep(0.3)
 
-    return all_results
+    return all_results, error
 
 
 def save_incremental(results: dict, output_path: str):
@@ -242,7 +260,9 @@ def main():
         # Patent searches
         for qi, query in enumerate(patent_queries):
             log(f"[{group_id}] Patent Q{qi+1}/{len(patent_queries)}: {query[:80]}...", lf)
-            matches = serpapi_search("google_patents", query, api_key, lf, MAX_PAGES_PATENT, 100)
+            matches, err = serpapi_search("google_patents", query, api_key, lf, MAX_PAGES_PATENT, 100)
+            if err:
+                log(f"  [ERR] {err}", lf)
             new = 0
             for m in matches:
                 if m["pub_num"] and m["pub_num"] not in seen_patents:
@@ -258,7 +278,9 @@ def main():
         # Paper searches
         for qi, query in enumerate(paper_queries):
             log(f"[{group_id}] Scholar Q{qi+1}/{len(paper_queries)}: {query[:80]}...", lf)
-            matches = serpapi_search("google_scholar", query, api_key, lf, MAX_PAGES_PAPER, 20)
+            matches, err = serpapi_search("google_scholar", query, api_key, lf, MAX_PAGES_PAPER, 20)
+            if err:
+                log(f"  [ERR] {err}", lf)
             new = 0
             for m in matches:
                 key = m.get("pub_num") or m.get("title", "")

@@ -1,0 +1,20 @@
+{
+  "name": "patent-analyzer-frontend",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "serve": "BACKEND_URL=http://localhost:8000 BACKEND_ENV=dev node server.js",
+    "start": "node server.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}

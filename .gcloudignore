@@ -1,0 +1,15 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+*.egg-info
+outputs/
+frontend/
+tests/
+examples/
+*.pdf
+.env
+.env.example
+.keys/
+node_modules/
+dist/

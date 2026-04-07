@@ -2,24 +2,19 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# System deps for PyMuPDF
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential libffi-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Python deps
-COPY pyproject.toml .
+# Install Python deps directly (faster than pip install . with build isolation)
 RUN pip install --no-cache-dir \
-    fastapi uvicorn[standard] openai pymupdf \
-    sentence-transformers certifi && \
-    pip install --no-cache-dir -e .
+    google-genai google-cloud-storage "fastapi>=0.115" "uvicorn[standard]>=0.30" \
+    python-multipart pymupdf httpx sentence-transformers certifi numpy "a2a-sdk>=0.2"
 
-# Pre-download embedding model
+# Pre-download embedding model so it's baked into the image
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
-# Copy source
 COPY . .
 
-EXPOSE 8000
-
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+EXPOSE 8080
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]

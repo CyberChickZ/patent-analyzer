@@ -1,13 +1,23 @@
 services:
-  patent-analyzer:
+  backend:
     build: .
     ports:
       - "8000:8000"
     environment:
-      - LLM_API_KEY=${LLM_API_KEY}
-      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.openai.com/v1}
-      - LLM_MODEL=${LLM_MODEL:-gpt-4o}
+      - GC_PROJECT=${GC_PROJECT:-aime-hello-world}
+      - LLM_MODEL=${LLM_MODEL:-gemini-2.0-flash}
       - SERPAPI_KEY=${SERPAPI_KEY}
+      - OPENALEX_KEY=${OPENALEX_KEY:-}
       - OUTPUT_DIR=/app/outputs
     volumes:
       - ./outputs:/app/outputs
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:8080"
+    environment:
+      - BACKEND_URL=http://backend:8000
+      - BACKEND_ENV=dev
+    depends_on:
+      - backend

@@ -33,9 +33,19 @@ def score_color(score: float) -> str:
     return "#9ca3af"
 
 
+def md_inline(t: str) -> str:
+    """Convert inline markdown (bold/italic/code) to HTML. Input must already be HTML-escaped."""
+    # Bold: **text** → <strong>text</strong>
+    t = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', t)
+    # Italic: *text* (avoid conflicts with bold by running after)
+    t = re.sub(r'(?<!\*)\*([^*\n]+?)\*(?!\*)', r'<em>\1</em>', t)
+    # Inline code
+    t = re.sub(r'`([^`]+)`', r'<code>\1</code>', t)
+    return t
+
+
 def format_summary(text: str) -> str:
-    """Format summary with numbered list + keyword highlighting."""
-    # Technical keywords to highlight
+    """Format summary with numbered list + markdown rendering."""
     KW = [
         "dense descriptor", "dense object", "contrastive loss", "self-supervised",
         "pixel correspondence", "3D reconstruction", "TSDF", "RGBD", "RGB-D",
@@ -47,8 +57,8 @@ def format_summary(text: str) -> str:
     ]
 
     def highlight(t: str) -> str:
-        """Add <mark> tags around keywords."""
-        result = esc(t)
+        """Escape HTML, render inline markdown, then highlight keywords."""
+        result = md_inline(esc(t))
         for kw in KW:
             pattern = re.compile(re.escape(esc(kw)), re.IGNORECASE)
             result = pattern.sub(lambda m: f'<mark>{m.group()}</mark>', result)
@@ -68,13 +78,10 @@ def format_summary(text: str) -> str:
             return f'<p class="sum-preamble">{highlight(preamble)}:</p>{items_html}'
         return items_html
 
-    # Check for markdown bold **text**
-    text_clean = text.replace('**', '')
-
     # Split into paragraphs on double newline or sentence boundaries
-    paragraphs = re.split(r'\n\n+', text_clean)
+    paragraphs = re.split(r'\n\n+', text)
     if len(paragraphs) <= 1:
-        paragraphs = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text_clean)
+        paragraphs = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
 
     html = ""
     for p in paragraphs:
@@ -95,16 +102,15 @@ def format_eval_summary(text: str) -> str:
     ]
 
     def hl(t: str) -> str:
-        result = esc(t)
+        result = md_inline(esc(t))
         for kw in KW:
             pattern = re.compile(re.escape(esc(kw)), re.IGNORECASE)
             result = pattern.sub(lambda m: f'<mark>{m.group()}</mark>', result)
         return result
 
-    text_clean = text.replace('**', '')
-    paragraphs = re.split(r'\n\n+', text_clean)
+    paragraphs = re.split(r'\n\n+', text)
     if len(paragraphs) <= 1:
-        paragraphs = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text_clean)
+        paragraphs = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
 
     html = ""
     for p in paragraphs:
@@ -145,6 +151,8 @@ def generate_html(data: dict) -> str:
     overall_summary = evaluation.get("summary", "")
 
     generated_at = data.get("generated_at", datetime.now(timezone.utc).isoformat())
+    source_filename = data.get("source_filename", "")
+    source_title = data.get("source_title", "")
 
     # Split into groups
     hits_docs = [m for m in scoring_report if (m.get("similarity_score", 0) or 0) > 0]
@@ -167,15 +175,28 @@ def generate_html(data: dict) -> str:
         unmatched = []
         md_lines = []
 
+        # Map numeric/short keys back to full checklist text when LLM returns just "1", "2", etc.
+        def resolve_req(key: str) -> str:
+            k = str(key).strip()
+            # Match patterns like "1", "1.", "item1", "item 1"
+            m_num = re.match(r"^(?:item\s*)?(\d+)\.?$", k, re.IGNORECASE)
+            if m_num:
+                idx = int(m_num.group(1)) - 1
+                if 0 <= idx < len(checklist):
+                    return checklist[idx]
+            # Already full text
+            return k
+
         for req, ev in (evals or {}).items():
             is_match = ev.get("match", False) if isinstance(ev, dict) else False
             analysis = esc(ev.get("analysis", "")) if isinstance(ev, dict) else ""
-            short = esc(shorten_checklist(req))
+            full_req = resolve_req(req)
+            short = esc(shorten_checklist(full_req))
             if is_match:
-                matched.append((short, req, analysis))
+                matched.append((short, full_req, analysis))
             else:
-                unmatched.append((short, req, analysis))
-            md_lines.append(f"- [{'MATCH' if is_match else 'NO MATCH'}] **{esc(req)}**: {analysis}")
+                unmatched.append((short, full_req, analysis))
+            md_lines.append(f"- [{'MATCH' if is_match else 'NO MATCH'}] **{esc(full_req)}**: {analysis}")
 
         hit_count = len(matched)
         total = len(evals) if evals else len(checklist)
@@ -247,7 +268,7 @@ def generate_html(data: dict) -> str:
     <div class="card-left">
       <span class="type-dot {'dot-patent' if badge_type == 'Patent' else 'dot-paper'}"></span>
       <div>
-        <div class="card-title">{title}</div>
+        {f'<a class="card-title" href="{esc(url or patent_link)}" target="_blank" onclick="event.stopPropagation()">{title}</a>' if (url or patent_link) else f'<div class="card-title">{title}</div>'}
         <div class="card-id">{subtitle}</div>
       </div>
     </div>
@@ -299,6 +320,8 @@ body{{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
 .hdr{{text-align:center;padding:1.5rem 0 2rem;border-bottom:1px solid var(--border);margin-bottom:2rem}}
 .hdr h1{{font-size:1.4rem;font-weight:700;color:var(--text)}}
 .hdr .sub{{font-size:0.82rem;color:var(--text2);margin:0.3rem 0 1rem}}
+.source-title{{font-size:0.95rem;color:var(--text);margin:0.5rem 0 0.2rem}}
+.source-file{{font-size:0.75rem;color:var(--text2);font-family:"SF Mono",Monaco,monospace;margin-bottom:0.5rem}}
 .pills{{display:flex;gap:0.5rem;justify-content:center;flex-wrap:wrap}}
 .pill{{font-size:0.75rem;padding:0.25rem 0.7rem;border-radius:99px;background:#eef1f5;color:var(--text2)}}
 .pill b{{color:var(--text)}}
@@ -374,7 +397,8 @@ mark{{background:#fef3c7;color:#92400e;padding:0.05rem 0.2rem;border-radius:3px;
 .type-dot{{width:8px;height:8px;border-radius:50%;flex-shrink:0}}
 .dot-patent{{background:var(--patent)}}
 .dot-paper{{background:var(--paper)}}
-.card-title{{font-size:0.88rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.card-title{{font-size:0.88rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-decoration:none;color:var(--text)}}
+a.card-title:hover{{color:var(--accent);text-decoration:underline}}
 .card-id{{font-size:0.72rem;color:var(--text2);font-family:"SF Mono",Monaco,monospace}}
 .card-right{{display:flex;align-items:center;gap:0.5rem;flex-shrink:0}}
 .hit-pct{{font-size:0.88rem;font-weight:700}}
@@ -399,7 +423,7 @@ mark{{background:#fef3c7;color:#92400e;padding:0.05rem 0.2rem;border-radius:3px;
 .card.open .snip-full{{display:inline}}
 
 /* Detail panel (click to expand) */
-.detail-panel{{display:none;padding:0.5rem 1rem 1rem;border-top:1px solid var(--border)}}
+.detail-panel{{display:none;padding:0.5rem 1rem 1rem;border-top:1px solid var(--border);max-height:60vh;overflow-y:auto}}
 .card.open .detail-panel{{display:block}}
 .detail-group{{margin-bottom:0.75rem}}
 .detail-label{{font-size:0.75rem;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.03em;margin-bottom:0.35rem}}
@@ -425,6 +449,8 @@ mark{{background:#fef3c7;color:#92400e;padding:0.05rem 0.2rem;border-radius:3px;
 
 <div class="hdr">
   <h1>Prior Art Search Report</h1>
+  {f'<div class="source-title">Source manuscript: <b>{esc(source_title)}</b></div>' if source_title else ''}
+  {f'<div class="source-file">File: {esc(source_filename)}</div>' if source_filename else ''}
   <div class="sub">Possible matches for professional review &mdash; not a legal determination</div>
   <div class="pills">
     <span class="pill"><b>{esc(doc_mode.title())}</b> &middot; {esc(invention_type)}</span>

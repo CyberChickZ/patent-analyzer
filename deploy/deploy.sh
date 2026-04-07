@@ -1,36 +1,62 @@
 #!/bin/bash
-# Deploy to GCP Cloud Run
-# Usage: ./deploy/deploy.sh PROJECT_ID
+# Deploy Patent Analyzer backend + frontend to GCP Cloud Run
+# Usage: ./deploy/deploy.sh [backend|frontend|both]
+#
+# Prerequisites:
+#   gcloud auth login
+#   gcloud config set project aime-hello-world
 
 set -euo pipefail
 
-PROJECT_ID="${1:?Usage: deploy.sh PROJECT_ID}"
-IMAGE="gcr.io/${PROJECT_ID}/patent-analyzer:latest"
+PROJECT="aime-hello-world"
+REGION="us-west1"
+BACKEND_SA="amie-backend-sa@${PROJECT}.iam.gserviceaccount.com"
+FRONTEND_SA="amie-frontend-sa@${PROJECT}.iam.gserviceaccount.com"
+TARGET="${1:-both}"
 
-echo "Building image..."
-docker build -t "$IMAGE" .
+deploy_backend() {
+  echo "=== Deploying backend ==="
+  cd "$(git rev-parse --show-toplevel)"
 
-echo "Pushing to GCR..."
-docker push "$IMAGE"
+  gcloud run deploy patent-analyzer \
+    --source . \
+    --region "$REGION" \
+    --service-account "$BACKEND_SA" \
+    --no-allow-unauthenticated \
+    --env-vars-file .env.yaml \
+    --memory 4Gi \
+    --cpu 2 \
+    --timeout 900 \
+    --concurrency 1 \
+    --max-instances 3
 
-echo "Creating secrets (if not exists)..."
-echo -n "$ANTHROPIC_API_KEY" | gcloud secrets create anthropic-api-key --data-file=- --project="$PROJECT_ID" 2>/dev/null || true
-echo -n "$SERPAPI_KEY" | gcloud secrets create serpapi-key --data-file=- --project="$PROJECT_ID" 2>/dev/null || true
+  BACKEND_URL=$(gcloud run services describe patent-analyzer \
+    --project="$PROJECT" --region="$REGION" --format='value(status.url)')
+  echo "Backend URL: $BACKEND_URL"
+  echo ""
+  echo "Update frontend/.env.yaml with:"
+  echo "  BACKEND_URL: \"$BACKEND_URL\""
+}
 
-echo "Deploying to Cloud Run..."
-gcloud run deploy patent-analyzer \
-  --image="$IMAGE" \
-  --project="$PROJECT_ID" \
-  --region=us-central1 \
-  --platform=managed \
-  --allow-unauthenticated \
-  --memory=4Gi \
-  --cpu=2 \
-  --timeout=900 \
-  --concurrency=1 \
-  --max-instances=3 \
-  --set-secrets="ANTHROPIC_API_KEY=anthropic-api-key:latest,SERPAPI_KEY=serpapi-key:latest" \
-  --set-env-vars="ANTHROPIC_MODEL=claude-sonnet-4-20250514,OUTPUT_DIR=/tmp/outputs"
+deploy_frontend() {
+  echo "=== Deploying frontend ==="
+  cd "$(git rev-parse --show-toplevel)/frontend"
 
-echo "Done! URL:"
-gcloud run services describe patent-analyzer --project="$PROJECT_ID" --region=us-central1 --format='value(status.url)'
+  gcloud run deploy patent-analyzer-frontend \
+    --source . \
+    --region "$REGION" \
+    --service-account "$FRONTEND_SA" \
+    --allow-unauthenticated \
+    --env-vars-file .env.yaml
+
+  FRONTEND_URL=$(gcloud run services describe patent-analyzer-frontend \
+    --project="$PROJECT" --region="$REGION" --format='value(status.url)')
+  echo "Frontend URL: $FRONTEND_URL"
+}
+
+case "$TARGET" in
+  backend)  deploy_backend ;;
+  frontend) deploy_frontend ;;
+  both)     deploy_backend && deploy_frontend ;;
+  *)        echo "Usage: $0 [backend|frontend|both]"; exit 1 ;;
+esac
