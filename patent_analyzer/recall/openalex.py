@@ -98,19 +98,32 @@ def _work_to_candidate(w: dict) -> Candidate:
     )
 
 
-async def _get(client: httpx.AsyncClient, url: str, params: dict) -> tuple[dict | None, str | None]:
-    try:
-        resp = await client.get(url, params=params, timeout=TIMEOUT,
-                                 headers={"User-Agent": "patent-analyzer/0.3"})
-        if resp.status_code == 429:
-            return None, "HTTP 429 (OpenAlex rate limited)"
-        if resp.status_code >= 400:
-            return None, f"HTTP {resp.status_code} ({resp.text[:200]})"
-        return resp.json(), None
-    except httpx.TimeoutException:
-        return None, "timeout"
-    except Exception as e:
-        return None, f"{type(e).__name__}: {e}"
+async def _get(client: httpx.AsyncClient, url: str, params: dict,
+               attempts: int = 3) -> tuple[dict | None, str | None]:
+    """OpenAlex GET with retry on 429 and 5xx (OpenAlex 5xx is intermittent)."""
+    import asyncio
+    backoffs = [2, 6, 15]
+    last_err: str | None = None
+    for i in range(attempts):
+        if i > 0:
+            await asyncio.sleep(backoffs[min(i - 1, len(backoffs) - 1)])
+        try:
+            resp = await client.get(url, params=params, timeout=TIMEOUT,
+                                     headers={"User-Agent": "patent-analyzer/0.3"})
+            if resp.status_code == 429:
+                last_err = "HTTP 429 (OpenAlex rate limited)"
+                continue
+            if 500 <= resp.status_code < 600:
+                last_err = f"HTTP {resp.status_code} (OpenAlex server error)"
+                continue
+            if resp.status_code >= 400:
+                return None, f"HTTP {resp.status_code} ({resp.text[:200]})"
+            return resp.json(), None
+        except httpx.TimeoutException:
+            last_err = "timeout"
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+    return None, last_err or "unknown error after retries"
 
 
 async def search_works(query: str, limit: int = 30) -> tuple[list[Candidate], str | None]:

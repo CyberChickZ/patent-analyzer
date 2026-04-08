@@ -84,6 +84,10 @@ async def _get(client: httpx.AsyncClient, url: str, params: dict | None = None,
                 continue
             if resp.status_code == 404:
                 return None, "HTTP 404 (not found)"
+            if 500 <= resp.status_code < 600:
+                last_err = f"HTTP {resp.status_code} (Semantic Scholar server error)"
+                await asyncio.sleep(2 + i * 5)
+                continue
             if resp.status_code >= 400:
                 return None, f"HTTP {resp.status_code} ({resp.text[:200]})"
             return resp.json(), None

@@ -79,7 +79,11 @@ async def search(query: str, limit: int = 30) -> tuple[list[Candidate], str | No
 
     arXiv supports field-prefixed queries (ti:, abs:, all:) but plain text
     works fine — it falls back to the `all:` field.
+
+    Retries on 429 / 5xx with exponential backoff because Cloud Run egress
+    IPs share NAT pools that can be temporarily rate-limited.
     """
+    import asyncio
     if not query:
         return [], "empty query"
     params = {
@@ -89,24 +93,36 @@ async def search(query: str, limit: int = 30) -> tuple[list[Candidate], str | No
         "sortBy": "relevance",
         "sortOrder": "descending",
     }
-    try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            resp = await client.get(
-                API_URL, params=params, timeout=TIMEOUT,
-                headers={"User-Agent": "patent-analyzer/0.3 (https://github.com/CyberChickZ/patent-analyzer)"},
-            )
-        if resp.status_code >= 400:
-            return [], f"HTTP {resp.status_code}"
-        if not resp.text.strip():
-            return [], "empty response from arXiv"
+    backoffs = [3, 8, 20]  # 3 attempts total
+    last_err: str | None = None
+    for attempt, wait in enumerate([0] + backoffs):
+        if wait:
+            await asyncio.sleep(wait)
         try:
-            root = ET.fromstring(resp.text)
-        except ET.ParseError as e:
-            return [], f"XML parse error: {e}"
-        entries = root.findall("atom:entry", NS)
-        cands = [_entry_to_candidate(e) for e in entries]
-        return [c for c in cands if c.title], None
-    except httpx.TimeoutException:
-        return [], "timeout"
-    except Exception as e:
-        return [], f"{type(e).__name__}: {e}"
+            async with httpx.AsyncClient(follow_redirects=True) as client:
+                resp = await client.get(
+                    API_URL, params=params, timeout=TIMEOUT,
+                    headers={"User-Agent": "patent-analyzer/0.3 (https://github.com/CyberChickZ/patent-analyzer)"},
+                )
+            if resp.status_code == 429:
+                last_err = "HTTP 429 (arXiv rate limited)"
+                continue
+            if 500 <= resp.status_code < 600:
+                last_err = f"HTTP {resp.status_code} (arXiv server error)"
+                continue
+            if resp.status_code >= 400:
+                return [], f"HTTP {resp.status_code}"
+            if not resp.text.strip():
+                return [], "empty response from arXiv"
+            try:
+                root = ET.fromstring(resp.text)
+            except ET.ParseError as e:
+                return [], f"XML parse error: {e}"
+            entries = root.findall("atom:entry", NS)
+            cands = [_entry_to_candidate(e) for e in entries]
+            return [c for c in cands if c.title], None
+        except httpx.TimeoutException:
+            last_err = "timeout"
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+    return [], last_err or "unknown error after retries"
