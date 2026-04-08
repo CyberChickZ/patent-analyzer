@@ -222,10 +222,10 @@ def classify_category(summary: str) -> dict:
             scores["Design"] += 1
 
     best = max(scores, key=scores.get)
-    if scores[best] == 0:
-        best = "None"
-
-    return {"invention_type": best, "reasoning": f"Keyword classification: {best} ({scores[best]} keyword hits)"}
+    hits = scores[best]
+    if hits == 0:
+        return {"invention_type": "None", "reasoning": "No category keywords matched"}
+    return {"invention_type": best, "reasoning": f"Keyword classification: {best} ({hits} keyword hits)"}
 
 
 # ═══════════════════════════════════════════════════════════════
