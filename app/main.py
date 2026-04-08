@@ -817,7 +817,7 @@ async def run_pipeline(job_id: str):
             "Summarizing invention",
             phase="phase1",
             fn=lambda: summarize_invention(paper_text),
-            validator_input=paper_text[:4000],
+            validator_input=paper_text[:15000],  # match what summarize/decompose actually saw
         )
         if not summary:
             summary = "(invention summary unavailable — see failure_reason in events)"
@@ -852,7 +852,7 @@ async def run_pipeline(job_id: str):
             "Decomposing invention",
             phase="phase2",
             fn=lambda: decompose_invention(paper_text),
-            validator_input=paper_text[:4000],
+            validator_input=paper_text[:15000],  # match what summarize/decompose actually saw
         )
         if not ucd:
             ucd = "(decomposition unavailable)"

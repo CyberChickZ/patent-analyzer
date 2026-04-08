@@ -542,12 +542,22 @@ state what happened. Output a single short paragraph, no markdown, no preamble.
 
 
 async def self_check(label: str, input_summary: str, output_text: str) -> dict:
-    """Ask the LLM to grade its own output. Returns {ok: bool, issues: [...], suggestion: str}."""
+    """Ask the LLM to grade its own output. Returns {ok: bool, issues: [...], suggestion: str}.
+
+    IMPORTANT: input_summary must include AT LEAST as much content as the original
+    LLM step saw, otherwise the reviewer will cry "hallucination" on details that
+    are real but past the truncation point. The caller is responsible for passing
+    the same length the original step received (e.g. paper_text[:15000] when the
+    step used summarize_invention which sees [:15000]).
+    """
     resp = await call_llm(
-        "You are a quality reviewer for a patent novelty pipeline. Be honest and brief. Output JSON only.",
+        "You are a quality reviewer for a patent novelty pipeline. The INPUT shown below is exactly what the step's LLM saw — do NOT flag content that appears in this INPUT as hallucination. Be honest and brief. Output JSON only.",
         f"""════ TASK (template) ════
 Review the output of a pipeline step called "{label}".
-Decide if the output is reasonable given the input. Look for: hallucination, missing key concepts, off-topic content, generic boilerplate, or wrong format.
+Decide if the output is reasonable given the input below. Look for: hallucination
+(content NOT present in the INPUT below), missing key concepts, off-topic content,
+generic boilerplate, or wrong format. Before flagging any specific detail as
+hallucination, scan the INPUT below for it.
 
 Output strictly this JSON:
 {{
@@ -556,11 +566,11 @@ Output strictly this JSON:
   "suggestion": "one-line fix or 'looks good'"
 }}
 
-════ INPUT (what the step received) ════
-{input_summary[:2000]}
+════ INPUT (the FULL text the step received) ════
+{input_summary[:20000]}
 
 ════ OUTPUT (what the step produced) ════
-{output_text[:3000]}""",
+{output_text[:6000]}""",
     )
     m = re.search(r'\{.*\}', resp, re.DOTALL)
     if m:
