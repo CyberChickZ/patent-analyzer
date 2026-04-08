@@ -905,9 +905,29 @@ async def run_pipeline(job_id: str):
         from patent_analyzer.recall import arxiv as ch_arxiv
         from app.llm import summarize_failure as _summarize_failure
 
-        # Build a single broad recall query for the semantic channels (SS / OA / arXiv).
-        # These channels handle natural-language queries best — feed the invention summary directly.
-        recall_query = " ".join(summary.split())[:300] if summary else ""
+        # Build recall queries for the semantic channels (SS / OA / arXiv).
+        # arXiv chokes on long natural-language queries (timeout / poor relevance),
+        # so use a SHORT focused query: the source paper title + a few key terms
+        # extracted from the first sentence of the summary. This is high-signal.
+        # OpenAlex and Semantic Scholar handle longer queries fine, so they get
+        # a richer query from the summary.
+        def _short_query() -> str:
+            # 1) prefer the actual paper title (highest signal, no LLM noise)
+            if source_title and len(source_title) > 8:
+                base = source_title
+            else:
+                # 2) first non-trivial sentence of the summary
+                first_sent = (summary or "").split(".")[0]
+                base = first_sent[:200] if first_sent else (summary or "")[:200]
+            return " ".join(base.split())[:200]
+
+        def _long_query() -> str:
+            return " ".join((summary or "").split())[:400]
+
+        recall_query_short = _short_query()  # arxiv
+        recall_query_long = _long_query()    # ss + openalex
+        # Backwards compat: a single recall_query for downstream code (failure_reason etc.)
+        recall_query = recall_query_long or recall_query_short
 
         # SerpAPI channels iterate the structured group queries (cap 2 patent + 2 paper queries per group)
         async def run_serpapi_patents() -> tuple[list[recall_pool.Candidate], list[dict]]:
@@ -935,16 +955,16 @@ async def run_pipeline(job_id: str):
             return out, errs
 
         async def run_semantic_scholar() -> tuple[list[recall_pool.Candidate], list[dict]]:
-            cands, err = await ch_ss.search(recall_query, limit=50)
-            return cands, ([{"query": recall_query, "error": err}] if err else [])
+            cands, err = await ch_ss.search(recall_query_long, limit=50)
+            return cands, ([{"query": recall_query_long, "error": err}] if err else [])
 
         async def run_openalex() -> tuple[list[recall_pool.Candidate], list[dict]]:
-            cands, err = await ch_oa.search_works(recall_query, limit=50)
-            return cands, ([{"query": recall_query, "error": err}] if err else [])
+            cands, err = await ch_oa.search_works(recall_query_long, limit=50)
+            return cands, ([{"query": recall_query_long, "error": err}] if err else [])
 
         async def run_arxiv() -> tuple[list[recall_pool.Candidate], list[dict]]:
-            cands, err = await ch_arxiv.search(recall_query, limit=50)
-            return cands, ([{"query": recall_query, "error": err}] if err else [])
+            cands, err = await ch_arxiv.search(recall_query_short, limit=50)
+            return cands, ([{"query": recall_query_short, "error": err}] if err else [])
 
         event("phase3", "info", "Launching 5 recall channels in parallel")
         channel_specs = [

@@ -86,8 +86,10 @@ async def search(query: str, limit: int = 30) -> tuple[list[Candidate], str | No
     import asyncio
     if not query:
         return [], "empty query"
+    # arXiv chokes on long natural-language queries — keep it short
+    short_q = " ".join(query.split())[:200]
     params = {
-        "search_query": f"all:{query[:300]}",
+        "search_query": f"all:{short_q}",
         "start": 0,
         "max_results": min(max(limit, 1), 100),
         "sortBy": "relevance",
