@@ -79,6 +79,40 @@ app.use((req, res, next) => {
   express.json()(req, res, next);
 });
 
+// ─── Public A2A discovery (no auth required from caller) ───
+// The backend is --no-allow-unauthenticated, so other agents (n8n, etc.)
+// cannot reach /.well-known/agent-card.json or /a2a directly. The public
+// frontend proxies these requests with an IAM token attached.
+
+app.get("/.well-known/agent-card.json", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend("/.well-known/agent-card.json");
+    res.status(status).json(data);
+  } catch (e) {
+    console.error("Error in agent-card proxy:", e);
+    res.status(502).json({ error: "Backend unreachable" });
+  }
+});
+
+app.get("/agent-card.json", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend("/agent-card.json");
+    res.status(status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: "Backend unreachable" });
+  }
+});
+
+app.post("/a2a", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend("/a2a", { method: "POST", data: req.body });
+    res.status(status).json(data);
+  } catch (e) {
+    console.error("Error in a2a proxy:", e);
+    res.status(502).json({ error: "Backend unreachable" });
+  }
+});
+
 // ─── API routes ───
 
 // Get signed upload URL (for large files > 25MB)

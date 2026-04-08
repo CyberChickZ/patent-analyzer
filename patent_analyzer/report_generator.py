@@ -317,7 +317,7 @@ body{{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
 .wrap{{max-width:960px;margin:0 auto}}
 
 /* Header */
-.hdr{{text-align:center;padding:1.5rem 0 2rem;border-bottom:1px solid var(--border);margin-bottom:2rem}}
+.hdr{{text-align:center;padding:1.5rem 0 2rem;border-bottom:1px solid var(--border);margin-bottom:2rem;position:relative}}
 .hdr h1{{font-size:1.4rem;font-weight:700;color:var(--text)}}
 .hdr .sub{{font-size:0.82rem;color:var(--text2);margin:0.3rem 0 1rem}}
 .source-title{{font-size:0.95rem;color:var(--text);margin:0.5rem 0 0.2rem}}
@@ -325,7 +325,9 @@ body{{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
 .pills{{display:flex;gap:0.5rem;justify-content:center;flex-wrap:wrap}}
 .pill{{font-size:0.75rem;padding:0.25rem 0.7rem;border-radius:99px;background:#eef1f5;color:var(--text2)}}
 .pill b{{color:var(--text)}}
-.hdr-actions{{margin-top:0.75rem}}
+.hdr-actions{{position:absolute;top:1.5rem;right:0}}
+.hdr-actions .fbtn-accent{{background:var(--accent);color:#fff;border-color:var(--accent)}}
+.hdr-actions .fbtn-accent:hover{{background:#1d4ed8;border-color:#1d4ed8}}
 
 /* Sections */
 .sec{{margin:1.5rem 0;padding:1rem 1.25rem;border:1px solid var(--border);border-radius:10px;background:var(--card)}}
@@ -448,6 +450,18 @@ a.card-title:hover{{color:var(--accent);text-decoration:underline}}
 <div class="wrap">
 
 <div class="hdr">
+  <div class="hdr-actions">
+    <div class="dropdown">
+      <button class="fbtn fbtn-accent" onclick="event.stopPropagation();this.parentElement.classList.toggle('open')">Export &#x25BE;</button>
+      <div class="dropdown-menu">
+        <button onclick="copyFullMd('all')" data-orig="Copy full report">Copy full report</button>
+        <button onclick="copyFullMd('hits')" data-orig="Copy matches only">Copy matches only</button>
+        <hr>
+        <button onclick="dlFullMd('all')">Download .md (full)</button>
+        <button onclick="dlFullMd('hits')">Download .md (matches only)</button>
+      </div>
+    </div>
+  </div>
   <h1>Prior Art Search Report</h1>
   {f'<div class="source-title">Source manuscript: <b>{esc(source_title)}</b></div>' if source_title else ''}
   {f'<div class="source-file">File: {esc(source_filename)}</div>' if source_filename else ''}
