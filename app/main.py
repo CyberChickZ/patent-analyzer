@@ -1278,7 +1278,10 @@ async def run_pipeline(job_id: str):
             "source_title": source_title,
             "phase1": phase1,
             "phase2": phase2,
-            "search": {"groups": search_groups, "summary": search_data["summary"]},
+            "search": {
+                "channels": search_data.get("channels", {}),
+                "summary": search_data.get("summary", {}),
+            },
             "evaluation": {
                 "scoring_report": scoring_report,
                 "summary": overall,
