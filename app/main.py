@@ -791,13 +791,24 @@ async def run_pipeline(job_id: str):
             paper_text = Path(input_path).read_text()
 
         detection = detect_invention(paper_text)
-        event("phase1", "info", f"Invention detection: {detection['status']}")
+        event("phase1", "info", f"Invention detection (heuristic): {detection['status']}")
         if detection["status"] == "absent":
-            update("phase1", "completed", {"status": "absent", "raw": detection.get("raw", "")})
-            event("phase1", "done", "No invention detected — pipeline stopped")
-            job["status"] = "completed"
-            _save_job(job)
-            return
+            # Old behavior was to stop the pipeline here, but the heuristic is
+            # a keyword scan that misses any paper avoiding the standard
+            # "we propose / novel method / apparatus" phrasing. Modern CV/ML
+            # papers often phrase things differently and trigger a false absent.
+            # The downstream LLM call (summarize_invention with thinking) can
+            # judge invention presence far better than a keyword scan, so we
+            # log a quality_warning and continue. If there is genuinely no
+            # invention, summarize_invention's self_check will flag it.
+            event(
+                "phase1",
+                "quality_warning",
+                "Heuristic returned 'absent' (no invention keywords matched in first 10k chars). "
+                "Proceeding anyway — letting the LLM decide.",
+                {"raw": detection.get("raw", "")},
+            )
+            detection["status"] = "implied"  # downgraded but pipeline continues
 
         doc_type = classify_document(paper_text, os.path.basename(input_path))
         event("phase1", "info", f"Document type: {doc_type}")
