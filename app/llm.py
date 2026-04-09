@@ -254,6 +254,78 @@ CRITICAL: Regenerate from scratch addressing the issues. Use ONLY facts present 
 """
 
 
+async def detect_and_summarize_invention(first_page_text: str) -> dict:
+    """ONE LLM CALL that does both: judge whether a patentable invention is
+    disclosed, AND if so produce the canonical summary used by the rest of the
+    pipeline.
+
+    Input is intentionally just the first page (~2-5k chars) — that's where the
+    abstract + introduction live, which is exactly where authors state what they
+    built in their most concise form. Subsequent phases (decompose, evaluate)
+    still see the full paper_text where they need it.
+
+    Returns:
+        {
+          "has_innovation": bool,    # if false, pipeline stops cleanly
+          "reasoning":      str,     # 1-2 sentences explaining the decision
+          "doc_type":       "paper" | "patent" | "other",
+          "category":       "Process" | "Machine" | "Manufacture" | "Composition" | "Design" | "None",
+          "summary":        str,     # 200-400 word canonical invention summary
+        }
+    """
+    resp = await call_llm(
+        "You are a patent analyst. You read the first page of a document and "
+        "judge whether it discloses a concrete, patentable invention. Output JSON only.",
+        f"""════ TASK ════
+Read the FIRST PAGE OF DOCUMENT below (typically abstract + introduction).
+Decide:
+  1. Does this page describe a concrete invention — something built, made,
+     synthesized, designed, or a novel method/process?
+     (vs. a survey, opinion, commentary, course material, dataset description,
+      review article, etc.)
+  2. If yes: classify the document type, the §101 category, and write a
+     200-400 word summary of WHAT was built/done in the author's own terminology.
+     Focus on the technical contribution, not motivation.
+
+Output strictly this JSON, no preamble:
+{{
+  "has_innovation": true | false,
+  "reasoning": "1-2 sentences explaining the has_innovation decision",
+  "doc_type":  "paper" | "patent" | "other",
+  "category":  "Process" | "Machine" | "Manufacture" | "Composition" | "Design" | "None",
+  "summary":   "200-400 word invention summary, using the paper's own terminology, focused on WHAT is built/done. List as (1)...(2)... if multiple. Empty string if has_innovation is false."
+}}
+
+════ FIRST PAGE OF DOCUMENT ════
+```
+{first_page_text}
+```
+""",
+        thinking_budget=4096,
+    )
+    m = re.search(r'\{.*\}', resp, re.DOTALL)
+    if m:
+        try:
+            d = json.loads(m.group())
+            return {
+                "has_innovation": bool(d.get("has_innovation", True)),
+                "reasoning":      str(d.get("reasoning", "") or ""),
+                "doc_type":       str(d.get("doc_type", "other") or "other"),
+                "category":       str(d.get("category", "None") or "None"),
+                "summary":        str(d.get("summary", "") or ""),
+            }
+        except json.JSONDecodeError:
+            pass
+    # Parse failure → safest default is to proceed with raw response as summary
+    return {
+        "has_innovation": True,
+        "reasoning":      "(JSON parse failed — defaulting to proceed)",
+        "doc_type":       "other",
+        "category":       "None",
+        "summary":        resp[:2000],
+    }
+
+
 async def summarize_invention(paper_text: str, feedback: dict | None = None) -> str:
     return await call_llm(
         "You are a patent analyst. Be concise. Only state facts present in the input — never invent details.",
@@ -541,36 +613,35 @@ state what happened. Output a single short paragraph, no markdown, no preamble.
         return f"(failure_reason summarizer itself failed: {type(e).__name__}: {e})"
 
 
-async def self_check(label: str, input_summary: str, output_text: str) -> dict:
-    """Ask the LLM to grade its own output. Returns {ok: bool, issues: [...], suggestion: str}.
+async def self_check(label: str, source_text: str, generated_text: str) -> dict:
+    """Verify whether generated_text is faithful to source_text.
 
-    IMPORTANT: input_summary must include AT LEAST as much content as the original
-    LLM step saw, otherwise the reviewer will cry "hallucination" on details that
-    are real but past the truncation point. The caller is responsible for passing
-    the same length the original step received (e.g. paper_text[:15000] when the
-    step used summarize_invention which sees [:15000]).
+    The caller is responsible for passing source_text that contains at least
+    as much content as the original step's LLM saw — otherwise the reviewer
+    will judge against an incomplete source. Internal cap is just a safety net.
+
+    Returns {ok: bool, issues: [...], suggestion: str}.
     """
     resp = await call_llm(
-        "You are a quality reviewer for a patent novelty pipeline. The INPUT shown below is exactly what the step's LLM saw — do NOT flag content that appears in this INPUT as hallucination. Be honest and brief. Output JSON only.",
-        f"""════ TASK (template) ════
-Review the output of a pipeline step called "{label}".
-Decide if the output is reasonable given the input below. Look for: hallucination
-(content NOT present in the INPUT below), missing key concepts, off-topic content,
-generic boilerplate, or wrong format. Before flagging any specific detail as
-hallucination, scan the INPUT below for it.
+        "You verify whether a generated text is faithful to a source document. "
+        "Output JSON only.",
+        f"""════ SOURCE DOCUMENT ════
+```
+{source_text[:20000]}
+```
 
-Output strictly this JSON:
+════ GENERATED TEXT (the "{label}" step produced this from the source above) ════
+```
+{generated_text[:6000]}
+```
+
+For each substantive claim in the GENERATED TEXT, check if it appears in or
+follows from the SOURCE DOCUMENT. Output strict JSON:
 {{
-  "ok": true|false,
+  "ok": true | false,
   "issues": ["short issue 1", "short issue 2"],
   "suggestion": "one-line fix or 'looks good'"
-}}
-
-════ INPUT (the FULL text the step received) ════
-{input_summary[:20000]}
-
-════ OUTPUT (what the step produced) ════
-{output_text[:6000]}""",
+}}""",
     )
     m = re.search(r'\{.*\}', resp, re.DOTALL)
     if m:

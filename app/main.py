@@ -627,8 +627,8 @@ async def run_pipeline(job_id: str):
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
     from app.llm import (
-        detect_invention, classify_document, summarize_invention,
-        classify_category, decompose_invention, generate_checklist,
+        detect_and_summarize_invention,
+        decompose_invention, generate_checklist,
         plan_delegation, evaluate_batch, generate_overall_summary,
         self_check, review_phase_output,
     )
@@ -767,83 +767,110 @@ async def run_pipeline(job_id: str):
         event("phase1", "start", "Reading PDF and detecting invention")
 
         source_title = ""
+        first_page_text = ""
+        paper_text = ""
         if input_path.endswith(".pdf"):
             import fitz
             doc = fitz.open(input_path)
+            # Phase 1 (detect + summarize) intentionally sees ONLY page 1.
+            # That's where the abstract + introduction live = the author's most
+            # concise description of what they built. Keeps the input small and
+            # focused so the LLM doesn't get distracted by experimental tables.
+            if len(doc) > 0:
+                first_page_text = doc[0].get_text()
+            # Phase 2's decompose still needs more detail — keep 10 pages around.
             paper_text = "\n".join(page.get_text() for page in doc[:10])
-            # Extract source title from PDF metadata first, fallback to first non-trivial line
+            # Source title from PDF metadata first, fallback to first non-trivial line
             meta_title = (doc.metadata or {}).get("title", "") or ""
             if meta_title and len(meta_title) > 5:
                 source_title = meta_title.strip()
             else:
-                # Heuristic: first non-empty line longer than 15 chars on first page
-                first_page = doc[0].get_text() if len(doc) > 0 else ""
-                for line in first_page.split("\n"):
+                for line in (first_page_text or "").split("\n"):
                     line = line.strip()
                     if len(line) > 15 and not line.lower().startswith(("abstract", "copyright", "©")):
                         source_title = line
                         break
             doc.close()
-            event("phase1", "info", f"Extracted {len(paper_text)} chars from PDF (first 10 pages)")
+            event("phase1", "info",
+                  f"Extracted {len(first_page_text)} chars (page 1, for detection) + "
+                  f"{len(paper_text)} chars (pages 1-10, for downstream)")
             if source_title:
                 event("phase1", "info", f"Source title: {source_title[:120]}")
         else:
             paper_text = Path(input_path).read_text()
+            first_page_text = paper_text[:5000]
 
-        detection = detect_invention(paper_text)
-        event("phase1", "info", f"Invention detection (heuristic): {detection['status']}")
-        if detection["status"] == "absent":
-            # Old behavior was to stop the pipeline here, but the heuristic is
-            # a keyword scan that misses any paper avoiding the standard
-            # "we propose / novel method / apparatus" phrasing. Modern CV/ML
-            # papers often phrase things differently and trigger a false absent.
-            # The downstream LLM call (summarize_invention with thinking) can
-            # judge invention presence far better than a keyword scan, so we
-            # log a quality_warning and continue. If there is genuinely no
-            # invention, summarize_invention's self_check will flag it.
-            event(
-                "phase1",
-                "quality_warning",
-                "Heuristic returned 'absent' (no invention keywords matched in first 10k chars). "
-                "Proceeding anyway — letting the LLM decide.",
-                {"raw": detection.get("raw", "")},
-            )
-            detection["status"] = "implied"  # downgraded but pipeline continues
-
-        doc_type = classify_document(paper_text, os.path.basename(input_path))
-        event("phase1", "info", f"Document type: {doc_type}")
-
-        summary = await try_step(
-            "Summarizing invention",
+        # ── ONE LLM CALL: detect innovation + classify + summarize ──
+        # Replaces the old detect_invention/classify_document/classify_category
+        # keyword scans + summarize_invention LLM call. The LLM judges whether
+        # the first page actually discloses a patentable invention; if not, the
+        # pipeline stops cleanly here. If yes, the produced summary is the
+        # canonical summary used by all downstream phases AND shown to the user.
+        detection_result = await try_step(
+            "Detecting and summarizing invention (page 1)",
             phase="phase1",
-            fn=lambda: summarize_invention(paper_text),
-            validator_input=paper_text[:15000],  # match what summarize/decompose actually saw
+            fn=lambda: detect_and_summarize_invention(first_page_text),
+            validator_input=first_page_text,
         )
-        if not summary:
-            summary = "(invention summary unavailable — see failure_reason in events)"
+        if not detection_result:
+            detection_result = {
+                "has_innovation": True,
+                "reasoning": "(detection LLM call failed — see failure_reason)",
+                "doc_type": "other",
+                "category": "None",
+                "summary": "(invention summary unavailable)",
+            }
 
+        event("phase1", "info",
+              f"has_innovation={detection_result['has_innovation']} · "
+              f"doc_type={detection_result['doc_type']} · "
+              f"category={detection_result['category']}",
+              {"reasoning": detection_result.get("reasoning", "")})
+
+        if not detection_result.get("has_innovation"):
+            reasoning = detection_result.get("reasoning") or "(no reasoning provided)"
+            event("phase1", "no_innovation",
+                  f"No innovation detected on page 1 — pipeline stopping cleanly. {reasoning[:200]}",
+                  {
+                      "reasoning": reasoning,
+                      "doc_type": detection_result.get("doc_type", "other"),
+                      "first_page_preview": first_page_text[:1000],
+                  })
+            update("phase1", "completed", {
+                "has_innovation": False,
+                "doc_mode": detection_result.get("doc_type", "other"),
+                "summary": "",
+                "reasoning": reasoning,
+            })
+            job["status"] = "completed"
+            _save_job(job)
+            return
+
+        summary = detection_result.get("summary") or "(empty summary)"
+        doc_type = detection_result.get("doc_type", "other")
+        category_label = detection_result.get("category", "None")
+
+        # Optional full-context review (evolve mode only)
         await maybe_review(
             phase="phase1",
             phase_name="invention summary",
-            task_desc="Extract WHAT the invention is in 200-400 words from the paper text. "
-                      "Must include core technical mechanisms (not just background or experiments). "
-                      "Must use the paper's own terminology. Must not invent details.",
-            original_input=paper_text[:15000],
+            task_desc="Decide whether the summary is grounded in the first-page text "
+                      "and captures the core technical contribution.",
+            original_input=first_page_text,
             output_text=summary,
         )
 
-        category = classify_category(summary)
-        event("phase1", "info", f"Category: {category['invention_type']} — {category['reasoning']}")
-
         phase1 = {
-            "status": detection["status"],
+            "has_innovation": True,
             "doc_mode": doc_type,
             "summary": summary,
-            "invention_type": category["invention_type"],
-            "reasoning": category["reasoning"],
+            "invention_type": category_label,
+            "reasoning": detection_result.get("reasoning", ""),
         }
         save_json(phase1, job_dir / "phase1.json")
         update("phase1", "completed", phase1)
+        # Synthetic category dict for legacy downstream code that expects it
+        category = {"invention_type": category_label, "reasoning": detection_result.get("reasoning", "")}
 
         # ── Phase 2: Decomposition ──
         update("phase2", "running")
