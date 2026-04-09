@@ -905,7 +905,7 @@ async def run_pipeline(job_id: str):
             "Planning search strategy",
             phase="phase2",
             fn=lambda: plan_delegation(summary, ucd, category["invention_type"]),
-            validator_input=summary[:2000],
+            validator_input=summary,  # full canonical summary, no truncation
         ) or {"atoms": [], "groups": []}
         n_atoms = len(delegation.get("atoms", []))
         n_groups = len(delegation.get("groups", []))
