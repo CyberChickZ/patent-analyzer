@@ -9,11 +9,7 @@ AI-powered patent novelty analysis. Upload a paper or patent PDF → get a full 
 
 ---
 
-## How it works · 工作原理
-
-> 中英双语说明。英文在前，中文在下。
-
-### English
+## How it works
 
 The analyzer ingests a single PDF (a paper or a patent) and produces a novelty assessment grounded in real prior art. Internally it runs a five-phase pipeline:
 
@@ -29,23 +25,6 @@ Throughout, every LLM call (system prompt, user prompt, response, thinking trace
 - Refuse-to-hallucinate guards: if recall returns zero candidates, the pipeline marks the job `failed_recall` and does **not** call the novelty-summary LLM. An earlier incident had the summarizer invent three fake US patent numbers when given an empty matches list.
 - Honest failure signals over silent retries: a failed step emits a human-readable `failure_reason` (LLM-summarized from the raw error) to the event timeline. No hidden retries that mask real problems.
 - Truth-grounded output: the novelty summary is only allowed to cite documents that actually appear in the scoring report, and the LLM is instructed to flag self-duplicates explicitly.
-
-### 中文
-
-这个分析器吃一份 PDF（论文或专利），输出一份基于真实 prior art 的 novelty 评估。内部五阶段流程：
-
-1. **检测 + 摘要** — PyMuPDF 只抽取 page 1（作者自述部分，远离实验表格），确定性关键词规则识别文档类型（专利/论文）和 §101 类别，再让 Gemini 2.5 Pro 写摘要。Self-check 再跑一次 LLM 对比原文，发现幻觉就 emit `quality_warning`。
-2. **拆解 + 计划** — 把发明拆成 8–20 个 atomic element，产出 20–30 条 checklist，再规划搜索 plan（atoms × groups + anchor/expansion 关键词）。**Plan self-check 失败会 retry 一次**：reviewer 发现幻觉 atom（例如原文根本没提 X），就把 feedback 注入 prompt 重新生成。不 retry 的话一个假 atom 会污染下游 5 个 search group。
-3. **多路召回（并行）** — 5 个 channel 同时跑（`asyncio.gather`）：SerpAPI Google Patents、SerpAPI Google Scholar、Semantic Scholar、OpenAlex、arXiv。每个 channel 返回 `(candidates, error)`；单条 query 失败但整个 channel 活着的，不报 `channel_error`，只记一条 `query_partial` 不刷屏。SerpAPI 全局限速：Semaphore(1) + 1.5s cooldown，避免触发账号配额。Pool 层按 DOI / arXiv ID / 专利号 / 标题哈希去重，跨 channel 共识给加权。
-4. **语义重排 + 自引过滤（Phase 3b）** — `sentence-transformers` (all-MiniLM-L6-v2) 按 invention fingerprint 重排。三层自引过滤防止源论文出现在结果里：(A) Phase 1 抽出的 arXiv ID / DOI 精确匹配；(B) 标题词元相似度 ≥ 0.75；(C) Phase 4 post-eval 兜底 —— score ≥ 95% 且标题重叠 ≥ 60% 的直接丢。不过滤会出现源论文以 92% "prior art" 压在自己头上的荒谬结果。
-5. **深度评估 + 报告** — Top 20 进 Phase 4。每个候选 LLM 都**同时看到源 PDF 和候选 PDF 原件**（Gemini 原生多模态，不截断、不抽文本，单文件 <18MB 走 inline）+ checklist。LLM 先显式回答 `is_source_duplicate: true/false` 再打分。候选 PDF 下载失败（paywall）就走 abstract fallback 路径，报告里打 "abstract only" 橙色 badge。Post-eval 把 0-match 的 doc 丢掉（噪声，不是 prior art）。Phase 5 生成带 feedback 表单的 HTML 报告上传 GCS。
-
-全流程每一次 LLM 调用（system/user/response/thinking）都落进 `state.json`，前端 timeline 可以点开任一步看 Gemini 当时实际看到和产出的东西。
-
-**贯穿所有阶段的设计原则**：
-- **拒绝幻觉 guard**：recall 返回 0 时 pipeline 把 job 标 `failed_recall`，**不**调 novelty summary LLM。上一次事故里 summarizer 拿到空 matches 生造了 3 个假美国专利号。
-- **诚实失败信号**：失败的步骤 emit 人话版 `failure_reason`（LLM 归纳 raw error 得来）到 timeline，不搞掩盖问题的静默重试。
-- **基于真实数据的输出**：novelty summary 只能引用 scoring_report 里实际存在的文档，LLM 被明确要求 flag 自引。
 
 ---
 
