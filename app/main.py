@@ -341,6 +341,64 @@ async def get_results(job_id: str):
     raise HTTPException(404, "Results not ready")
 
 
+@app.post("/feedback/{job_id}")
+async def submit_feedback(job_id: str, payload: dict):
+    """Capture user feedback on a completed job. Used later (offline) to pair
+    feedback with state.json events and refine the pipeline.
+
+    Payload shape:
+      {"rating": 1-5 or null, "comment": "...", "tags": ["hallucination","missed_prior_art",...]}
+    """
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    job_dir = OUTPUT_BASE / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "rating": payload.get("rating"),
+        "comment": (payload.get("comment") or "")[:4000],
+        "tags": (payload.get("tags") or [])[:20],
+    }
+    fb_path = job_dir / "feedback.json"
+    existing = []
+    if fb_path.exists():
+        try:
+            existing = json.loads(fb_path.read_text())
+            if not isinstance(existing, list):
+                existing = [existing]
+        except Exception:
+            existing = []
+    existing.append(entry)
+    fb_path.write_text(json.dumps(existing, indent=2, ensure_ascii=False))
+    # Best-effort mirror to GCS
+    try:
+        bucket = _get_gcs().bucket(GCS_BUCKET)
+        bucket.blob(f"{GCS_PREFIX}{job_id}/feedback.json").upload_from_string(
+            json.dumps(existing, indent=2, ensure_ascii=False),
+            content_type="application/json",
+        )
+    except Exception:
+        pass
+    return {"ok": True, "total_feedback": len(existing)}
+
+
+@app.get("/feedback/{job_id}")
+async def get_feedback(job_id: str):
+    job_dir = OUTPUT_BASE / job_id
+    fb_path = job_dir / "feedback.json"
+    if fb_path.exists():
+        return json.loads(fb_path.read_text())
+    try:
+        bucket = _get_gcs().bucket(GCS_BUCKET)
+        blob = bucket.blob(f"{GCS_PREFIX}{job_id}/feedback.json")
+        if blob.exists():
+            return json.loads(blob.download_as_bytes())
+    except Exception:
+        pass
+    return []
+
+
 @app.get("/jobs")
 async def list_jobs():
     _list_jobs_from_gcs()
@@ -725,12 +783,22 @@ async def run_pipeline(job_id: str):
         event(phase, kind, f"{phase_name}: {msg}", {"review": review})
         return review
 
-    async def try_step(label: str, phase: str, fn, validator_input: str | None = None):
+    async def try_step(
+        label: str,
+        phase: str,
+        fn,
+        validator_input: str | None = None,
+        retry_with_feedback: bool = False,
+    ):
         """
-        Run a single LLM step. No retry. On failure, attach a human-readable
-        failure_reason to the timeline (via summarize_failure) and return None.
-        On success, optionally run self_check as a *quality signal only* — failures
-        emit a quality_warning event but the result is still returned as-is.
+        Run a single LLM step. On exception, attach failure_reason and return None.
+        On success, optionally run self_check. Default: warning-only.
+
+        When retry_with_feedback=True AND self_check says not ok, re-invoke `fn`
+        with `feedback={issues, suggestion, previous}` injected and return the
+        retried result. Used for steps whose hallucinations poison downstream
+        (e.g. plan_delegation: a fake atom pollutes all search queries). `fn`
+        must accept a `feedback` kwarg.
         """
         llm_label(phase, label)
         try:
@@ -756,10 +824,48 @@ async def run_pipeline(job_id: str):
                 if not check.get("ok"):
                     issues = ", ".join(check.get("issues", []))
                     event(phase, "quality_warning", f"{label}: {issues}", {"check": check})
-                    # No retry — the warning is the signal. Result is returned anyway.
+                    if retry_with_feedback:
+                        feedback = {
+                            "issues": check.get("issues", []),
+                            "suggestion": check.get("suggestion", ""),
+                            "previous": str(result)[:4000],
+                        }
+                        llm_label(phase, f"Retry: {label}")
+                        try:
+                            retried = await fn(feedback=feedback)
+                            event(phase, "retry_applied",
+                                  f"{label}: retried with self-check feedback",
+                                  {"feedback_issues": feedback["issues"]})
+                            result = retried
+                        except TypeError:
+                            # fn doesn't accept feedback — skip retry, keep original
+                            event(phase, "retry_skipped",
+                                  f"{label}: fn doesn't accept feedback, keeping original")
+                        except Exception as e:
+                            event(phase, "retry_failed",
+                                  f"{label}: retry crashed: {type(e).__name__}: {e}")
             except Exception:
                 pass
         return result
+
+    # Shared helper: detect academic/conference header boilerplate so we never
+    # mistake "Published as a conference paper at ICLR 2026" for the paper's
+    # real title. Used by Phase 1 extraction AND Phase 4 self-match defense.
+    def _is_header_boilerplate(s: str) -> bool:
+        low = (s or "").lower().strip()
+        if not low:
+            return True
+        bad_prefixes = (
+            "abstract", "copyright", "©", "published as", "under review",
+            "proceedings of", "preprint", "arxiv:", "submitted to",
+            "accepted at", "to appear", "workshop on", "workshop at",
+        )
+        bad_contains = ("conference paper at", "iclr", "neurips", "icml", "cvpr")
+        if low.startswith(bad_prefixes):
+            return True
+        if any(c in low for c in bad_contains) and len(s) < 80:
+            return True
+        return False
 
     try:
         # ── Phase 1: IDCA ──
@@ -767,6 +873,8 @@ async def run_pipeline(job_id: str):
         event("phase1", "start", "Reading PDF and detecting invention")
 
         source_title = ""
+        source_arxiv_id = ""
+        source_doi = ""
         first_page_text = ""
         paper_text = ""
         if input_path.endswith(".pdf"):
@@ -780,22 +888,39 @@ async def run_pipeline(job_id: str):
                 first_page_text = doc[0].get_text()
             # Phase 2's decompose still needs more detail — keep 10 pages around.
             paper_text = "\n".join(page.get_text() for page in doc[:10])
-            # Source title from PDF metadata first, fallback to first non-trivial line
+            # Source title from PDF metadata first, fallback to first non-trivial line.
+            # Use _is_header_boilerplate (defined at top of run_pipeline) to skip
+            # conference/preprint header lines so Phase 3b self-citation filter has
+            # a real title to compare against.
             meta_title = (doc.metadata or {}).get("title", "") or ""
-            if meta_title and len(meta_title) > 5:
+            if meta_title and len(meta_title) > 5 and not _is_header_boilerplate(meta_title):
                 source_title = meta_title.strip()
             else:
                 for line in (first_page_text or "").split("\n"):
                     line = line.strip()
-                    if len(line) > 15 and not line.lower().startswith(("abstract", "copyright", "©")):
+                    if len(line) > 15 and not _is_header_boilerplate(line):
                         source_title = line
                         break
+            # Extract stable identity from first 2 pages: arXiv ID + DOI.
+            # Used by Phase 3b self-dedupe so we never evaluate the source against
+            # itself (title similarity alone is fragile when source_title extraction
+            # falls back to junk).
+            id_text = "\n".join(doc[i].get_text() for i in range(min(2, len(doc))))
+            ax = re.search(r"arXiv:\s*(\d{4}\.\d{4,5}(?:v\d+)?)", id_text, re.IGNORECASE)
+            if ax:
+                source_arxiv_id = ax.group(1).split("v")[0]  # strip version
+            dx = re.search(r"\b(10\.\d{4,9}/[-._;()/:A-Z0-9]+)\b", id_text, re.IGNORECASE)
+            if dx:
+                source_doi = dx.group(1).rstrip(".,;)")
             doc.close()
             event("phase1", "info",
                   f"Extracted {len(first_page_text)} chars (page 1, for detection) + "
                   f"{len(paper_text)} chars (pages 1-10, for downstream)")
             if source_title:
                 event("phase1", "info", f"Source title: {source_title[:120]}")
+            if source_arxiv_id or source_doi:
+                event("phase1", "info",
+                      f"Source identity: arxiv={source_arxiv_id or '-'} doi={source_doi or '-'}")
         else:
             paper_text = Path(input_path).read_text()
             first_page_text = paper_text[:5000]
@@ -904,8 +1029,9 @@ async def run_pipeline(job_id: str):
         delegation = await try_step(
             "Planning search strategy",
             phase="phase2",
-            fn=lambda: plan_delegation(summary, ucd, category["invention_type"]),
+            fn=lambda feedback=None: plan_delegation(summary, ucd, category["invention_type"], feedback=feedback),
             validator_input=summary,  # full canonical summary, no truncation
+            retry_with_feedback=True,  # a hallucinated atom poisons all 5 query groups
         ) or {"atoms": [], "groups": []}
         n_atoms = len(delegation.get("atoms", []))
         n_groups = len(delegation.get("groups", []))
@@ -933,11 +1059,12 @@ async def run_pipeline(job_id: str):
         from app.llm import summarize_failure as _summarize_failure
 
         # Build recall queries for the semantic channels (SS / OA / arXiv).
-        # arXiv chokes on long natural-language queries (timeout / poor relevance),
-        # so use a SHORT focused query: the source paper title + a few key terms
-        # extracted from the first sentence of the summary. This is high-signal.
-        # OpenAlex and Semantic Scholar handle longer queries fine, so they get
-        # a richer query from the summary.
+        # Empirically ALL three choke on long natural-language queries:
+        #   - arXiv: timeouts / poor relevance
+        #   - Semantic Scholar /paper/search: returns 0 results for 400-char narrative;
+        #     returns thousands for focused keyword queries (tested)
+        #   - OpenAlex /works: same — keyword-ish behavior, long narrative hurts
+        # So ALL three get the SHORT focused query (title + first sentence fallback).
         def _short_query() -> str:
             # 1) prefer the actual paper title (highest signal, no LLM noise)
             if source_title and len(source_title) > 8:
@@ -956,17 +1083,34 @@ async def run_pipeline(job_id: str):
         # Backwards compat: a single recall_query for downstream code (failure_reason etc.)
         recall_query = recall_query_long or recall_query_short
 
-        # SerpAPI channels iterate the structured group queries (cap 2 patent + 2 paper queries per group)
+        # SerpAPI channels iterate the structured group queries (cap 2 patent + 2 paper queries per group).
+        # A shared semaphore+sleep keeps global SerpAPI pressure low: patents and scholar
+        # both hit serpapi.com, so they must share one budget. Previous version fired
+        # ~20 parallel requests within seconds and got the account throttled (HTTP 429).
+        serpapi_lock = asyncio.Semaphore(1)       # at most 1 SerpAPI call in flight
+        SERPAPI_COOLDOWN = 1.5                     # seconds to wait between queries
+
+        async def _serpapi_throttled_patent(q: str):
+            async with serpapi_lock:
+                res = await ch_serpapi.search_patents(q, max_pages=1)
+                await asyncio.sleep(SERPAPI_COOLDOWN)
+                return res
+
+        async def _serpapi_throttled_scholar(q: str):
+            async with serpapi_lock:
+                res = await ch_serpapi.search_scholar(q, max_pages=1)
+                await asyncio.sleep(SERPAPI_COOLDOWN)
+                return res
+
         async def run_serpapi_patents() -> tuple[list[recall_pool.Candidate], list[dict]]:
             out: list[recall_pool.Candidate] = []
             errs: list[dict] = []
             for group in queries.get("groups", []):
                 for q in (group.get("patent_queries") or [])[:2]:
-                    cands, err = await ch_serpapi.search_patents(q, max_pages=1)
+                    cands, err = await _serpapi_throttled_patent(q)
                     if err:
                         errs.append({"query": q, "error": err, "group": group.get("group_id", "")})
                     out.extend(cands)
-                    await asyncio.sleep(0.4)
             return out, errs
 
         async def run_serpapi_scholar() -> tuple[list[recall_pool.Candidate], list[dict]]:
@@ -974,20 +1118,19 @@ async def run_pipeline(job_id: str):
             errs: list[dict] = []
             for group in queries.get("groups", []):
                 for q in (group.get("paper_queries") or [])[:2]:
-                    cands, err = await ch_serpapi.search_scholar(q, max_pages=2)
+                    cands, err = await _serpapi_throttled_scholar(q)
                     if err:
                         errs.append({"query": q, "error": err, "group": group.get("group_id", "")})
                     out.extend(cands)
-                    await asyncio.sleep(0.4)
             return out, errs
 
         async def run_semantic_scholar() -> tuple[list[recall_pool.Candidate], list[dict]]:
-            cands, err = await ch_ss.search(recall_query_long, limit=50)
-            return cands, ([{"query": recall_query_long, "error": err}] if err else [])
+            cands, err = await ch_ss.search(recall_query_short, limit=50)
+            return cands, ([{"query": recall_query_short, "error": err}] if err else [])
 
         async def run_openalex() -> tuple[list[recall_pool.Candidate], list[dict]]:
-            cands, err = await ch_oa.search_works(recall_query_long, limit=50)
-            return cands, ([{"query": recall_query_long, "error": err}] if err else [])
+            cands, err = await ch_oa.search_works(recall_query_short, limit=50)
+            return cands, ([{"query": recall_query_short, "error": err}] if err else [])
 
         async def run_arxiv() -> tuple[list[recall_pool.Candidate], list[dict]]:
             cands, err = await ch_arxiv.search(recall_query_short, limit=50)
@@ -1031,25 +1174,38 @@ async def run_pipeline(job_id: str):
                 "count": len(cands),
                 "errors_n": len(errs),
             })
-            # Summarize each unique error reason once per channel for the timeline
-            seen_err_strs: set[str] = set()
-            for e in errs[:5]:
-                err_str = e.get("error", "")
-                if not err_str or err_str in seen_err_strs:
-                    continue
-                seen_err_strs.add(err_str)
-                try:
-                    reason = await _summarize_failure(
-                        f"recall channel {name}", err_str,
-                        f"query={e.get('query', '')[:200]}",
-                    )
-                except Exception:
-                    reason = err_str
-                event("phase3", "channel_error", f"{name}: {reason[:160]}", {
-                    "failure_reason": reason,
-                    "raw_error": err_str[:300],
-                    "query": e.get("query", "")[:200],
-                })
+            # Only surface per-query errors when they actually hurt — i.e. the channel
+            # ended up with 0 candidates. When the channel recovered via other queries,
+            # per-query 0-hits are noise, not failures, so we demote them to a single
+            # compact info line to keep the timeline honest.
+            unique_errs: list[dict] = []
+            seen: set[str] = set()
+            for e in errs:
+                s = e.get("error", "")
+                if s and s not in seen:
+                    seen.add(s)
+                    unique_errs.append(e)
+            if not cands and unique_errs:
+                # Hard failure: fan out per-reason summaries like before
+                for e in unique_errs[:5]:
+                    try:
+                        reason = await _summarize_failure(
+                            f"recall channel {name}", e["error"],
+                            f"query={e.get('query', '')[:200]}",
+                        )
+                    except Exception:
+                        reason = e["error"]
+                    event("phase3", "channel_error", f"{name}: {reason[:160]}", {
+                        "failure_reason": reason,
+                        "raw_error": e["error"][:300],
+                        "query": e.get("query", "")[:200],
+                    })
+            elif unique_errs:
+                # Partial: one short note, no LLM-summarized per-error spam
+                event("phase3", "query_partial",
+                      f"{name}: {len(errs)}/{len(errs) + (1 if cands else 0)} queries returned 0 "
+                      f"(channel still recovered {len(cands)} candidates via other queries)",
+                      {"errors_n": len(errs), "unique_reasons": len(unique_errs)})
 
         # Pool & dedupe across channels
         pooled = recall_pool.pool_and_dedupe(channel_results)
@@ -1169,6 +1325,41 @@ async def run_pipeline(job_id: str):
             "channels": len(active_channels),
         })
 
+        # ── Hard guard: if recall returned nothing, stop here. ──
+        # Running phases 3b/4/5 on an empty pool used to yield a polished-looking
+        # report full of hallucinated patents (LLM invents prior art when given
+        # an empty TOP MATCHES block). Refuse to produce that output.
+        if not all_docs:
+            event("phase3", "aborted_empty_pool",
+                  "Recall pool is empty — aborting pipeline. "
+                  "No prior art was retrieved, so no novelty assessment is possible. "
+                  "This is a system/recall failure, NOT a novelty finding.")
+            results = {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "source_filename": os.path.basename(input_path),
+                "source_title": source_title,
+                "phase1": phase1,
+                "phase2": phase2,
+                "search": {
+                    "channels": search_data.get("channels", {}),
+                    "summary": search_data.get("summary", {}),
+                },
+                "evaluation": {
+                    "scoring_report": [],
+                    "summary": None,
+                    "stats": {"total_evaluated": 0, "top_score": 0, "risk_level": "unknown"},
+                },
+                "recall_failure": True,
+            }
+            (job_dir / "results.json").write_text(
+                json.dumps(results, indent=2, ensure_ascii=False, default=str)
+            )
+            _save_results_to_gcs(job_id, json.dumps(results, default=str))
+            job["status"] = "failed_recall"
+            job["error"] = "All recall channels returned 0 candidates. See phase3 events for raw errors."
+            _save_job(job)
+            return
+
         # ── Phase 3b: Semantic ranking (title+snippet only, no PDFs yet) ──
         update("phase3b", "running")
         # all_docs already populated from the pooled multi-channel recall above
@@ -1185,19 +1376,38 @@ async def run_pipeline(job_id: str):
             inter = len(ta & tb)
             return inter / min(len(ta), len(tb))
 
-        if source_title:
-            before = len(all_docs)
-            filtered = []
-            removed = []
-            for d in all_docs:
+        # Layered self-match filter:
+        #   Layer A — identity match (arxiv_id / DOI): strongest signal, always correct.
+        #             Recall candidates expose these via the pool's raw data.
+        #   Layer B — title token similarity ≥ 0.75: fallback when identity isn't known.
+        # We run BOTH so a well-tagged candidate is caught by A, and a poorly-tagged
+        # one by B. Only sources with valid (non-boilerplate) titles trigger B.
+        removed = []
+        filtered = []
+        for d in all_docs:
+            is_self = False
+            d_arxiv = (d.get("arxiv_id") or "").strip().split("v")[0].lower()
+            d_doi = (d.get("doi") or "").strip().lower()
+            if source_arxiv_id and d_arxiv == source_arxiv_id.lower():
+                is_self = True
+                reason = f"arxiv={d_arxiv}"
+            elif source_doi and d_doi == source_doi.lower():
+                is_self = True
+                reason = f"doi={d_doi}"
+            elif source_title and not _is_header_boilerplate(source_title):
                 sim = title_similarity(source_title, d.get("title", ""))
                 if sim >= 0.75:
-                    removed.append({"title": d.get("title", "")[:120], "sim": round(sim, 2)})
-                else:
-                    filtered.append(d)
-            if removed:
-                event("phase3b", "info", f"Filtered out {len(removed)} self-citation(s) of source manuscript", {"full": removed})
-            all_docs = filtered
+                    is_self = True
+                    reason = f"title_sim={sim:.2f}"
+            if is_self:
+                removed.append({"title": d.get("title", "")[:120], "reason": reason})
+            else:
+                filtered.append(d)
+        if removed:
+            event("phase3b", "info",
+                  f"Filtered out {len(removed)} self-citation(s) of source manuscript",
+                  {"full": removed})
+        all_docs = filtered
 
         event("phase3b", "start", f"Reranking {len(all_docs)} documents by title+snippet embedding")
         try:
@@ -1233,9 +1443,22 @@ async def run_pipeline(job_id: str):
         update("phase3b", "completed", {"ranked": len(ranked), "downloaded": download_count})
 
         # In normal mode evaluate top 20; in evolve mode allow up to 30 via elastic batches.
+        # Keep candidates that have EITHER a downloaded PDF OR a usable abstract/snippet.
+        # Abstract-only eval is weaker than PDF, but far better than dropping the doc
+        # entirely — 60-80% of recall hits are paywalled (IEEE/Elsevier) so PDF-only
+        # filtering throws away most real prior art.
         eval_cap = 30 if evolve else 20
-        eval_candidates = [d for d in ranked if d.get("local_pdf") and Path(d["local_pdf"]).exists()][:eval_cap]
-        event("phase3b", "info", f"{len(eval_candidates)} candidates with PDFs ready for deep evaluation")
+        def _has_text(d):
+            return (len((d.get("abstract") or "").strip()) >= 120
+                    or len((d.get("snippet") or "").strip()) >= 120)
+        def _usable(d):
+            return (d.get("local_pdf") and Path(d["local_pdf"]).exists()) or _has_text(d)
+        eval_candidates = [d for d in ranked if _usable(d)][:eval_cap]
+        n_pdf = sum(1 for d in eval_candidates if d.get("local_pdf") and Path(d["local_pdf"]).exists())
+        n_abstract = len(eval_candidates) - n_pdf
+        event("phase3b", "info",
+              f"{len(eval_candidates)} candidates ready for deep evaluation "
+              f"({n_pdf} via PDF, {n_abstract} via abstract fallback)")
 
         # ── Phase 4: Deep evaluation ──
         update("phase4", "running")
@@ -1248,7 +1471,11 @@ async def run_pipeline(job_id: str):
                 event("phase4", "evaluating", f"{c.get('title', '')[:120]}",
                       {"type": c.get("match_type", "?")})
             llm_label("phase4", f"Per-document deep evaluation (batch of {len(batch_docs)})")
-            return await evaluate_batch(summary, checklist, batch_docs, max_concurrent=5)
+            return await evaluate_batch(
+                summary, checklist, batch_docs, max_concurrent=2,
+                source_pdf_path=input_path if input_path.endswith(".pdf") else None,
+                source_title=source_title,
+            )
 
         def _absorb_results(eval_results: list[dict]):
             for er in eval_results:
@@ -1264,6 +1491,7 @@ async def run_pipeline(job_id: str):
                     "key_teachings": er.get("key_teachings", ""),
                     "snippet": er.get("snippet", ""),
                     "abstract": er.get("abstract", ""),
+                    "eval_source": er.get("source", "pdf"),  # "pdf" | "abstract" | ...
                 })
 
         if evolve and len(eval_candidates) > 5:
@@ -1304,14 +1532,66 @@ async def run_pipeline(job_id: str):
             results_all = await _evaluate_batch(eval_candidates)
             _absorb_results(results_all)
 
-        event("phase4", "info", f"Got {len(scoring_report)} evaluation results from LLM")
+        n_evaluated_raw = len(scoring_report)
+
+        # Defense-in-depth against self-matching: Phase 3b already filters by title
+        # similarity, but if source_title extraction failed (e.g. conference header
+        # boilerplate instead of real title), the paper itself slips through and
+        # wins 90%+ "prior art" against itself. Last-chance filter: drop any doc
+        # whose (high score + high title overlap) make it almost certainly the
+        # source paper.
+        def _tok_sim(a: str, b: str) -> float:
+            if not a or not b: return 0.0
+            ta = set(re.findall(r"\w+", a.lower()))
+            tb = set(re.findall(r"\w+", b.lower()))
+            if not ta or not tb: return 0.0
+            return len(ta & tb) / min(len(ta), len(tb))
+        n_selfmatch = 0
+        if source_title and not _is_header_boilerplate(source_title):
+            kept = []
+            for s in scoring_report:
+                score = s.get("similarity_score") or 0
+                tsim = _tok_sim(source_title, s.get("title", ""))
+                # Only very-high-confidence self-matches: a legitimate prior art
+                # doc can have 85% checklist overlap (that IS meaningful prior art).
+                # Require ≥95% score AND ≥60% title overlap (or ≥80% title overlap
+                # regardless of score, which catches identical-title republications).
+                if (score >= 0.95 and tsim >= 0.6) or tsim >= 0.8:
+                    n_selfmatch += 1
+                    event("phase4", "selfmatch_dropped",
+                          f"Dropped likely self-citation: '{s.get('title','')[:100]}' "
+                          f"(score={score:.0%}, title_overlap={tsim:.0%})")
+                else:
+                    kept.append(s)
+            scoring_report = kept
+
+        # Drop zero-overlap docs — they're noise, not "prior art". Report must not
+        # show "we evaluated this but it matched nothing" lines; boss-facing output
+        # should only contain docs with at least one checklist match.
+        scoring_report = [s for s in scoring_report if (s.get("similarity_score") or 0) > 0]
+        n_dropped = n_evaluated_raw - len(scoring_report) - n_selfmatch
+        tail = []
+        if n_selfmatch:
+            tail.append(f"dropped {n_selfmatch} self-citation(s)")
+        if n_dropped:
+            tail.append(f"dropped {n_dropped} zero-match docs")
+        event("phase4", "info",
+              f"Got {n_evaluated_raw} evaluation results; kept {len(scoring_report)} with overlap"
+              + (f" ({'; '.join(tail)})" if tail else ""))
 
         scoring_report.sort(key=lambda x: x["similarity_score"], reverse=True)
         top_score = max((s["similarity_score"] for s in scoring_report), default=0)
         event("phase4", "info", f"Top match: {top_score:.0%} similarity")
 
-        llm_label("phase4", "Generating overall novelty summary")
-        overall = await generate_overall_summary(summary, scoring_report[:10])
+        hit_matches = scoring_report  # already filtered
+        if not hit_matches:
+            event("phase4", "skipped_summary",
+                  "Skipping novelty summary — no evaluated docs had any checklist overlap. "
+                  "Refusing to let the LLM speculate.")
+            overall = None
+        else:
+            llm_label("phase4", "Generating overall novelty summary")
+            overall = await generate_overall_summary(summary, hit_matches[:10])
 
         update("phase4", "completed", {"evaluated": len(scoring_report), "top_score": round(top_score, 4)})
 
@@ -1320,6 +1600,7 @@ async def run_pipeline(job_id: str):
         event("phase5", "start", "Generating HTML report and uploading to GCS")
 
         results = {
+            "job_id": job_id,
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "source_filename": os.path.basename(input_path),
             "source_title": source_title,

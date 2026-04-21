@@ -28,8 +28,8 @@ SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 MAX_PAGES_PATENT = 1
 MAX_PAGES_PAPER = 5
 TIMEOUT_S = 60
-MAX_RETRIES = 3
-RETRY_BACKOFF = [2, 5, 10]
+MAX_RETRIES = 4
+RETRY_BACKOFF = [10, 30, 60, 90]  # was [2,5,10] — too short to recover from SerpAPI 429
 
 
 def log(msg: str, log_file: str | None = None):

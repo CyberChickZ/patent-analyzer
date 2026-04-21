@@ -132,20 +132,68 @@ async def call_llm_with_pdf(
     max_tokens: int = MAX_TOKENS,
     thinking_budget: int = 0,
 ) -> str:
-    """Extract PDF text via PyMuPDF, send as text."""
-    import fitz
-    doc = fitz.open(pdf_path)
-    pages = [page.get_text() for page in doc[:10]]
-    doc.close()
-    pdf_text = "\n\n---PAGE---\n\n".join(pages)
-    if len(pdf_text) > 60000:
-        pdf_text = pdf_text[:60000] + "\n[truncated]"
-    return await call_llm(
-        system,
-        f"{user}\n\n--- DOCUMENT ---\n\n{pdf_text}",
-        max_tokens,
-        thinking_budget=thinking_budget,
+    """Send a single PDF as a native multi-modal part to Gemini (no truncation).
+
+    Only used for bulk initial screening where text extraction is acceptable.
+    For deep eval use call_llm_with_pdfs which supports multiple files.
+    """
+    return await call_llm_with_pdfs(system, user, [pdf_path], max_tokens, thinking_budget)
+
+
+# Vertex AI inline-bytes cap is ~20MB per request. Pad for safety.
+_INLINE_PDF_CAP_BYTES = 18 * 1024 * 1024
+
+
+async def call_llm_with_pdfs(
+    system: str,
+    user: str,
+    pdf_paths: list[str],
+    max_tokens: int = MAX_TOKENS,
+    thinking_budget: int = 0,
+) -> str:
+    """Send one or more PDFs as native multi-modal parts to Gemini.
+
+    Uploads PDF bytes directly — the model sees layout, figures, tables. No text
+    extraction, no truncation. If a file exceeds Vertex's inline cap (~20MB),
+    it falls back to text extraction for THAT file only (others still go as PDF)
+    and prefixes a [fallback_text] marker so the LLM knows the input was lossy.
+    """
+    parts: list[Any] = []
+    for p in pdf_paths:
+        if not p or not Path(p).exists():
+            continue
+        size = Path(p).stat().st_size
+        if size <= _INLINE_PDF_CAP_BYTES:
+            data = Path(p).read_bytes()
+            parts.append(types.Part.from_bytes(data=data, mime_type="application/pdf"))
+        else:
+            import fitz
+            doc = fitz.open(p)
+            text = "\n\n---PAGE---\n\n".join(pg.get_text() for pg in doc[:20])
+            doc.close()
+            parts.append(types.Part.from_text(
+                text=f"[fallback_text — file {Path(p).name} was {size//1024//1024}MB, "
+                     f"exceeded inline cap; showing extracted text of first 20 pages]\n\n{text}"
+            ))
+    parts.append(types.Part.from_text(text=user))
+
+    client = get_client()
+    config = _build_config(system, max_tokens, thinking_budget)
+    resp = await client.aio.models.generate_content(
+        model=MODEL,
+        contents=parts,
+        config=config,
     )
+    text, thoughts = _extract_text_and_thoughts(resp)
+    if text.startswith("```"):
+        text = text.split("```", 2)[1].strip()
+        if text.startswith("json"):
+            text = text[4:].strip()
+    # Log the user prompt (without the PDF blob) + file list
+    file_list = ", ".join(f"{Path(p).name} ({Path(p).stat().st_size//1024}KB)"
+                          for p in pdf_paths if p and Path(p).exists())
+    _emit(system, f"[PDFs: {file_list}]\n\n{user}", text, thoughts)
+    return text
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -402,26 +450,76 @@ groups: group_id, atoms[], label, intent, anchor_terms[][], expansion_terms[][].
     return {"atoms": [], "groups": []}
 
 
+def _extract_pdf_text(path: str, max_pages: int = 10, max_chars: int = 60000) -> str:
+    import fitz
+    doc = fitz.open(path)
+    pages = [p.get_text() for p in doc[:max_pages]]
+    doc.close()
+    t = "\n\n---PAGE---\n\n".join(pages)
+    return t[:max_chars] + ("\n[truncated]" if len(t) > max_chars else "")
+
+
 async def evaluate_single_document(
     invention_summary: str,
     checklist: list[str],
     prior_art_pdf_path: str,
     prior_art_title: str,
     prior_art_type: str,
+    source_pdf_path: str | None = None,
+    source_title: str | None = None,
 ) -> dict:
+    """Deep-eval one prior art doc against the invention's checklist.
+
+    When `source_pdf_path` is given, the LLM sees BOTH the source manuscript AND
+    the prior art document side-by-side. This lets the examiner:
+      - directly compare full texts (much stronger signal than summary vs prior art)
+      - explicitly flag self-matches ("this IS the source paper") via the
+        `is_source_duplicate` field and zero out the match count, so a bad recall
+        candidate can't silently become the top "prior art".
+    """
     cl_text = "\n".join(f"{i+1}. {c}" for i, c in enumerate(checklist))
 
-    system = "You are a US patent examiner. Output JSON only."
-    prompt = f"""INVENTION: {invention_summary[:3000]}
+    system = "You are a US patent examiner comparing a SOURCE invention against one PRIOR ART document. Output JSON only."
 
-CHECKLIST ({len(checklist)} items):
+    # Build the prior art section (always present)
+    prior_art_text = _extract_pdf_text(prior_art_pdf_path)
+
+    source_section = ""
+    if source_pdf_path and Path(source_pdf_path).exists():
+        source_text = _extract_pdf_text(source_pdf_path, max_chars=40000)
+        source_section = f"""════ SOURCE INVENTION (full text, pages 1-10) ════
+TITLE: {source_title or '(unknown)'}
+<source>
+{source_text}
+</source>
+
+"""
+
+    prompt = f"""{source_section}INVENTION SUMMARY (distilled from source):
+{invention_summary[:3000]}
+
+CHECKLIST ({len(checklist)} items) — derived from the source:
 {cl_text}
 
-Evaluate the attached document "{prior_art_title}" ({prior_art_type}).
-For EACH item: match=true only with explicit evidence. Cite section/quote.
+════ PRIOR ART CANDIDATE ════
+TITLE: {prior_art_title}
+TYPE: {prior_art_type}
+<prior_art>
+{prior_art_text}
+</prior_art>
+
+TASK:
+1. First decide: is this prior art document actually the SAME document as the source?
+   Clues: identical title/authors/abstract, verbatim passage reuse, same arXiv/DOI/patent.
+   If yes, set is_source_duplicate=true and return all checklist matches as false —
+   a document cannot be prior art for itself.
+2. Otherwise, for EACH checklist item set match=true only with explicit evidence
+   from the prior art text. Cite section/quote.
 
 JSON output:
 {{
+  "is_source_duplicate": true | false,
+  "duplicate_reason": "short string if true, else empty",
   "anticipation_assessment": "102 analysis in 1-2 sentences",
   "key_teachings": "103 relevant elements in 1-2 sentences",
   "checklist_results": {{
@@ -431,35 +529,109 @@ JSON output:
 }}"""
 
     try:
-        resp = await call_llm_with_pdf(system, prompt, prior_art_pdf_path, thinking_budget=8192)
+        resp = await call_llm(system, prompt, thinking_budget=8192)
         m = re.search(r'\{.*\}', resp, re.DOTALL)
         if m:
             result = json.loads(m.group())
             result["title"] = prior_art_title
             result["match_type"] = prior_art_type
+            # Safety: if LLM tagged this as source duplicate, force all matches false.
+            if result.get("is_source_duplicate"):
+                cr = result.get("checklist_results", {})
+                for k in cr:
+                    if isinstance(cr[k], dict):
+                        cr[k]["match"] = False
+                        cr[k]["analysis"] = f"[SELF-MATCH suppressed: {result.get('duplicate_reason','')}]"
             return result
     except Exception as e:
         return {"title": prior_art_title, "match_type": prior_art_type, "error": str(e), "checklist_results": {}}
     return {"title": prior_art_title, "checklist_results": {}}
 
 
+async def evaluate_single_document_text(
+    invention_summary: str,
+    checklist: list[str],
+    prior_art_text: str,
+    prior_art_title: str,
+    prior_art_type: str,
+) -> dict:
+    """Evaluate when we don't have the PDF — use abstract / snippet / whatever text we have.
+
+    Output shape MUST match evaluate_single_document so downstream code doesn't care
+    which path produced the result. The `source` field tags how the eval was produced
+    so reports can say "abstract-only" where appropriate.
+    """
+    cl_text = "\n".join(f"{i+1}. {c}" for i, c in enumerate(checklist))
+    system = "You are a US patent examiner. Output JSON only."
+    prompt = f"""INVENTION: {invention_summary[:3000]}
+
+CHECKLIST ({len(checklist)} items):
+{cl_text}
+
+PRIOR ART DOCUMENT "{prior_art_title}" ({prior_art_type}) — FULL PDF UNAVAILABLE, evaluating from abstract/snippet only:
+<document>
+{prior_art_text[:4000]}
+</document>
+
+For EACH checklist item, decide match=true only when the abstract explicitly discusses that element.
+When the abstract is silent, match=false. Do NOT infer beyond what the text states.
+
+JSON output:
+{{
+  "anticipation_assessment": "1-2 sentences, or 'abstract insufficient' if no signal",
+  "key_teachings": "1-2 sentences, or 'abstract insufficient'",
+  "checklist_results": {{
+    "<item>": {{"analysis": "what the abstract said, or 'not mentioned in abstract'", "match": true/false}},
+    ...all {len(checklist)} items...
+  }}
+}}"""
+    try:
+        resp = await call_llm(system, prompt, thinking_budget=4096)
+        m = re.search(r'\{.*\}', resp, re.DOTALL)
+        if m:
+            result = json.loads(m.group())
+            result["title"] = prior_art_title
+            result["match_type"] = prior_art_type
+            result["source"] = "abstract"
+            return result
+    except Exception as e:
+        return {"title": prior_art_title, "match_type": prior_art_type, "error": str(e),
+                "checklist_results": {}, "source": "abstract_failed"}
+    return {"title": prior_art_title, "checklist_results": {}, "source": "abstract_noparse"}
+
+
 async def evaluate_batch(
     invention_summary: str,
     checklist: list[str],
     documents: list[dict],
-    max_concurrent: int = 5,
+    max_concurrent: int = 2,
+    source_pdf_path: str | None = None,
+    source_title: str | None = None,
 ) -> list[dict]:
     sem = asyncio.Semaphore(max_concurrent)
 
     async def one(doc):
         async with sem:
             pdf = doc.get("local_pdf", "")
-            if not pdf or not Path(pdf).exists():
-                return {"title": doc.get("title", ""), "match_type": doc.get("match_type", ""), "checklist_results": {}}
-            return await evaluate_single_document(
-                invention_summary, checklist, pdf,
-                doc.get("title", ""), doc.get("match_type", "Paper"),
-            )
+            if pdf and Path(pdf).exists():
+                res = await evaluate_single_document(
+                    invention_summary, checklist, pdf,
+                    doc.get("title", ""), doc.get("match_type", "Paper"),
+                    source_pdf_path=source_pdf_path,
+                    source_title=source_title,
+                )
+                res["source"] = "pdf"
+                return res
+            # PDF missing (403 / no link) — try abstract fallback so the candidate isn't wasted.
+            text = (doc.get("abstract") or "").strip() or (doc.get("snippet") or "").strip()
+            if len(text) >= 120:
+                return await evaluate_single_document_text(
+                    invention_summary, checklist, text,
+                    doc.get("title", ""), doc.get("match_type", "Paper"),
+                )
+            # No PDF and no usable abstract — skip.
+            return {"title": doc.get("title", ""), "match_type": doc.get("match_type", ""),
+                    "checklist_results": {}, "source": "no_content"}
 
     return list(await asyncio.gather(*[one(d) for d in documents]))
 
@@ -654,6 +826,11 @@ follows from the SOURCE DOCUMENT. Output strict JSON:
 
 async def generate_overall_summary(invention_summary: str, top_matches: list[dict]) -> str:
     """Generate plain-language novelty assessment for faculty inventors (not patent lawyers)."""
+    if not top_matches:
+        raise ValueError(
+            "generate_overall_summary called with zero matches — refusing to let the LLM "
+            "hallucinate prior art. Caller must guard against empty input."
+        )
     matches_lines = []
     for m in top_matches[:10]:
         title = m.get('title', '')

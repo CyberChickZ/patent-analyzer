@@ -152,6 +152,7 @@ def generate_html(data: dict) -> str:
 
     generated_at = data.get("generated_at", datetime.now(timezone.utc).isoformat())
     source_filename = data.get("source_filename", "")
+    job_id = data.get("job_id", "")
     source_title = data.get("source_title", "")
 
     # Split into groups
@@ -239,6 +240,12 @@ def generate_html(data: dict) -> str:
 
         badge_type = "Patent" if mtype == "Patent" else "Paper"
         card_cls = "card card-hit" if hit_count > 0 else "card card-none"
+        eval_source = m.get("eval_source", "pdf")
+        abstract_only = (eval_source == "abstract")
+        source_badge = ('<span class="src-badge src-abs" '
+                        'title="PDF unavailable — evaluated against abstract/snippet only. '
+                        'Consider verifying with full text.">abstract only</span>'
+                        if abstract_only else '')
 
         # Patent-specific metadata
         filing = esc(m.get("filing_date", ""))
@@ -269,7 +276,7 @@ def generate_html(data: dict) -> str:
       <span class="type-dot {'dot-patent' if badge_type == 'Patent' else 'dot-paper'}"></span>
       <div>
         {f'<a class="card-title" href="{esc(url or patent_link)}" target="_blank" onclick="event.stopPropagation()">{title}</a>' if (url or patent_link) else f'<div class="card-title">{title}</div>'}
-        <div class="card-id">{subtitle}</div>
+        <div class="card-id">{subtitle} {source_badge}</div>
       </div>
     </div>
     <div class="card-right">
@@ -406,6 +413,28 @@ a.card-title:hover{{color:var(--accent);text-decoration:underline}}
 .hit-pct{{font-size:0.88rem;font-weight:700}}
 .no-badge{{color:var(--miss);font-size:0.78rem}}
 .pdf-link{{font-size:0.72rem;color:var(--accent);text-decoration:none}}
+.src-badge{{display:inline-block;font-size:0.65rem;padding:0.05rem 0.4rem;border-radius:99px;margin-left:0.35rem;vertical-align:middle;font-weight:500;letter-spacing:0.02em;text-transform:uppercase}}
+.src-abs{{background:#fef3c7;color:#92400e;border:1px solid #fde68a}}
+/* Feedback */
+.fb-sec{{background:#f8fafc;border-left:3px solid var(--accent);margin-top:2rem}}
+.fb-row{{display:flex;gap:1rem;align-items:center;margin:0.6rem 0;flex-wrap:wrap}}
+.fb-label{{font-size:0.82rem;color:var(--text2);min-width:5.5rem;font-weight:500}}
+.fb-stars{{display:flex;gap:0.2rem}}
+.fb-star{{background:none;border:none;font-size:1.4rem;color:#d1d5db;cursor:pointer;padding:0 0.1rem;line-height:1;transition:color 0.15s}}
+.fb-star.on,.fb-star:hover,.fb-star:hover ~ .fb-star{{color:#fbbf24}}
+.fb-stars.hov .fb-star{{color:#d1d5db}}
+.fb-stars.hov .fb-star.hov,.fb-stars.hov .fb-star.hov ~ .fb-star{{color:#fbbf24}}
+.fb-tags{{display:flex;gap:0.4rem;flex-wrap:wrap}}
+.fb-tag{{font-size:0.78rem;padding:0.25rem 0.7rem;border-radius:99px;background:#eef1f5;color:var(--text2);cursor:pointer;display:inline-flex;align-items:center;gap:0.3rem;user-select:none}}
+.fb-tag input{{margin:0}}
+.fb-tag:has(input:checked){{background:#dbeafe;color:#1e40af}}
+.fb-input{{width:100%;padding:0.6rem 0.8rem;border:1px solid var(--border);border-radius:8px;font-family:inherit;font-size:0.88rem;resize:vertical;background:#fff}}
+.fb-input:focus{{outline:none;border-color:var(--accent)}}
+.fb-actions{{display:flex;gap:0.8rem;align-items:center;margin-top:0.6rem}}
+.fb-submit{{background:var(--accent);color:#fff;border:none;padding:0.5rem 1.2rem;border-radius:6px;font-size:0.85rem;cursor:pointer;font-weight:500}}
+.fb-submit:hover{{background:#1d4ed8}}
+.fb-submit:disabled{{opacity:0.5;cursor:not-allowed}}
+.fb-status{{font-size:0.8rem;color:var(--text2)}}
 .md-btn{{font-size:0.68rem;color:var(--accent);background:none;border:1px solid var(--accent);border-radius:5px;padding:0.1rem 0.4rem;cursor:pointer;opacity:0;transition:opacity .15s}}
 .card:hover .md-btn{{opacity:1}}
 .md-btn:hover{{background:var(--accent);color:#fff}}
@@ -505,6 +534,37 @@ a.card-title:hover{{color:var(--accent);text-decoration:underline}}
 
 <div id="hits">{hits_html}</div>
 <div id="nohits" style="display:none">{nohits_html}</div>
+
+<div class="sec fb-sec">
+  <div class="sec-t sec-t-lg">Your feedback</div>
+  <div class="sec-note">Help us refine the pipeline. We pair your feedback with the run's event log for offline analysis.</div>
+  <div class="fb-row">
+    <span class="fb-label">Quality</span>
+    <div class="fb-stars" id="fbStars">
+      <button class="fb-star" data-r="1">&#9733;</button>
+      <button class="fb-star" data-r="2">&#9733;</button>
+      <button class="fb-star" data-r="3">&#9733;</button>
+      <button class="fb-star" data-r="4">&#9733;</button>
+      <button class="fb-star" data-r="5">&#9733;</button>
+    </div>
+  </div>
+  <div class="fb-row">
+    <span class="fb-label">Issues (optional)</span>
+    <div class="fb-tags" id="fbTags">
+      <label class="fb-tag"><input type="checkbox" value="hallucinated_prior_art"> Hallucinated prior art</label>
+      <label class="fb-tag"><input type="checkbox" value="missed_prior_art"> Missed obvious prior art</label>
+      <label class="fb-tag"><input type="checkbox" value="wrong_scope"> Wrong checklist scope</label>
+      <label class="fb-tag"><input type="checkbox" value="self_match"> Source leaked as prior art</label>
+      <label class="fb-tag"><input type="checkbox" value="paywalled"> Key docs paywalled</label>
+      <label class="fb-tag"><input type="checkbox" value="other"> Other</label>
+    </div>
+  </div>
+  <textarea id="fbComment" class="fb-input" rows="4" placeholder="What went well / what went wrong. Paste quotes, cite specific cards. This feeds the next refine cycle."></textarea>
+  <div class="fb-actions">
+    <button class="fb-submit" onclick="submitFeedback()">Submit feedback</button>
+    <span class="fb-status" id="fbStatus"></span>
+  </div>
+</div>
 
 </div>
 
@@ -622,6 +682,45 @@ function dlFullMd(mode){{
 }}
 
 document.addEventListener('keydown',e=>{{if(e.key==='Escape')closeMd()}});
+
+// ── Feedback capture ──
+const _JOB_ID={json.dumps(job_id)};
+let _fbRating=0;
+document.querySelectorAll('#fbStars .fb-star').forEach(btn=>{{
+  btn.addEventListener('mouseenter',()=>{{
+    const r=+btn.dataset.r;
+    document.querySelectorAll('#fbStars .fb-star').forEach(b=>b.classList.toggle('hov',+b.dataset.r<=r));
+    document.getElementById('fbStars').classList.add('hov');
+  }});
+  btn.addEventListener('mouseleave',()=>document.getElementById('fbStars').classList.remove('hov'));
+  btn.addEventListener('click',()=>{{
+    _fbRating=+btn.dataset.r;
+    document.querySelectorAll('#fbStars .fb-star').forEach(b=>b.classList.toggle('on',+b.dataset.r<=_fbRating));
+  }});
+}});
+
+async function submitFeedback(){{
+  const btn=document.querySelector('.fb-submit');
+  const st=document.getElementById('fbStatus');
+  if(!_JOB_ID){{st.textContent='No job_id in report.';st.style.color='#b91c1c';return;}}
+  const comment=document.getElementById('fbComment').value.trim();
+  const tags=[...document.querySelectorAll('#fbTags input:checked')].map(i=>i.value);
+  if(!_fbRating && !comment && tags.length===0){{st.textContent='Pick a rating or write something first.';st.style.color='#b91c1c';return;}}
+  btn.disabled=true;st.textContent='Sending...';st.style.color='';
+  try{{
+    const url=(location.pathname.startsWith('/api')?'':'/api')+`/feedback/${{_JOB_ID}}`;
+    const r=await fetch(url,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{rating:_fbRating||null,comment,tags}})}});
+    if(!r.ok)throw new Error(`HTTP ${{r.status}}`);
+    const j=await r.json();
+    st.textContent=`Thanks — recorded (${{j.total_feedback||1}} total for this job).`;
+    st.style.color='#065f46';
+    document.getElementById('fbComment').value='';
+    document.querySelectorAll('#fbTags input:checked').forEach(i=>i.checked=false);
+  }}catch(e){{
+    st.textContent='Send failed: '+e.message;
+    st.style.color='#b91c1c';
+  }}finally{{btn.disabled=false}}
+}}
 </script>
 </body></html>'''
 

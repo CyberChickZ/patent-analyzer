@@ -7,7 +7,7 @@ name = "patent-analyzer"
 version = "0.3.0"
 description = "Patent novelty analysis — Gemini + SerpAPI + semantic search + A2A protocol"
 readme = "README.md"
-license = {text = "PolyForm-Noncommercial-1.0.0"}
+license = {text = "MIT"}
 requires-python = ">=3.10"
 dependencies = [
     "certifi",

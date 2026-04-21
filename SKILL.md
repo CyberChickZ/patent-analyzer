@@ -1,227 +1,154 @@
 ---
 name: patent-analyze
 description: >
-  Analyze a paper/script/patent for patentability under US patent law (35 USC).
-  Decompose into patentable aspects, search prior art via SerpAPI, read full PDFs,
-  evaluate each match 1:1 against checklist, produce interactive HTML report.
-allowed-tools: Read, Write, Edit, Bash, Glob, Grep, Agent, WebFetch, WebSearch
+  Analyze a paper/patent PDF for novelty under US patent law (35 USC 102/103).
+  5-phase pipeline: detect + summarize (LLM w/ self-check retry), decompose +
+  plan, multi-channel parallel recall (5 sources) + semantic rerank + self-
+  citation filter, deep eval with source+candidate PDFs side-by-side, HTML
+  report with feedback form.
 ---
 
-# Patent Analysis Skill
+# Patent Analysis Pipeline
 
-You are an expert patent analyst working under US patent law (35 USC 102/103).
-Given a paper or patent, you find what IS patentable, search for prior art,
-then deeply evaluate the top candidates by reading full PDFs.
+**This file documents the LIVE Cloud Run service** (`app/main.py:run_pipeline`).
+An older CLI flow with `eval_tasks/*.json` and manual checkpoints existed in
+earlier versions; that flow is gone. The entry point for everything now is
+`run_pipeline(job_id)` — REST `POST /analyze` and A2A `message/send` both call it.
 
-## Directory Layout
+## Invariants
 
-```
-./patent-analysis-output/           # All output goes here
-├── phase1.json                     # IDCA results
-├── phase2.json                     # Decomposition + checklist + delegation
-├── queries.json                    # Generated search queries
-├── phase3_search.json              # Raw search results
-├── search.log                      # Incremental search log
-├── top200.json                     # Pre-filtered candidates
-├── papers/                         # Downloaded PDFs
-├── eval_tasks/                     # Individual evaluation task files (1:1)
-│   ├── task_000_xxx.json
-│   └── ...
-├── results.json                    # Final merged results
-└── report.html                     # Static HTML report
-```
+- **Exactly 6 LLM calls per job** (+ per-doc deep eval). Tokens go to PDF analysis, not routing.
+- **Every LLM step is wrapped in `try_step`**: exceptions become `failure_reason` events
+  (LLM-summarized human-readable cause), not silent retries.
+- **Every LLM call is captured** (system + user + response + thinking) in `state.json`
+  so the timeline can replay exactly what Gemini saw.
+- **Defensive guards against empty inputs**: when recall pool is empty, pipeline halts
+  with `failed_recall` rather than letting the summarizer hallucinate fake prior art.
 
-## Scripts (all deterministic, no LLM)
+## Phase 1 — Detect & Summarize
 
-All scripts live in `scripts/`:
+- PyMuPDF extracts **page 1 only** (abstract + intro; the LLM needs the authors'
+  self-description, not experimental tables). Pages 1–10 are kept for downstream.
+- Source identity: `source_title` via metadata → fallback to first non-boilerplate
+  line. Header boilerplate (`"Published as a conference paper at..."`, `"Under review"`,
+  `"Proceedings of"`, `ICLR`/`NeurIPS`/`ICML`/`CVPR` short lines, etc.) is explicitly
+  skipped. `source_arxiv_id` and `source_doi` extracted via regex from first 2 pages.
+- Deterministic `detect_invention` / `classify_document` / `classify_category`
+  (keyword rules — not LLM).
+- `summarize_invention` (LLM, thinking budget 4096) → `self_check` LLM.
+  Self-check failures emit `quality_warning`; no retry here (summary is downstream-tolerant).
 
-| Script | What it does |
-|--------|-------------|
-| `serpapi_search.py` | SerpAPI search with retry, incremental save, resume |
-| `prefilter.py` | Keyword relevance ranking, select top N |
-| `fetch_abstracts.py` | OpenAlex API for real abstracts (free, no key) |
-| `deep_evaluator.py prepare` | Create eval_tasks/*.json (1 target × 1 prior art each) |
-| `deep_evaluator.py merge` | Aggregate results, dedup, filter self-refs, compute scores |
-| `generate_report.py` | Static HTML from results.json |
+## Phase 2 — Decompose & Plan
 
-## Environment
+- `decompose_invention` (LLM, thinking 4096) — 8–20 atomic elements.
+- `generate_checklist` (LLM, thinking 4096) — 20–30 testable items.
+- `plan_delegation` (LLM, thinking 4096) — atoms × search groups with anchor
+  and expansion terms per group.
+- **`plan_delegation` self-check is retry-enabled** (`try_step(retry_with_feedback=True)`):
+  if the reviewer flags a hallucinated atom, the plan is regenerated once with
+  `feedback={issues, suggestion, previous}` injected into the prompt. Rationale: one
+  fake atom pollutes all 5 search groups downstream.
 
-- `SERPAPI_KEY`: Required. Check `backend/.keys/serpapi.key` if not in env.
+## Phase 3 — Multi-channel Recall (parallel)
 
-## Input
+Five channels via `asyncio.gather`:
 
-`$ARGUMENTS` is a file path (PDF/text) or URL.
+| Channel | Query used | Rate-limit strategy |
+|---|---|---|
+| `serpapi_patents` | per-group `patent_queries[:2]` | shared SerpAPI `Semaphore(1)` + 1.5s cooldown |
+| `serpapi_scholar` | per-group `paper_queries[:2]` | same shared lock |
+| `semantic_scholar` | short query (title / first sentence) | anonymous 100/5min; key = `SEMANTIC_SCHOLAR_KEY` |
+| `openalex` | short query | key = `OPENALEX_KEY` |
+| `arxiv` | short query | Atom API |
 
----
+- **`recall_query_short`** (title / first non-trivial sentence, ≤200 chars) is used
+  by SS / OpenAlex / arXiv. Long narrative queries return 0 from keyword-oriented APIs;
+  SerpAPI channels use the structured group queries instead.
+- Per-query failures that didn't kill the channel emit one compact `query_partial`
+  event (not `channel_error`) — no timeline spam.
+- **Pool dedupes** by stable identity (DOI / arXiv ID / patent number / title hash)
+  with a √N cross-channel consensus boost.
+- **If `pool = 0`, halt**: write `recall_failure: true` to `results.json`, set
+  `job.status = failed_recall`, skip Phase 3b/4/5 entirely. This is the hard guard
+  that prevents the earlier regression where `generate_overall_summary` hallucinated
+  three fake US patent numbers when handed an empty matches list.
 
-## Phase 1: IDCA — Is This Patentable?
+## Phase 3b — Semantic Rerank + Self-Citation Filter
 
-1. **Read the document** (Read tool for PDF, WebFetch for URL)
+- **Self-citation filter (3 layers)**, in order:
+  1. arXiv ID exact match (source vs candidate) — strongest signal when both are tagged
+  2. DOI exact match — same
+  3. Title token similarity ≥ 0.75 — fallback when identity isn't known AND source_title
+     is not header boilerplate
+- `sentence-transformers` (`all-MiniLM-L6-v2`) reranks the filtered pool against the
+  invention fingerprint. Top 30 proceed to PDF download.
+- Download tries each candidate's `pdf_link`; 403 / paywall failures are expected.
+- Candidates are usable for Phase 4 if **(PDF downloaded) OR (abstract/snippet ≥ 120 chars)**.
+  Abstract-fallback candidates are tagged `eval_source="abstract"`.
 
-2. **Invention Detection** — your response MUST begin with one of:
-   - `present` — concrete invention clearly disclosed → continue
-   - `implied` — invention suggested but incomplete → continue with caveats
-   - `absent` — no invention → save minimal report, END
+## Phase 4 — Deep Evaluation
 
-3. **Document Type** — respond with: `patent` | `paper` | `other`
+- `evaluate_batch(docs, max_concurrent=2, source_pdf_path=..., source_title=...)`.
+  `max_concurrent=2` is intentional — prevents Gemini rate-limit contention with Phase 3.
+- For each candidate:
+  - **PDF path** (primary): `call_llm_with_pdfs([source_pdf, candidate_pdf])`. Gemini
+    sees both files natively (multi-modal part bytes, no text extraction, no truncation).
+    Per file: <18 MB → inline bytes; ≥18 MB → fallback to text of first 20 pages with
+    a `[fallback_text ...]` prefix so the LLM knows.
+  - **Abstract path** (fallback): `evaluate_single_document_text(abstract)`. Prompt
+    explicitly tells the LLM the full PDF is unavailable and to only match on evidence
+    the abstract states.
+- Prompt requires `is_source_duplicate: true/false` at the top of the JSON output. If
+  `true`, the pipeline rewrites all `match` fields to `false` (so a bad-recall candidate
+  cannot silently become the top "prior art" against itself).
+- **Post-eval filters**, in order:
+  - **Selfmatch backstop**: drop if (`score ≥ 95%` AND `title_overlap ≥ 60%`) OR `title_overlap ≥ 80%`.
+    Only fires when `source_title` is non-boilerplate. Emits `selfmatch_dropped` event.
+  - **Zero-match filter**: drop any doc where all checklist items are `match=false`.
+    Noise, not prior art.
 
-4. **Invention Summary** — what is built/done (not why), use paper's terminology
+## Phase 5 — Report
 
-5. **Invention Category** under 35 USC §101 — respond with:
-   `Process` | `Machine` | `Manufacture` | `Composition` | `Design` | `None`
+- `generate_overall_summary(summary, hit_matches[:10])` — LLM writes a 5-section novelty
+  assessment ("What you invented", "What's already out there", "What appears new",
+  "Honest assessment", "Suggested next steps"). **Hard assertion**: function raises
+  `ValueError` if `top_matches=[]` (belt-and-suspenders beyond the Phase 3 halt).
+- `generate_html(results)` renders an interactive report:
+  - Expandable cards per candidate with matched/unmatched checklist drill-down
+  - `abstract only` orange badge for candidates evaluated without PDF
+  - Feedback form at the bottom (star rating + pre-set issue tags + freeform comment)
+  - Feedback POSTs to `/feedback/{job_id}` → saved to `feedback.json` in GCS for
+    offline analysis
+- All artifacts uploaded to `gs://aime-hello-world-amie-uswest1/patent-analyzer/jobs/{job_id}/`:
+  `state.json`, `results.json`, `report.html`, `feedback.json` (if submitted),
+  `upload/{filename}` (if signed-URL flow).
 
-**Save `./patent-analysis-output/phase1.json`**
+## Evolve mode (`?evolve=true`)
 
----
+Opt-in per request. Adds a full-context reviewer between phases. In Phase 3 the
+reviewer can request `do_more` → fans out via Semantic Scholar recommendations +
+references + citations from the top pooled hit (1-hop citation graph, bounded to
+one expansion round). In Phase 4 it evaluates in elastic batches of 5 (cap 30)
+with `elastic_stop` available if top hits are clearly irrelevant.
 
-## Phase 2: What Aspects Are Patentable?
+## Where to change what
 
-Think like a patent attorney drafting claims:
+| Change | File |
+|---|---|
+| Add/remove an LLM call | `app/llm.py` + wire it in `app/main.py:run_pipeline` via `try_step` |
+| Add/remove a recall channel | `patent_analyzer/recall/<channel>.py` + register in `channel_specs` in `run_pipeline` |
+| Adjust rate limiting | SerpAPI: `serpapi_lock` and `SERPAPI_COOLDOWN` in `run_pipeline`; HTTP retry backoff in `patent_analyzer/searcher.py` |
+| Change self-citation thresholds | Phase 3b token-similarity: `0.75` in `run_pipeline`; Phase 4 post-eval: `0.95 / 0.60 / 0.80` |
+| Change report UI | `patent_analyzer/report_generator.py` (CSS + HTML + JS all inline) |
+| Change what gets saved | `results` dict in `run_pipeline` right before Phase 5 |
 
-6. **Independent Claim scope** — what is the complete system/method?
-   This is the "bottle". Every search must find this, not just isolated parts.
+## Rules for adding new LLM steps
 
-7. **Dependent Claim features** — what specific techniques distinguish it?
-   These are the "caps". Search for them in context of the bottle.
-
-8. **Checklist** (20-30 items) — concrete, testable requirements.
-   Each grounded in the paper. Atomic. "The system includes X that performs Y."
-
-9. **Delegation Planning** — atoms + search groups following USPTO methodology:
-   - Layer 1 (102 anticipation): Search for complete system
-   - Layer 2: Core novelty subcombinations
-   - Layer 3 (103): Individual dependent claim features
-   - Layer 4: Broader field for obviousness combinations
-
-10. **Generate queries** (FIXED — no LLM):
-    ```bash
-    # query_builder.py generates queries.json from delegation planning
-    # Format: ("anchor1" OR "anchor2") AND ("expansion1" OR "expansion2")
-    ```
-
-**Save `./patent-analysis-output/phase2.json`**
-
-### CHECKPOINT 1: User Review
-
-**STOP. Show the user:**
-- Numbered checklist
-- Atom list with scores
-- Search groups with sample queries
-- Ask: "Does this look correct? Adjust anything before searching?"
-
-**Wait for confirmation.**
-
----
-
-## Phase 3: Search & Download (all FIXED scripts)
-
-```bash
-# 3a. Search (SerpAPI — Google Patents + Scholar)
-python3 scripts/serpapi_search.py \
-  --queries-file ./patent-analysis-output/queries.json \
-  --output ./patent-analysis-output/phase3_search.json \
-  --log-file ./patent-analysis-output/search.log \
-  --download-pdfs \
-  --papers-dir ./patent-analysis-output/papers/
-
-# 3b. Fetch real abstracts (OpenAlex — free, no key)
-python3 scripts/fetch_abstracts.py \
-  --results ./patent-analysis-output/phase3_search.json \
-  --limit 50
-
-# 3c. Pre-filter top candidates by keyword relevance
-python3 scripts/prefilter.py \
-  --search-results ./patent-analysis-output/phase3_search.json \
-  --checklist-file ./patent-analysis-output/phase2.json \
-  --output ./patent-analysis-output/top200.json \
-  --limit 200
-```
-
-### CHECKPOINT 2: Search Review
-
-**Show stats:** X patents, Y papers found. Per-group breakdown.
-**Ask:** "Proceed with deep evaluation?"
-
----
-
-## Phase 4: Deep PDF Evaluation
-
-### Step 4a: Prepare tasks (FIXED)
-
-```bash
-python3 scripts/deep_evaluator.py prepare \
-  --search-results ./patent-analysis-output/phase3_search.json \
-  --phase1 ./patent-analysis-output/phase1.json \
-  --phase2 ./patent-analysis-output/phase2.json \
-  --output-dir ./patent-analysis-output \
-  --limit 20
-```
-
-This creates `eval_tasks/task_000.json`, `task_001.json`, etc.
-**Each task = invention description + ONE prior art PDF + checklist.**
-**NOT batched. Strict 1:1 comparison.**
-
-### Step 4b: Run evaluations (LLM — parallel Agents)
-
-For each task file, spawn an Agent that:
-1. Reads the task file to get the prompt, PDF path, and checklist
-2. Reads the prior art PDF (first 5-8 pages)
-3. For EACH checklist item: finds explicit evidence, cites section/quote
-4. Assesses 102 anticipation (does this single doc teach everything?)
-5. Identifies 103 key teachings (what can be combined?)
-6. Writes result back into the task file with `"status": "completed"`
-
-**Spawn agents in parallel** — group task files into batches of 5.
-Each agent handles 1 task (1 PDF). Multiple agents run concurrently.
-
-### Step 4c: Merge results (FIXED)
-
-```bash
-python3 scripts/deep_evaluator.py merge \
-  --output-dir ./patent-analysis-output \
-  --search-results ./patent-analysis-output/phase3_search.json
-```
-
-This deduplicates, filters self-references, computes scores,
-enriches with snippets/abstracts, and saves `results.json`.
-
----
-
-## Phase 5: Report (FIXED)
-
-```bash
-# 5a. Fetch abstracts for evaluated docs
-python3 scripts/fetch_abstracts.py \
-  --results ./patent-analysis-output/results.json \
-  --limit 50
-
-# 5b. Generate HTML
-python3 scripts/generate_report.py \
-  --input ./patent-analysis-output/results.json \
-  --output ./patent-analysis-output/report.html
-```
-
-**Tell user:** `open ./patent-analysis-output/report.html`
-
----
-
-## Report UI
-
-- Default: show only docs WITH overlap (possible matches)
-- Hover card → matched checklist items (full text, one per line, 300ms delay)
-- Click card → expand ALL checklist items (matched + unmatched with analysis)
-- MD button (hover-only) → export single doc as Markdown
-- "Copy as MD" dropdown → With Overlap / All / No Overlap / Download
-- Abstract: real abstract from OpenAlex, truncated default, full on hover
-- Paper ID: hide garbled Scholar IDs, show only real patent numbers
-
----
-
-## Rules
-
-- ALL analysis text in English
-- Use the paper's own terminology
-- Think under 35 USC 102 (anticipation) and 103 (obviousness)
-- Each evaluation is 1 target × 1 prior art (never batch multiple papers)
-- Every deterministic step uses a script — no ad-hoc terminal commands
-- LLM response routing: first word encodes decision (present/absent/Process/etc.)
+1. Must go through `call_llm` / `call_llm_with_pdfs` so `_emit` captures it.
+2. Must set `llm_label(phase, label)` beforehand so the event gets attributed correctly.
+3. If the step's output feeds a downstream step, wrap in `try_step` with
+   `validator_input=...` so self-check runs.
+4. If a self-check failure would poison downstream (e.g. hallucinated plan atom),
+   set `retry_with_feedback=True` and accept a `feedback=None` kwarg in the step.
+5. If the step can crash due to empty/unusable input, add a hard `ValueError` at
+   the top of the function. Callers must guard, not the LLM.

@@ -1,18 +1,62 @@
 # Patent Analyzer
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+
 AI-powered patent novelty analysis. Upload a paper or patent PDF → get a full prior art search + novelty assessment report. Two ways to use it:
 
 - **Web app** (faculty inventors, manual upload)
 - **A2A protocol** (other agents / n8n / scripts can call it as a service)
 
+---
+
+## How it works · 工作原理
+
+> 中英双语说明。英文在前，中文在下。
+
+### English
+
+The analyzer ingests a single PDF (a paper or a patent) and produces a novelty assessment grounded in real prior art. Internally it runs a five-phase pipeline:
+
+1. **Detect & summarize** — PyMuPDF extracts page 1 only for Phase 1 (abstract + intro live there; keeps the LLM focused on what the authors say they built, not on experimental tables). Deterministic keyword rules classify document type (patent / paper) and §101 category. Gemini 2.5 Pro then writes a faithful summary. A self-check LLM call verifies the summary against the source and emits a `quality_warning` if anything is hallucinated.
+2. **Decompose & plan** — The invention is broken into 8–20 atomic elements, a 20–30 item testable checklist is generated, and a search plan (atoms × groups with anchor and expansion terms) is produced. Plan self-check is **retry-enabled**: if the reviewer flags a hallucinated atom (e.g. "the paper mentions X" when it doesn't), the plan is regenerated once with the reviewer's feedback injected into the prompt. This prevents one fake atom from poisoning all five search groups downstream.
+3. **Multi-channel recall (parallel)** — Five channels run concurrently via `asyncio.gather`: SerpAPI Google Patents, SerpAPI Google Scholar, Semantic Scholar, OpenAlex, arXiv. Each returns `(candidates, error)`; per-query errors that didn't kill the channel are downgraded from `channel_error` to a compact `query_partial` note (no log spam). SerpAPI is globally throttled to 1 in-flight request with a 1.5 s cooldown to stay under the account quota. The pool layer deduplicates candidates by stable identity (DOI / arXiv ID / patent number / title hash) and boosts cross-channel consensus.
+4. **Semantic rerank & self-citation filter (Phase 3b)** — `sentence-transformers` (all-MiniLM-L6-v2) reranks the pool against the invention fingerprint. A three-layer self-citation filter then removes the source paper from the results: (A) arXiv ID / DOI identity match extracted from the source PDF, (B) title token similarity ≥ 0.75, (C) a Phase 4 post-eval backstop that drops any candidate scoring ≥ 95 % with ≥ 60 % title overlap. This matters: without it, the paper can win "92 % prior art" against itself.
+5. **Deep eval & report** — Up to 20 top candidates go to Phase 4. For each candidate the LLM sees **both the source PDF and the candidate PDF as native multi-modal inputs** (no text extraction, no truncation, up to 18 MB per file inline) along with the checklist. It explicitly answers `is_source_duplicate: true/false` before scoring. When a candidate PDF can't be downloaded (paywall), a text-fallback path evaluates against the abstract and marks the result with an "abstract only" badge. Post-eval, docs with zero matches are dropped (noise, not prior art). Phase 5 generates an interactive HTML report with a feedback form and uploads everything to GCS.
+
+Throughout, every LLM call (system prompt, user prompt, response, thinking trace) is captured in `state.json` so the frontend can render a full event timeline — click any step to see exactly what Gemini saw.
+
+**Defensive design principles** informing every phase:
+- Refuse-to-hallucinate guards: if recall returns zero candidates, the pipeline marks the job `failed_recall` and does **not** call the novelty-summary LLM. An earlier incident had the summarizer invent three fake US patent numbers when given an empty matches list.
+- Honest failure signals over silent retries: a failed step emits a human-readable `failure_reason` (LLM-summarized from the raw error) to the event timeline. No hidden retries that mask real problems.
+- Truth-grounded output: the novelty summary is only allowed to cite documents that actually appear in the scoring report, and the LLM is instructed to flag self-duplicates explicitly.
+
+### 中文
+
+这个分析器吃一份 PDF（论文或专利），输出一份基于真实 prior art 的 novelty 评估。内部五阶段流程：
+
+1. **检测 + 摘要** — PyMuPDF 只抽取 page 1（作者自述部分，远离实验表格），确定性关键词规则识别文档类型（专利/论文）和 §101 类别，再让 Gemini 2.5 Pro 写摘要。Self-check 再跑一次 LLM 对比原文，发现幻觉就 emit `quality_warning`。
+2. **拆解 + 计划** — 把发明拆成 8–20 个 atomic element，产出 20–30 条 checklist，再规划搜索 plan（atoms × groups + anchor/expansion 关键词）。**Plan self-check 失败会 retry 一次**：reviewer 发现幻觉 atom（例如原文根本没提 X），就把 feedback 注入 prompt 重新生成。不 retry 的话一个假 atom 会污染下游 5 个 search group。
+3. **多路召回（并行）** — 5 个 channel 同时跑（`asyncio.gather`）：SerpAPI Google Patents、SerpAPI Google Scholar、Semantic Scholar、OpenAlex、arXiv。每个 channel 返回 `(candidates, error)`；单条 query 失败但整个 channel 活着的，不报 `channel_error`，只记一条 `query_partial` 不刷屏。SerpAPI 全局限速：Semaphore(1) + 1.5s cooldown，避免触发账号配额。Pool 层按 DOI / arXiv ID / 专利号 / 标题哈希去重，跨 channel 共识给加权。
+4. **语义重排 + 自引过滤（Phase 3b）** — `sentence-transformers` (all-MiniLM-L6-v2) 按 invention fingerprint 重排。三层自引过滤防止源论文出现在结果里：(A) Phase 1 抽出的 arXiv ID / DOI 精确匹配；(B) 标题词元相似度 ≥ 0.75；(C) Phase 4 post-eval 兜底 —— score ≥ 95% 且标题重叠 ≥ 60% 的直接丢。不过滤会出现源论文以 92% "prior art" 压在自己头上的荒谬结果。
+5. **深度评估 + 报告** — Top 20 进 Phase 4。每个候选 LLM 都**同时看到源 PDF 和候选 PDF 原件**（Gemini 原生多模态，不截断、不抽文本，单文件 <18MB 走 inline）+ checklist。LLM 先显式回答 `is_source_duplicate: true/false` 再打分。候选 PDF 下载失败（paywall）就走 abstract fallback 路径，报告里打 "abstract only" 橙色 badge。Post-eval 把 0-match 的 doc 丢掉（噪声，不是 prior art）。Phase 5 生成带 feedback 表单的 HTML 报告上传 GCS。
+
+全流程每一次 LLM 调用（system/user/response/thinking）都落进 `state.json`，前端 timeline 可以点开任一步看 Gemini 当时实际看到和产出的东西。
+
+**贯穿所有阶段的设计原则**：
+- **拒绝幻觉 guard**：recall 返回 0 时 pipeline 把 job 标 `failed_recall`，**不**调 novelty summary LLM。上一次事故里 summarizer 拿到空 matches 生造了 3 个假美国专利号。
+- **诚实失败信号**：失败的步骤 emit 人话版 `failure_reason`（LLM 归纳 raw error 得来）到 timeline，不搞掩盖问题的静默重试。
+- **基于真实数据的输出**：novelty summary 只能引用 scoring_report 里实际存在的文档，LLM 被明确要求 flag 自引。
+
+---
+
 ## Live URLs
 
 | Component | URL |
 |---|---|
-| Web app | https://patent-analyzer-frontend-839195423256.us-west1.run.app |
-| Backend API | https://patent-analyzer-839195423256.us-west1.run.app |
-| Agent Card (A2A discovery) | https://patent-analyzer-839195423256.us-west1.run.app/.well-known/agent-card.json |
-| A2A JSON-RPC endpoint | `POST https://patent-analyzer-839195423256.us-west1.run.app/a2a` |
+| Web app | https://patent-analyzer-frontend-2mk262glgq-uw.a.run.app |
+| Backend API | https://patent-analyzer-2mk262glgq-uw.a.run.app |
+| Agent Card (A2A discovery) | https://patent-analyzer-2mk262glgq-uw.a.run.app/.well-known/agent-card.json |
+| A2A JSON-RPC endpoint | `POST https://patent-analyzer-2mk262glgq-uw.a.run.app/a2a` |
 
 ## Architecture
 
@@ -146,7 +190,7 @@ JSON-RPC at `POST /a2a`. Methods:
 # Base64-encode the PDF
 BYTES=$(base64 -w 0 paper.pdf)
 
-curl -X POST https://patent-analyzer-839195423256.us-west1.run.app/a2a \
+curl -X POST https://patent-analyzer-2mk262glgq-uw.a.run.app/a2a \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -168,7 +212,7 @@ curl -X POST https://patent-analyzer-839195423256.us-west1.run.app/a2a \
 #### Example: poll status via A2A
 
 ```bash
-curl -X POST https://patent-analyzer-839195423256.us-west1.run.app/a2a \
+curl -X POST https://patent-analyzer-2mk262glgq-uw.a.run.app/a2a \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -183,13 +227,13 @@ The returned task `metadata` includes `phase`, `phases` (per-phase data), and on
 ### REST example (small file)
 
 ```bash
-curl -X POST https://patent-analyzer-839195423256.us-west1.run.app/analyze \
+curl -X POST https://patent-analyzer-2mk262glgq-uw.a.run.app/analyze \
   -F "file=@paper.pdf"
 # → {"job_id": "a1b2c3d4", "status": "queued"}
 
-curl https://patent-analyzer-839195423256.us-west1.run.app/status/a1b2c3d4
-curl https://patent-analyzer-839195423256.us-west1.run.app/events/a1b2c3d4
-open  https://patent-analyzer-839195423256.us-west1.run.app/report/a1b2c3d4
+curl https://patent-analyzer-2mk262glgq-uw.a.run.app/status/a1b2c3d4
+curl https://patent-analyzer-2mk262glgq-uw.a.run.app/events/a1b2c3d4
+open  https://patent-analyzer-2mk262glgq-uw.a.run.app/report/a1b2c3d4
 ```
 
 ### Large file (>25 MB) — signed URL flow
