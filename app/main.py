@@ -270,8 +270,24 @@ async def get_status(job_id: str):
     job = _get_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
-    # Detect zombie jobs: running but no heartbeat for >15 min
+    # Detect zombie jobs: running with no heartbeat for >15 min.
+    # The real fix for Phase 4 going silent is heartbeat-after-each-doc inside
+    # evaluate_batch (see on_doc_done hook). The threshold itself stays tight
+    # so a *genuinely* stuck pipeline doesn't hide.
+    #
+    # Cross-instance reconciliation: if Phase 5 already wrote the report to GCS,
+    # the pipeline finished on another Cloud Run instance — this instance's
+    # in-memory view is stale. Trust the GCS artifact, not the heartbeat.
     if job.get("status") == "running":
+        try:
+            bucket = _get_gcs().bucket(GCS_BUCKET)
+            if bucket.blob(f"{GCS_PREFIX}{job_id}/report.html").exists():
+                job["status"] = "completed"
+                job["phase"] = "phase5"
+                _save_job(job)
+                return job
+        except Exception:
+            pass
         last_hb = job.get("last_heartbeat") or job.get("created_at")
         if last_hb:
             try:
@@ -1475,6 +1491,7 @@ async def run_pipeline(job_id: str):
                 summary, checklist, batch_docs, max_concurrent=2,
                 source_pdf_path=input_path if input_path.endswith(".pdf") else None,
                 source_title=source_title,
+                on_doc_done=heartbeat,  # keep zombie detector from flagging Phase 4
             )
 
         def _absorb_results(eval_results: list[dict]):

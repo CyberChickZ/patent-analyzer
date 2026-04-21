@@ -607,31 +607,45 @@ async def evaluate_batch(
     max_concurrent: int = 2,
     source_pdf_path: str | None = None,
     source_title: str | None = None,
+    on_doc_done: Callable[[], None] | None = None,
 ) -> list[dict]:
+    """Evaluate a batch of candidates.
+
+    on_doc_done: optional callback fired after each doc's eval completes
+    (success or failure). Used by the pipeline to heartbeat so the zombie
+    detector doesn't falsely flag this long-running phase as stuck.
+    """
     sem = asyncio.Semaphore(max_concurrent)
 
     async def one(doc):
         async with sem:
-            pdf = doc.get("local_pdf", "")
-            if pdf and Path(pdf).exists():
-                res = await evaluate_single_document(
-                    invention_summary, checklist, pdf,
-                    doc.get("title", ""), doc.get("match_type", "Paper"),
-                    source_pdf_path=source_pdf_path,
-                    source_title=source_title,
-                )
-                res["source"] = "pdf"
-                return res
-            # PDF missing (403 / no link) — try abstract fallback so the candidate isn't wasted.
-            text = (doc.get("abstract") or "").strip() or (doc.get("snippet") or "").strip()
-            if len(text) >= 120:
-                return await evaluate_single_document_text(
-                    invention_summary, checklist, text,
-                    doc.get("title", ""), doc.get("match_type", "Paper"),
-                )
-            # No PDF and no usable abstract — skip.
-            return {"title": doc.get("title", ""), "match_type": doc.get("match_type", ""),
-                    "checklist_results": {}, "source": "no_content"}
+            try:
+                pdf = doc.get("local_pdf", "")
+                if pdf and Path(pdf).exists():
+                    res = await evaluate_single_document(
+                        invention_summary, checklist, pdf,
+                        doc.get("title", ""), doc.get("match_type", "Paper"),
+                        source_pdf_path=source_pdf_path,
+                        source_title=source_title,
+                    )
+                    res["source"] = "pdf"
+                    return res
+                # PDF missing (403 / no link) — try abstract fallback so the candidate isn't wasted.
+                text = (doc.get("abstract") or "").strip() or (doc.get("snippet") or "").strip()
+                if len(text) >= 120:
+                    return await evaluate_single_document_text(
+                        invention_summary, checklist, text,
+                        doc.get("title", ""), doc.get("match_type", "Paper"),
+                    )
+                # No PDF and no usable abstract — skip.
+                return {"title": doc.get("title", ""), "match_type": doc.get("match_type", ""),
+                        "checklist_results": {}, "source": "no_content"}
+            finally:
+                if on_doc_done is not None:
+                    try:
+                        on_doc_done()
+                    except Exception:
+                        pass
 
     return list(await asyncio.gather(*[one(d) for d in documents]))
 
