@@ -260,6 +260,32 @@ app.post("/api/jobs/cleanup", async (req, res) => {
   }
 });
 
+// Feedback capture — lets the HTML report POST user feedback per job
+app.post("/api/feedback/:jobId", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(
+      `/feedback/${encodeURIComponent(req.params.jobId)}`,
+      { method: "POST", data: req.body },
+    );
+    res.status(status).json(data);
+  } catch (e) {
+    console.error("Error in /api/feedback POST:", e);
+    res.status(500).json({ error: "Proxy error" });
+  }
+});
+
+app.get("/api/feedback/:jobId", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(
+      `/feedback/${encodeURIComponent(req.params.jobId)}`,
+    );
+    res.status(status).json(data);
+  } catch (e) {
+    console.error("Error in /api/feedback GET:", e);
+    res.status(500).json({ error: "Proxy error" });
+  }
+});
+
 // Health
 app.get("/api/healthz", async (req, res) => {
   try {

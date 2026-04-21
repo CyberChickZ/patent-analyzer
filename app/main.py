@@ -1019,7 +1019,11 @@ async def run_pipeline(job_id: str):
         ucd = await try_step(
             "Decomposing invention",
             phase="phase2",
-            fn=lambda: decompose_invention(paper_text),
+            fn=lambda feedback=None: decompose_invention(
+                paper_text,
+                feedback=feedback,
+                source_pdf_path=input_path if input_path.endswith(".pdf") else None,
+            ),
             validator_input=paper_text[:15000],  # match what summarize/decompose actually saw
         )
         if not ucd:
@@ -1392,16 +1396,19 @@ async def run_pipeline(job_id: str):
             inter = len(ta & tb)
             return inter / min(len(ta), len(tb))
 
-        # Layered self-match filter:
-        #   Layer A — identity match (arxiv_id / DOI): strongest signal, always correct.
-        #             Recall candidates expose these via the pool's raw data.
-        #   Layer B — title token similarity ≥ 0.75: fallback when identity isn't known.
-        # We run BOTH so a well-tagged candidate is caught by A, and a poorly-tagged
-        # one by B. Only sources with valid (non-boilerplate) titles trigger B.
-        removed = []
-        filtered = []
+        # Self-match TAGGING (not removal):
+        # Per product spec: when the source paper is indexed online and gets
+        # retrieved, surface it in a separate "Exact Find" section rather than
+        # silently deleting — users find it valuable to see that their paper
+        # is discoverable. Novelty ranking still excludes self-matches.
+        #
+        # Three signals, in order of strength:
+        #   A. arxiv_id / DOI identity match (strongest)
+        #   B. title token similarity ≥ 0.75 (when source_title is not header boilerplate)
+        tagged = 0
         for d in all_docs:
             is_self = False
+            reason = ""
             d_arxiv = (d.get("arxiv_id") or "").strip().split("v")[0].lower()
             d_doi = (d.get("doi") or "").strip().lower()
             if source_arxiv_id and d_arxiv == source_arxiv_id.lower():
@@ -1416,14 +1423,14 @@ async def run_pipeline(job_id: str):
                     is_self = True
                     reason = f"title_sim={sim:.2f}"
             if is_self:
-                removed.append({"title": d.get("title", "")[:120], "reason": reason})
+                d["is_self_match"] = True
+                d["self_match_reason"] = reason
+                tagged += 1
             else:
-                filtered.append(d)
-        if removed:
+                d["is_self_match"] = False
+        if tagged:
             event("phase3b", "info",
-                  f"Filtered out {len(removed)} self-citation(s) of source manuscript",
-                  {"full": removed})
-        all_docs = filtered
+                  f"Tagged {tagged} candidate(s) as self-match (will appear in Exact Find section)")
 
         event("phase3b", "start", f"Reranking {len(all_docs)} documents by title+snippet embedding")
         try:
@@ -1494,21 +1501,32 @@ async def run_pipeline(job_id: str):
                 on_doc_done=heartbeat,  # keep zombie detector from flagging Phase 4
             )
 
-        def _absorb_results(eval_results: list[dict]):
-            for er in eval_results:
+        def _absorb_results(eval_results: list[dict], batch_docs: list[dict]):
+            for er, doc in zip(eval_results, batch_docs):
                 cr = er.get("checklist_results", {})
                 score = compute_total_score(cr)
+                # Is this doc the source paper (found online)? Trust the Phase 3b
+                # tag first, then the LLM's in-content detection as a backstop.
+                is_self = bool(doc.get("is_self_match") or er.get("is_source_duplicate"))
+                # Normalize pdf_link to a single string (some channels give list)
+                pdf_link = doc.get("pdf_link", "")
+                if isinstance(pdf_link, list):
+                    pdf_link = pdf_link[0] if pdf_link else ""
                 scoring_report.append({
                     "title": er.get("title", ""),
-                    "id": er.get("pub_num", ""),
+                    "id": er.get("pub_num", "") or doc.get("pub_num", ""),
                     "manuscript_type": er.get("match_type", ""),
                     "similarity_score": score,
                     "similarity_categories": cr,
                     "anticipation_assessment": er.get("anticipation_assessment", ""),
                     "key_teachings": er.get("key_teachings", ""),
-                    "snippet": er.get("snippet", ""),
-                    "abstract": er.get("abstract", ""),
-                    "eval_source": er.get("source", "pdf"),  # "pdf" | "abstract" | ...
+                    "snippet": er.get("snippet", "") or doc.get("snippet", ""),
+                    "abstract": er.get("abstract", "") or doc.get("abstract", ""),
+                    "eval_source": er.get("source", "pdf"),
+                    "url": doc.get("url", ""),
+                    "pdf_link": pdf_link,
+                    "is_self_match": is_self,
+                    "self_match_reason": doc.get("self_match_reason", ""),
                 })
 
         if evolve and len(eval_candidates) > 5:
@@ -1519,7 +1537,7 @@ async def run_pipeline(job_id: str):
                 batch = eval_candidates[cursor:cursor + batch_size]
                 event("phase4", "elastic_batch", f"Evaluating docs {cursor+1}-{cursor+len(batch)} of {len(eval_candidates)}")
                 results_batch = await _evaluate_batch(batch)
-                _absorb_results(results_batch)
+                _absorb_results(results_batch, batch)
                 cursor += batch_size
                 if cursor >= len(eval_candidates):
                     break
@@ -1547,60 +1565,36 @@ async def run_pipeline(job_id: str):
         else:
             # Normal mode: one big batch of up to 20
             results_all = await _evaluate_batch(eval_candidates)
-            _absorb_results(results_all)
+            _absorb_results(results_all, eval_candidates)
 
         n_evaluated_raw = len(scoring_report)
 
-        # Defense-in-depth against self-matching: Phase 3b already filters by title
-        # similarity, but if source_title extraction failed (e.g. conference header
-        # boilerplate instead of real title), the paper itself slips through and
-        # wins 90%+ "prior art" against itself. Last-chance filter: drop any doc
-        # whose (high score + high title overlap) make it almost certainly the
-        # source paper.
-        def _tok_sim(a: str, b: str) -> float:
-            if not a or not b: return 0.0
-            ta = set(re.findall(r"\w+", a.lower()))
-            tb = set(re.findall(r"\w+", b.lower()))
-            if not ta or not tb: return 0.0
-            return len(ta & tb) / min(len(ta), len(tb))
-        n_selfmatch = 0
-        if source_title and not _is_header_boilerplate(source_title):
-            kept = []
-            for s in scoring_report:
-                score = s.get("similarity_score") or 0
-                tsim = _tok_sim(source_title, s.get("title", ""))
-                # Only very-high-confidence self-matches: a legitimate prior art
-                # doc can have 85% checklist overlap (that IS meaningful prior art).
-                # Require ≥95% score AND ≥60% title overlap (or ≥80% title overlap
-                # regardless of score, which catches identical-title republications).
-                if (score >= 0.95 and tsim >= 0.6) or tsim >= 0.8:
-                    n_selfmatch += 1
-                    event("phase4", "selfmatch_dropped",
-                          f"Dropped likely self-citation: '{s.get('title','')[:100]}' "
-                          f"(score={score:.0%}, title_overlap={tsim:.0%})")
-                else:
-                    kept.append(s)
-            scoring_report = kept
+        # Partition into novelty hits vs Exact Find (self-matches).
+        # Self-matches are kept for the report's Exact Find section but excluded
+        # from the novelty ranking and from the novelty-summary LLM input — a
+        # paper is not prior art against itself.
+        exact_find = [s for s in scoring_report if s.get("is_self_match")]
+        non_self = [s for s in scoring_report if not s.get("is_self_match")]
 
-        # Drop zero-overlap docs — they're noise, not "prior art". Report must not
-        # show "we evaluated this but it matched nothing" lines; boss-facing output
-        # should only contain docs with at least one checklist match.
-        scoring_report = [s for s in scoring_report if (s.get("similarity_score") or 0) > 0]
-        n_dropped = n_evaluated_raw - len(scoring_report) - n_selfmatch
+        # Drop zero-overlap docs among non-self — they're noise, not prior art.
+        novelty_hits = [s for s in non_self if (s.get("similarity_score") or 0) > 0]
+        n_zero = len(non_self) - len(novelty_hits)
+
+        scoring_report = novelty_hits + exact_find  # keep both; report will split
         tail = []
-        if n_selfmatch:
-            tail.append(f"dropped {n_selfmatch} self-citation(s)")
-        if n_dropped:
-            tail.append(f"dropped {n_dropped} zero-match docs")
+        if exact_find:
+            tail.append(f"{len(exact_find)} self-match(es) routed to Exact Find")
+        if n_zero:
+            tail.append(f"dropped {n_zero} zero-match docs")
         event("phase4", "info",
-              f"Got {n_evaluated_raw} evaluation results; kept {len(scoring_report)} with overlap"
+              f"Got {n_evaluated_raw} evaluation results; kept {len(novelty_hits)} as novelty hits"
               + (f" ({'; '.join(tail)})" if tail else ""))
 
-        scoring_report.sort(key=lambda x: x["similarity_score"], reverse=True)
-        top_score = max((s["similarity_score"] for s in scoring_report), default=0)
+        novelty_hits.sort(key=lambda x: x["similarity_score"], reverse=True)
+        top_score = max((s["similarity_score"] for s in novelty_hits), default=0)
         event("phase4", "info", f"Top match: {top_score:.0%} similarity")
 
-        hit_matches = scoring_report  # already filtered
+        hit_matches = novelty_hits  # novelty summary should never see exact_find
         if not hit_matches:
             event("phase4", "skipped_summary",
                   "Skipping novelty summary — no evaluated docs had any checklist overlap. "

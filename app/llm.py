@@ -389,17 +389,30 @@ Critical: only use information present in the input below. Do not hallucinate sp
     )
 
 
-async def decompose_invention(paper_text: str, feedback: dict | None = None) -> str:
-    return await call_llm(
-        "You are a patent analyst. Be concise. Only list elements explicitly described in the input.",
-        f"""════ TASK (template) ════
-Bullet-list the invention's key technical elements:
-components, steps, interfaces, materials, algorithms.
-Use the paper's terminology. No novelty assessment.
-Only include elements explicitly described in the input.{_feedback_block(feedback)}
+async def decompose_invention(
+    paper_text: str,
+    feedback: dict | None = None,
+    source_pdf_path: str | None = None,
+) -> str:
+    """Decompose the invention into its technical elements.
 
-════ INPUT (paper text, first 15000 chars) ════
-{paper_text[:15000]}""",
+    Prefers the full source PDF (native multi-modal attachment) so the LLM sees
+    layout + figures + tables. Falls back to text when no PDF available. The
+    15k-char text fallback is lossy for any paper longer than ~10 pages.
+    """
+    system = "You are a patent analyst. Be concise. Only list elements explicitly described in the input."
+    prompt = f"""════ TASK ════
+Bullet-list the invention's key technical elements from the attached paper:
+components, steps, interfaces, materials, algorithms.
+Use the paper's own terminology. No novelty assessment.
+Only include elements explicitly described in the paper.{_feedback_block(feedback)}"""
+
+    if source_pdf_path and Path(source_pdf_path).exists():
+        return await call_llm_with_pdfs(system, prompt, [source_pdf_path], thinking_budget=4096)
+    # Fallback: text only (legacy callers or non-PDF inputs)
+    return await call_llm(
+        system,
+        f"{prompt}\n\n════ INPUT (paper text, first 15000 chars) ════\n{paper_text[:15000]}",
         thinking_budget=4096,
     )
 
@@ -535,13 +548,10 @@ JSON output:
             result = json.loads(m.group())
             result["title"] = prior_art_title
             result["match_type"] = prior_art_type
-            # Safety: if LLM tagged this as source duplicate, force all matches false.
-            if result.get("is_source_duplicate"):
-                cr = result.get("checklist_results", {})
-                for k in cr:
-                    if isinstance(cr[k], dict):
-                        cr[k]["match"] = False
-                        cr[k]["analysis"] = f"[SELF-MATCH suppressed: {result.get('duplicate_reason','')}]"
+            # Keep is_source_duplicate as a signal but DON'T zero out matches — the
+            # pipeline now routes self-matches to a dedicated Exact Find section,
+            # where showing a natural high score (e.g. 100%) is more informative
+            # than a misleading 0%. Novelty ranking still excludes these.
             return result
     except Exception as e:
         return {"title": prior_art_title, "match_type": prior_art_type, "error": str(e), "checklist_results": {}}

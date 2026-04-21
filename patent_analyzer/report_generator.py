@@ -155,9 +155,15 @@ def generate_html(data: dict) -> str:
     job_id = data.get("job_id", "")
     source_title = data.get("source_title", "")
 
-    # Split into groups
-    hits_docs = [m for m in scoring_report if (m.get("similarity_score", 0) or 0) > 0]
-    no_hits_docs = [m for m in scoring_report if (m.get("similarity_score", 0) or 0) == 0]
+    # Split into groups:
+    #   exact_find = docs that are the source itself (indexed online) — shown
+    #                separately as "Exact Find", excluded from novelty ranking
+    #   hits_docs  = real prior art with non-zero checklist overlap
+    #   no_hits_docs = evaluated but scored 0 (rare after Phase 4 zero-filter)
+    exact_find = [m for m in scoring_report if m.get("is_self_match")]
+    non_self = [m for m in scoring_report if not m.get("is_self_match")]
+    hits_docs = [m for m in non_self if (m.get("similarity_score", 0) or 0) > 0]
+    no_hits_docs = [m for m in non_self if (m.get("similarity_score", 0) or 0) == 0]
 
     def build_card(m: dict, idx: int) -> str:
         title = esc(m.get("title", "Unknown"))
@@ -269,20 +275,48 @@ def generate_html(data: dict) -> str:
             if year: sub_parts.append(str(year))
             subtitle = " &middot; ".join(sub_parts) if sub_parts else "Paper"
 
+        # Single download button:
+        #   PDF direct link available → enabled, points at pdf_link
+        #   No direct PDF → disabled (landing-page link is reachable via the
+        #                   title-as-link when the card is expanded)
+        pdf_direct = m.get("pdf_link", "") or ""
+        if isinstance(pdf_direct, list):
+            pdf_direct = pdf_direct[0] if pdf_direct else ""
+        # Canonical source landing page (arXiv abstract page, Scholar page, patent office).
+        # Patent cards prefer patent_link when present; all others use url.
+        source_url = patent_link if (patent_link and badge_type == "Patent") else url
+        download_btn = (
+            f'<a class="dl-btn" href="{esc(pdf_direct)}" target="_blank" download '
+            f'onclick="event.stopPropagation()">Download PDF</a>'
+            if pdf_direct else
+            '<span class="dl-btn dl-disabled" title="No direct PDF available — expand card for source link">No PDF</span>'
+        )
+        # Title renders differently by card state: plain when collapsed, link when
+        # expanded (the .card.open selector swaps them via CSS — both elements live
+        # in the DOM so JS doesn't need to toggle).
+        title_plain = f'<div class="card-title card-title-plain">{title}</div>'
+        title_link = (
+            f'<a class="card-title card-title-link" href="{esc(source_url)}" '
+            f'target="_blank" onclick="event.stopPropagation()">{title} &rarr;</a>'
+            if source_url else title_plain.replace("card-title-plain", "card-title-link")
+        )
+        self_badge = ('<span class="src-badge src-self" title="This is your source paper indexed online">your paper</span>'
+                      if m.get("is_self_match") else "")
+
         return f'''
 <div class="{card_cls}" data-hits="{hit_count}" data-md="{md_esc}">
   <div class="card-top" onclick="toggle(this.parentElement)">
     <div class="card-left">
       <span class="type-dot {'dot-patent' if badge_type == 'Patent' else 'dot-paper'}"></span>
       <div>
-        {f'<a class="card-title" href="{esc(url or patent_link)}" target="_blank" onclick="event.stopPropagation()">{title}</a>' if (url or patent_link) else f'<div class="card-title">{title}</div>'}
-        <div class="card-id">{subtitle} {source_badge}</div>
+        {title_plain}
+        {title_link}
+        <div class="card-id">{subtitle} {source_badge} {self_badge}</div>
       </div>
     </div>
     <div class="card-right">
       {f'<span class="hit-pct" style="color:{score_color(score_num)}">{score_num:.0%}</span>' if hit_count > 0 else '<span class="no-badge">&mdash;</span>'}
-      {f'<a class="pdf-link" href="{esc(patent_link)}" target="_blank" onclick="event.stopPropagation()">Patent</a>' if patent_link and badge_type == 'Patent' else ''}
-      {f'<a class="pdf-link" href="{esc(url)}" target="_blank" onclick="event.stopPropagation()">PDF</a>' if url else ''}
+      {download_btn}
       <button class="md-btn" onclick="event.stopPropagation();showMd(this.closest(\'.card\'))">MD</button>
     </div>
   </div>
@@ -294,6 +328,7 @@ def generate_html(data: dict) -> str:
     # Build cards
     hits_html = "".join(build_card(m, i) for i, m in enumerate(hits_docs))
     nohits_html = "".join(build_card(m, i) for i, m in enumerate(no_hits_docs))
+    exact_find_html = "".join(build_card(m, i) for i, m in enumerate(exact_find))
 
     # Search groups
     sg_html = ""
@@ -415,6 +450,21 @@ a.card-title:hover{{color:var(--accent);text-decoration:underline}}
 .pdf-link{{font-size:0.72rem;color:var(--accent);text-decoration:none}}
 .src-badge{{display:inline-block;font-size:0.65rem;padding:0.05rem 0.4rem;border-radius:99px;margin-left:0.35rem;vertical-align:middle;font-weight:500;letter-spacing:0.02em;text-transform:uppercase}}
 .src-abs{{background:#fef3c7;color:#92400e;border:1px solid #fde68a}}
+.src-self{{background:#e0e7ff;color:#3730a3;border:1px solid #c7d2fe}}
+/* Single download button */
+.dl-btn{{display:inline-block;font-size:0.72rem;padding:0.25rem 0.7rem;border-radius:6px;background:var(--accent);color:#fff;text-decoration:none;font-weight:500;border:1px solid var(--accent)}}
+.dl-btn:hover{{background:#1d4ed8;border-color:#1d4ed8}}
+.dl-disabled{{background:#e5e7eb;color:#9ca3af;border-color:#e5e7eb;cursor:not-allowed}}
+.dl-disabled:hover{{background:#e5e7eb;border-color:#e5e7eb}}
+/* Title visibility by card state — plain when collapsed, link when expanded */
+.card-title-link{{display:none}}
+.card.open .card-title-plain{{display:none}}
+.card.open .card-title-link{{display:inline-block;color:var(--accent);text-decoration:none}}
+.card.open .card-title-link:hover{{text-decoration:underline}}
+/* Exact Find section — source paper indexed online, shown separately */
+.exact-find-sec{{border:2px solid #818cf8;background:#eef2ff;margin:1.5rem 0;padding:1rem 1.25rem;border-radius:10px}}
+.exact-find-sec .sec-t{{color:#3730a3}}
+.exact-find-sec .sec-note{{color:#4338ca;font-style:normal}}
 /* Feedback */
 .fb-sec{{background:#f8fafc;border-left:3px solid var(--accent);margin-top:2rem}}
 .fb-row{{display:flex;gap:1rem;align-items:center;margin:0.6rem 0;flex-wrap:wrap}}
@@ -522,10 +572,16 @@ a.card-title:hover{{color:var(--accent);text-decoration:underline}}
   <div class="tog-body">{sg_html}</div>
 </div>''' if sg_html else ''}
 
+{f'''<div class="exact-find-sec">
+  <div class="sec-t sec-t-lg">Exact Find <span class="sec-count">{len(exact_find)} found</span></div>
+  <div class="sec-note">Your source paper was indexed online and retrieved by the search. Listed here for awareness; excluded from the novelty ranking below.</div>
+  {exact_find_html}
+</div>''' if exact_find else ''}
+
 <div class="bar">
   <div class="bar-title">Possible Matches</div>
   <div class="bar-actions">
-    <button class="fbtn" onclick="showAll(this)">All ({len(scoring_report)})</button>
+    <button class="fbtn" onclick="showAll(this)">All ({len(hits_docs) + len(no_hits_docs)})</button>
     <button class="fbtn on" onclick="showHits(this)">With Overlap ({len(hits_docs)})</button>
     <button class="fbtn" onclick="showNone(this)">No Overlap ({len(no_hits_docs)})</button>
   </div>
@@ -708,7 +764,9 @@ async function submitFeedback(){{
   if(!_fbRating && !comment && tags.length===0){{st.textContent='Pick a rating or write something first.';st.style.color='#b91c1c';return;}}
   btn.disabled=true;st.textContent='Sending...';st.style.color='';
   try{{
-    const url=(location.pathname.startsWith('/api')?'':'/api')+`/feedback/${{_JOB_ID}}`;
+    // Report is served via frontend proxy at /api/report/:id — so /api/feedback/:id
+    // is always the right target (backend direct is IAM-blocked from the browser).
+    const url=`/api/feedback/${{_JOB_ID}}`;
     const r=await fetch(url,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{rating:_fbRating||null,comment,tags}})}});
     if(!r.ok)throw new Error(`HTTP ${{r.status}}`);
     const j=await r.json();
