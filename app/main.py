@@ -1193,23 +1193,21 @@ async def run_pipeline(job_id: str):
             _save_job(job)
             return
 
-        # Step C: Technology choice expansion (parallel per axis)
+        # Step C: Technology choice expansion (sequential to avoid Gemini RPM limits)
         llm_label("phase2", "Step C: Technology choice expansion")
-
-        async def _expand_one(ax):
-            return await expand_technology_choices(
-                ax, summary, source_pdf_path=_pdf,
-                persona=personas.get("technology"),
-            )
-
-        tc_results = await asyncio.gather(
-            *[_expand_one(ax) for ax in innovation_axes],
-            return_exceptions=True,
-        )
-        technology_choices = [tc for tc in tc_results if isinstance(tc, dict) and tc.get("known_approaches")]
-        for tc in tc_results:
-            if isinstance(tc, Exception):
-                event("phase2", "warning", f"Step C axis expansion failed: {tc}")
+        technology_choices = []
+        for ax in innovation_axes:
+            try:
+                tc = await expand_technology_choices(
+                    ax, summary, source_pdf_path=_pdf,
+                    persona=personas.get("technology"),
+                )
+                if isinstance(tc, dict) and tc.get("known_approaches"):
+                    technology_choices.append(tc)
+            except Exception as exc:
+                event("phase2", "warning",
+                      f"Step C axis expansion failed for '{ax.get('axis_name','?')}': "
+                      f"{type(exc).__name__}: {exc}")
         event("phase2", "info",
               f"Step C: {len(technology_choices)} axes expanded, "
               f"{sum(len(tc.get('known_approaches',[])) for tc in technology_choices)} total known approaches")
