@@ -27,6 +27,23 @@ REC_BASE = "https://api.semanticscholar.org/recommendations/v1"
 DEFAULT_FIELDS = "paperId,title,abstract,year,authors,externalIds,openAccessPdf,venue,citationCount"
 TIMEOUT = 30.0
 
+# Throttle: anonymous = 100 req/5min ≈ 1 req/3s; with key ≈ 1 req/s
+_last_request_time: float = 0.0
+_throttle_lock = asyncio.Lock()
+MIN_INTERVAL_ANON = 3.5
+MIN_INTERVAL_KEYED = 1.1
+
+
+async def _throttle():
+    global _last_request_time
+    interval = MIN_INTERVAL_KEYED if _api_key() else MIN_INTERVAL_ANON
+    async with _throttle_lock:
+        now = asyncio.get_event_loop().time()
+        wait = interval - (now - _last_request_time)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        _last_request_time = asyncio.get_event_loop().time()
+
 
 def _api_key() -> str | None:
     return os.environ.get("SEMANTIC_SCHOLAR_KEY") or os.environ.get("S2_API_KEY")
@@ -76,6 +93,7 @@ async def _get(client: httpx.AsyncClient, url: str, params: dict | None = None,
     last_err: str | None = None
     for i in range(attempts):
         try:
+            await _throttle()
             resp = await client.get(url, params=params, headers=_headers(), timeout=TIMEOUT)
             if resp.status_code == 429:
                 last_err = "HTTP 429 (Semantic Scholar rate limited)"
@@ -184,6 +202,7 @@ async def batch(paper_ids: list[str]) -> tuple[list[Candidate], str | None]:
         return [], "empty id list"
     async with httpx.AsyncClient() as client:
         try:
+            await _throttle()
             resp = await client.post(
                 f"{API_BASE}/paper/batch",
                 params={"fields": DEFAULT_FIELDS},

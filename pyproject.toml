@@ -35,7 +35,7 @@ patent-report = "patent_analyzer.report_generator:main"
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]

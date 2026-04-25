@@ -11,8 +11,8 @@ Design principles:
 """
 
 import argparse
-import json
 import html as html_mod
+import json
 import re
 from datetime import datetime, timezone
 
@@ -35,31 +35,104 @@ def score_color(score: float) -> str:
 
 def md_inline(t: str) -> str:
     """Convert inline markdown (bold/italic/code) to HTML. Input must already be HTML-escaped."""
-    # Bold: **text** → <strong>text</strong>
     t = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', t)
-    # Italic: *text* (avoid conflicts with bold by running after)
     t = re.sub(r'(?<!\*)\*([^*\n]+?)\*(?!\*)', r'<em>\1</em>', t)
-    # Inline code
     t = re.sub(r'`([^`]+)`', r'<code>\1</code>', t)
     return t
 
 
+def render_markdown(text: str) -> str:
+    """Convert markdown text to HTML. Handles headings, lists, bold, italic, code, paragraphs."""
+    if not text:
+        return ""
+    lines = text.split("\n")
+    html_parts = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Empty line — skip (paragraph breaks handled by accumulation)
+        if not stripped:
+            i += 1
+            continue
+
+        # Headings
+        hm = re.match(r'^(#{1,4})\s+(.+)$', stripped)
+        if hm:
+            level = len(hm.group(1))
+            # Map ## → h3, ### → h4, # → h2, #### → h5
+            tag = f"h{min(level + 1, 6)}"
+            html_parts.append(f'<{tag} class="md-heading">{md_inline(esc(hm.group(2)))}</{tag}>')
+            i += 1
+            continue
+
+        # Unordered list block (- item or * item)
+        if re.match(r'^[-*]\s+', stripped):
+            items = []
+            while i < len(lines) and re.match(r'^\s*[-*]\s+', lines[i]):
+                item_text = re.sub(r'^\s*[-*]\s+', '', lines[i]).strip()
+                items.append(f'<li>{md_inline(esc(item_text))}</li>')
+                i += 1
+            html_parts.append(f'<ul class="md-list">{"".join(items)}</ul>')
+            continue
+
+        # Ordered list block (1. item, 2. item, etc.)
+        if re.match(r'^\d+\.\s+', stripped):
+            items = []
+            while i < len(lines) and re.match(r'^\s*\d+\.\s+', lines[i]):
+                item_text = re.sub(r'^\s*\d+\.\s+', '', lines[i]).strip()
+                items.append(f'<li>{md_inline(esc(item_text))}</li>')
+                i += 1
+            html_parts.append(f'<ol class="md-list">{"".join(items)}</ol>')
+            continue
+
+        # Regular paragraph — accumulate contiguous non-blank, non-special lines
+        para_lines = []
+        while i < len(lines):
+            cl = lines[i].strip()
+            if not cl:
+                i += 1
+                break
+            if re.match(r'^#{1,4}\s+', cl) or re.match(r'^[-*]\s+', cl) or re.match(r'^\d+\.\s+', cl):
+                break
+            para_lines.append(cl)
+            i += 1
+        para_text = " ".join(para_lines)
+        html_parts.append(f'<p class="md-para">{md_inline(esc(para_text))}</p>')
+
+    return "\n".join(html_parts)
+
+
+def _extract_key_terms(text: str) -> list[str]:
+    """Dynamically extract key technical terms from text."""
+    terms = set()
+    # Quoted terms
+    for m in re.finditer(r'"([^"]{3,40})"', text):
+        terms.add(m.group(1))
+    # Backtick terms
+    for m in re.finditer(r'`([^`]{2,40})`', text):
+        terms.add(m.group(1))
+    # Capitalized multi-word phrases (e.g. "Contrastive Loss", "Self-Supervised Learning")
+    for m in re.finditer(r'\b([A-Z][a-z]+(?:[\s-][A-Z][a-z]+)+)\b', text):
+        terms.add(m.group(1))
+    # ALL-CAPS acronyms 2-6 chars (e.g. TSDF, RGBD, CNN, LLM)
+    for m in re.finditer(r'\b([A-Z]{2,6})\b', text):
+        terms.add(m.group(1))
+    # Hyphenated technical terms (e.g. self-supervised, cross-object)
+    for m in re.finditer(r'\b([a-z]+-[a-z]+(?:-[a-z]+)?)\b', text, re.IGNORECASE):
+        if len(m.group(1)) > 5:
+            terms.add(m.group(1))
+    return sorted(terms, key=len, reverse=True)
+
+
 def format_summary(text: str) -> str:
-    """Format summary with numbered list + markdown rendering."""
-    KW = [
-        "dense descriptor", "dense object", "contrastive loss", "self-supervised",
-        "pixel correspondence", "3D reconstruction", "TSDF", "RGBD", "RGB-D",
-        "object mask", "change detection", "domain randomization", "hard negative",
-        "cross-object", "multi-object", "descriptor space", "robotic grasping",
-        "visual descriptor", "nearest neighbor", "ResNet", "FCN",
-        "prior art", "novelty", "anticipat", "obvious", "102", "103",
-        "manipulation", "deformed", "class generalization", "instance specific",
-    ]
+    """Format invention summary with markdown rendering and dynamic keyword highlighting."""
+    terms = _extract_key_terms(text)
 
     def highlight(t: str) -> str:
-        """Escape HTML, render inline markdown, then highlight keywords."""
         result = md_inline(esc(t))
-        for kw in KW:
+        for kw in terms:
             pattern = re.compile(re.escape(esc(kw)), re.IGNORECASE)
             result = pattern.sub(lambda m: f'<mark>{m.group()}</mark>', result)
         return result
@@ -78,61 +151,153 @@ def format_summary(text: str) -> str:
             return f'<p class="sum-preamble">{highlight(preamble)}:</p>{items_html}'
         return items_html
 
-    # Split into paragraphs on double newline or sentence boundaries
-    paragraphs = re.split(r'\n\n+', text)
-    if len(paragraphs) <= 1:
-        paragraphs = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
-
-    html = ""
-    for p in paragraphs:
-        p = p.strip()
-        if not p:
-            continue
-        html += f'<p class="sum-para">{highlight(p)}</p>'
-    return html if html else f'<p class="sum-para">{highlight(text)}</p>'
-
-
-def format_eval_summary(text: str) -> str:
-    """Format evaluation summary with keyword highlighting and paragraph breaks."""
-    KW = [
-        "prior art", "novelty", "novel", "anticipated", "obvious", "102", "103",
-        "overlap", "coverage", "unique", "distinguishing", "closest",
-        "dense descriptor", "contrastive", "self-supervised", "robotic",
-        "3D reconstruction", "object mask", "domain randomization",
-    ]
-
-    def hl(t: str) -> str:
-        result = md_inline(esc(t))
-        for kw in KW:
+    # Use render_markdown for structured text, then apply highlighting
+    rendered = render_markdown(text)
+    if rendered:
+        for kw in terms:
             pattern = re.compile(re.escape(esc(kw)), re.IGNORECASE)
-            result = pattern.sub(lambda m: f'<mark>{m.group()}</mark>', result)
-        return result
+            rendered = pattern.sub(lambda m: f'<mark>{m.group()}</mark>', rendered)
+        return rendered
 
-    paragraphs = re.split(r'\n\n+', text)
-    if len(paragraphs) <= 1:
-        paragraphs = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
+    return f'<p class="sum-para">{highlight(text)}</p>'
 
-    html = ""
-    for p in paragraphs:
-        p = p.strip()
-        if not p:
-            continue
-        html += f'<p class="eval-para">{hl(p)}</p>'
-    return html if html else f'<p class="eval-para">{hl(text)}</p>'
+
+def _format_cl_item(item) -> tuple[str, str]:
+    """Return (criterion_text, weight_html) for a checklist item."""
+    if isinstance(item, dict):
+        w = item.get("weight", 0)
+        criterion = item.get("criterion", str(item))
+        weight_pct = f'{w * 100:.0f}%' if w > 0 else ''
+        weight_html = f' <span class="cl-weight">{esc(weight_pct)}</span>' if weight_pct else ''
+        return criterion, weight_html
+    return str(item), ''
+
+
+def _format_cl_item_plain(item) -> str:
+    """Return just the criterion text (no weight prefix) for display in cards."""
+    if isinstance(item, dict):
+        return item.get("criterion", str(item))
+    return str(item)
 
 
 def shorten_checklist(item: str, max_len: int = 60) -> str:
     """Shorten a checklist item to a readable tag."""
+    # Strip [w=X.XX] prefix if present
+    item = re.sub(r'^\[w=[\d.]+\]\s*', '', item)
     # Remove common prefixes
     item = re.sub(r'^(The (system|method|network|training|process|pipeline|entire|invention)\s+(uses?|includes?|performs?|enables?|is|can|from)\s+)', '', item, flags=re.IGNORECASE)
     item = re.sub(r'^(A |An )', '', item)
-    # Truncate
     if len(item) > max_len:
         item = item[:max_len].rsplit(' ', 1)[0] + '...'
     return item
 
 
+def _clean_req_text(text: str) -> str:
+    """Strip [w=X.XX] prefix from requirement/criterion text for display."""
+    return re.sub(r'^\[w=[\d.]+\]\s*', '', text)
+
+
+def _generate_implied_html(data: dict) -> str:
+    """Abbreviated report for Implied inventions — no prior art search was run."""
+    phase1 = data.get("phase1", {})
+    phase2 = data.get("phase2", {})
+    title = esc(data.get("source_title", data.get("source_filename", "Document")))
+    summary = esc(phase1.get("summary", ""))
+    reasoning = esc(phase1.get("reasoning", ""))
+    ucd = esc(phase2.get("ucd", ""))
+    fields = phase1.get("fields_map", [])
+    fields_html = ", ".join(esc(f) for f in fields) if fields else "Not classified"
+    gen_at = data.get("generated_at", "")
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Implied Invention Report — {title}</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; color: #1e293b; line-height: 1.6; }}
+h1 {{ font-size: 1.5rem; border-bottom: 2px solid #e2e8f0; padding-bottom: 0.5rem; }}
+.banner {{ background: #fef3c7; border: 1px solid #f59e0b; border-radius: 8px; padding: 1rem 1.25rem; margin: 1.5rem 0; }}
+.banner strong {{ color: #92400e; }}
+.section {{ margin: 1.5rem 0; }}
+.section h2 {{ font-size: 1.1rem; color: #475569; margin-bottom: 0.5rem; }}
+.meta {{ color: #64748b; font-size: 0.85rem; }}
+pre {{ background: #f8fafc; padding: 1rem; border-radius: 6px; white-space: pre-wrap; font-size: 0.9rem; overflow-x: auto; }}
+</style></head>
+<body>
+<h1>{title}</h1>
+<p class="meta">Generated: {esc(gen_at)} · Fields: {fields_html}</p>
+
+<div class="banner">
+<strong>Implied Invention</strong> — This document describes an inventive concept but does not
+provide concrete implementation details. No prior art search was conducted because there are
+insufficient technical details to search against.
+</div>
+
+<div class="section"><h2>Why "Implied"?</h2><p>{reasoning}</p></div>
+
+<div class="section"><h2>Invention Summary</h2><p>{summary}</p></div>
+
+<div class="section"><h2>Technical Elements Identified</h2><pre>{ucd if ucd else '(No decomposition available)'}</pre></div>
+
+<div class="section"><h2>Recommendation</h2>
+<p>To proceed with a prior art search, the document would need to include concrete
+implementation details — specific architectures, algorithms, materials, experimental results,
+or system designs. Consider revising the document to include these details before resubmitting.</p>
+</div>
+</body></html>"""
+
+
+def _render_confidence_banner(entropy_profile: dict | None) -> str:
+    if not entropy_profile:
+        return ""
+    conf = entropy_profile.get("overall_confidence", "medium")
+    degs = entropy_profile.get("degradation_points", [])
+    if conf == "high":
+        bg, border, color = "#dcfce7", "#16a34a", "#166534"
+        label = "High confidence"
+        msg = "Analysis grounded in strong evidence across all phases."
+    elif conf == "low":
+        bg, border, color = "#fef2f2", "#dc2626", "#991b1b"
+        label = "Low confidence"
+        msg = "Some analysis steps lack direct evidence."
+    else:
+        bg, border, color = "#fef3c7", "#f59e0b", "#92400e"
+        label = "Medium confidence"
+        msg = "Some evaluation criteria lack direct evidence."
+    deg_html = ""
+    if degs:
+        items = "".join(f"<li>{esc(d)}</li>" for d in degs)
+        deg_html = f'<ul style="margin:0.5rem 0 0;padding-left:1.2rem">{items}</ul>'
+    return (
+        f'<div style="background:{bg};border:1px solid {border};'
+        f'border-radius:8px;padding:1rem 1.25rem;margin:1.5rem 0">'
+        f'<strong style="color:{color}">{label}</strong> — {esc(msg)}'
+        f'{deg_html}</div>'
+    )
+
+
+# Inline SVG download icon (20x20, arrow pointing down into tray)
+_DL_ICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" '
+    'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+    '<polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>'
+)
+
+_NO_PDF_ICON_SVG = (
+    '<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" '
+    'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+    'stroke-linejoin="round" opacity="0.4"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>'
+    '<polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>'
+    '<line x1="2" y1="2" x2="22" y2="22"/></svg>'
+)
+
+
 def generate_html(data: dict) -> str:
+    # Implied invention: abbreviated report
+    if data.get("implied_invention"):
+        return _generate_implied_html(data)
+
     phase1 = data.get("phase1", {})
     phase2 = data.get("phase2", {})
     search = data.get("search", {})
@@ -155,14 +320,11 @@ def generate_html(data: dict) -> str:
     job_id = data.get("job_id", "")
     source_title = data.get("source_title", "")
 
-    # Split into groups:
-    #   exact_find = docs that are the source itself (indexed online) — shown
-    #                separately as "Exact Find", excluded from novelty ranking
-    #   hits_docs  = real prior art with non-zero checklist overlap
-    #   no_hits_docs = evaluated but scored 0 (rare after Phase 4 zero-filter)
     exact_find = [m for m in scoring_report if m.get("is_self_match")]
     non_self = [m for m in scoring_report if not m.get("is_self_match")]
-    hits_docs = [m for m in non_self if (m.get("similarity_score", 0) or 0) > 0]
+    hits_docs = sorted(
+        [m for m in non_self if (m.get("similarity_score", 0) or 0) > 0],
+        key=lambda x: x.get("similarity_score", 0), reverse=True)
     no_hits_docs = [m for m in non_self if (m.get("similarity_score", 0) or 0) == 0]
 
     def build_card(m: dict, idx: int) -> str:
@@ -170,10 +332,18 @@ def generate_html(data: dict) -> str:
         mid = esc(m.get("id", ""))
         mtype = m.get("manuscript_type", "Document")
         url = m.get("url", "")
-        # Prefer real abstract over search snippet
         abstract = m.get("abstract", "")
+        assessment = m.get("anticipation_assessment", "")
         raw_snippet = m.get("snippet", "")
-        display_text = esc(abstract if abstract else raw_snippet)
+        if abstract:
+            display_text = abstract
+        elif assessment:
+            display_text = assessment
+        elif raw_snippet and raw_snippet.count("…") <= 1:
+            display_text = raw_snippet
+        else:
+            display_text = ""
+        display_text = esc(display_text)
         snippet_short = display_text[:200] + "..." if len(display_text) > 200 else display_text
         snippet = display_text
 
@@ -182,55 +352,92 @@ def generate_html(data: dict) -> str:
         unmatched = []
         md_lines = []
 
-        # Map numeric/short keys back to full checklist text when LLM returns just "1", "2", etc.
+        def _cl_text(item) -> str:
+            if isinstance(item, dict):
+                return item.get("criterion", str(item))
+            return str(item)
+
         def resolve_req(key: str) -> str:
             k = str(key).strip()
-            # Match patterns like "1", "1.", "item1", "item 1"
-            m_num = re.match(r"^(?:item\s*)?(\d+)\.?$", k, re.IGNORECASE)
+            # Strip leading "N." or "N. [w=X.XX]" prefix and resolve to checklist
+            k_clean = re.sub(r'^\[w=[\d.]+\]\s*', '', k)
+            m_num = re.match(r"^(?:item\s*)?(\d+)\.?\s*(?:\[w=[\d.]+\]\s*)?(.*)$", k_clean, re.IGNORECASE)
             if m_num:
                 idx = int(m_num.group(1)) - 1
                 if 0 <= idx < len(checklist):
-                    return checklist[idx]
-            # Already full text
-            return k
+                    return _cl_text(checklist[idx])
+                # If index out of range but there's trailing text, return it cleaned
+                trailing = m_num.group(2).strip()
+                if trailing:
+                    return trailing
+            # Fallback: strip any [w=...] from the raw key
+            return re.sub(r'\[w=[\d.]+\]\s*', '', k).strip()
 
+        partial = []
         for req, ev in (evals or {}).items():
-            is_match = ev.get("match", False) if isinstance(ev, dict) else False
-            analysis = esc(ev.get("analysis", "")) if isinstance(ev, dict) else ""
-            full_req = resolve_req(req)
+            if not isinstance(ev, dict):
+                continue
+            score_val = ev.get("score")
+            is_match = ev.get("match", False)
+            analysis = esc(ev.get("analysis", ""))
+            full_req = _clean_req_text(resolve_req(req))
             short = esc(shorten_checklist(full_req))
-            if is_match:
-                matched.append((short, full_req, analysis))
+            if score_val is not None:
+                if score_val >= 2:
+                    matched.append((short, full_req, analysis, 2))
+                elif score_val == 1:
+                    partial.append((short, full_req, analysis, 1))
+                else:
+                    unmatched.append((short, full_req, analysis, 0))
+                label = {2: "PRESENT", 1: "PARTIAL", 0: "ABSENT"}.get(score_val, "?")
+                md_lines.append(f"- [{label}] **{esc(full_req)}**: {analysis}")
             else:
-                unmatched.append((short, full_req, analysis))
-            md_lines.append(f"- [{'MATCH' if is_match else 'NO MATCH'}] **{esc(full_req)}**: {analysis}")
+                if is_match:
+                    matched.append((short, full_req, analysis, 2))
+                else:
+                    unmatched.append((short, full_req, analysis, 0))
+                md_lines.append(f"- [{'MATCH' if is_match else 'NO MATCH'}] **{esc(full_req)}**: {analysis}")
 
-        hit_count = len(matched)
+        hit_count = len(matched) + len(partial)
         total = len(evals) if evals else len(checklist)
-        score_num = hit_count / total if total > 0 else 0
+        css_val = m.get("css", 0) or 0
+        ewss_val = m.get("ewss", 0) or 0
+        adj_ewss = m.get("adjusted_ewss", ewss_val) or ewss_val
+        ewss_denom = m.get("ewss_denom_count", 0)
+        score_num = adj_ewss if adj_ewss else (
+            hit_count / total if total > 0 else 0)
+        low_sample = ewss_denom > 0 and ewss_denom < 3
 
-        # Hover zone: full checklist lines, one per row
         hover_html = ""
-        if matched:
+        if matched or partial:
             hover_html = '<div class="hover-hits">'
-            for short, full, analysis in matched:
-                hover_html += f'<div class="hv-item"><span class="hv-icon">&#x2705;</span> {esc(full)}</div>'
+            for short, full, analysis, *_ in matched:
+                hover_html += f'<div class="hv-item"><span class="hv-icon hv-present">&#x25C9;</span> {esc(full)}</div>'
+            for short, full, analysis, *_ in partial:
+                hover_html += f'<div class="hv-item"><span class="hv-icon hv-partial">&#x25D1;</span> {esc(full)}</div>'
             hover_html += '</div>'
 
-        # Expanded detail
         detail_html = '<div class="detail-panel">'
         if matched:
-            detail_html += '<div class="detail-group"><div class="detail-label">Matched Points</div>'
-            for short, full, analysis in matched:
-                detail_html += f'<div class="d-item d-hit"><span class="d-icon">&#x2705;</span><div><div class="d-req">{esc(full)}</div>'
+            detail_html += '<div class="detail-group"><div class="detail-label">Present (score=2)</div>'
+            for short, full, analysis, *_ in matched:
+                detail_html += f'<div class="d-item d-hit"><span class="d-icon">&#x25C9;</span><div><div class="d-req">{esc(full)}</div>'
+                if analysis:
+                    detail_html += f'<div class="d-analysis">{analysis}</div>'
+                detail_html += '</div></div>'
+            detail_html += '</div>'
+        if partial:
+            detail_html += '<div class="detail-group"><div class="detail-label">Partial (score=1)</div>'
+            for short, full, analysis, *_ in partial:
+                detail_html += f'<div class="d-item d-partial"><span class="d-icon">&#x25D1;</span><div><div class="d-req">{esc(full)}</div>'
                 if analysis:
                     detail_html += f'<div class="d-analysis">{analysis}</div>'
                 detail_html += '</div></div>'
             detail_html += '</div>'
         if unmatched:
-            detail_html += '<div class="detail-group"><div class="detail-label">Unmatched Points</div>'
-            for short, full, analysis in unmatched:
-                detail_html += f'<div class="d-item d-miss"><span class="d-icon">&#x2501;</span><div><div class="d-req">{esc(full)}</div>'
+            detail_html += '<div class="detail-group"><div class="detail-label">Absent (score=0)</div>'
+            for short, full, analysis, *_ in unmatched:
+                detail_html += f'<div class="d-item d-miss"><span class="d-icon">&#x25CB;</span><div><div class="d-req">{esc(full)}</div>'
                 if analysis:
                     detail_html += f'<div class="d-analysis">{analysis}</div>'
                 detail_html += '</div></div>'
@@ -241,7 +448,7 @@ def generate_html(data: dict) -> str:
         md = f"# {title}\n- **ID**: {mid}\n- **Type**: {mtype}\n- **Matched**: {hit_count}/{total}\n"
         if url:
             md += f"- **URL**: {url}\n"
-        md += f"\n## Evaluation\n" + "\n".join(md_lines)
+        md += "\n## Evaluation\n" + "\n".join(md_lines)
         md_esc = esc(md).replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
 
         badge_type = "Patent" if mtype == "Patent" else "Paper"
@@ -253,7 +460,6 @@ def generate_html(data: dict) -> str:
                         'Consider verifying with full text.">abstract only</span>'
                         if abstract_only else '')
 
-        # Patent-specific metadata
         filing = esc(m.get("filing_date", ""))
         grant = esc(m.get("grant_date", ""))
         inventor = esc(m.get("inventor", ""))
@@ -262,7 +468,6 @@ def generate_html(data: dict) -> str:
         year = m.get("year", "")
         patent_link = m.get("patent_link", "")
 
-        # Build subtitle line
         if badge_type == "Patent":
             sub_parts = [mid] if mid and len(mid) < 25 else []
             if assignee: sub_parts.append(assignee)
@@ -275,30 +480,20 @@ def generate_html(data: dict) -> str:
             if year: sub_parts.append(str(year))
             subtitle = " &middot; ".join(sub_parts) if sub_parts else "Paper"
 
-        # Single download button:
-        #   PDF direct link available → enabled, points at pdf_link
-        #   No direct PDF → disabled (landing-page link is reachable via the
-        #                   title-as-link when the card is expanded)
         pdf_direct = m.get("pdf_link", "") or ""
         if isinstance(pdf_direct, list):
             pdf_direct = pdf_direct[0] if pdf_direct else ""
-        # Canonical source landing page (arXiv abstract page, Scholar page, patent office).
-        # Patent cards prefer patent_link when present; all others use url.
         source_url = patent_link if (patent_link and badge_type == "Patent") else url
         download_btn = (
             f'<a class="dl-btn" href="{esc(pdf_direct)}" target="_blank" download '
-            f'onclick="event.stopPropagation()">Download PDF</a>'
+            f'title="Download PDF" onclick="event.stopPropagation()">{_DL_ICON_SVG}</a>'
             if pdf_direct else
-            '<span class="dl-btn dl-disabled" title="No direct PDF available — expand card for source link">No PDF</span>'
+            f'<span class="dl-btn dl-disabled" title="No direct PDF available — expand card for source link">{_NO_PDF_ICON_SVG}</span>'
         )
-        # Title renders differently by card state: plain when collapsed, link when
-        # expanded (the .card.open selector swaps them via CSS — both elements live
-        # in the DOM so JS doesn't need to toggle).
-        title_plain = f'<div class="card-title card-title-plain">{title}</div>'
-        title_link = (
-            f'<a class="card-title card-title-link" href="{esc(source_url)}" '
-            f'target="_blank" onclick="event.stopPropagation()">{title} &rarr;</a>'
-            if source_url else title_plain.replace("card-title-plain", "card-title-link")
+        title_el = (
+            f'<a class="card-title" href="{esc(source_url)}" '
+            f'target="_blank" onclick="event.stopPropagation()">{title}</a>'
+            if source_url else f'<div class="card-title">{title}</div>'
         )
         self_badge = ('<span class="src-badge src-self" title="This is your source paper indexed online">your paper</span>'
                       if m.get("is_self_match") else "")
@@ -308,20 +503,19 @@ def generate_html(data: dict) -> str:
   <div class="card-top" onclick="toggle(this.parentElement)">
     <div class="card-left">
       <span class="type-dot {'dot-patent' if badge_type == 'Patent' else 'dot-paper'}"></span>
-      <div>
-        {title_plain}
-        {title_link}
+      <div class="card-title-wrap">
+        {title_el}
         <div class="card-id">{subtitle} {source_badge} {self_badge}</div>
       </div>
     </div>
     <div class="card-right">
-      {f'<span class="hit-pct" style="color:{score_color(score_num)}">{score_num:.0%}</span>' if hit_count > 0 else '<span class="no-badge">&mdash;</span>'}
       {download_btn}
-      <button class="md-btn" onclick="event.stopPropagation();showMd(this.closest(\'.card\'))">MD</button>
+      <button class="md-btn" onclick="event.stopPropagation();showMd(this.closest(\'.card\'))" title="View as Markdown">MD</button>
+      {f'<span class="hit-pct" style="color:{score_color(score_num)}" title="CSS={css_val:.0%} EWSS={ewss_val:.0%}{" (low sample: " + str(ewss_denom) + " criteria)" if low_sample else ""}">{score_num:.0%}{"*" if low_sample else ""}</span>' if hit_count > 0 else '<span class="no-badge">&mdash;</span>'}
     </div>
   </div>
   {hover_html}
-  {f'<div class="card-snippet"><span class="snip-short">{snippet_short}</span><span class="snip-full">{snippet}</span></div>' if snippet else ''}
+  {f'<div class="card-snippet" onclick="toggle(this.parentElement)"><span class="snip-short">{snippet_short}</span><span class="snip-full">{snippet}</span></div>' if snippet else ''}
   {detail_html}
 </div>'''
 
@@ -329,6 +523,12 @@ def generate_html(data: dict) -> str:
     hits_html = "".join(build_card(m, i) for i, m in enumerate(hits_docs))
     nohits_html = "".join(build_card(m, i) for i, m in enumerate(no_hits_docs))
     exact_find_html = "".join(build_card(m, i) for i, m in enumerate(exact_find))
+
+    # Build checklist HTML with weight badges
+    cl_html_items = ""
+    for item in checklist:
+        criterion, weight_html = _format_cl_item(item)
+        cl_html_items += f'<li class="cl-item">{esc(criterion)}{weight_html}</li>'
 
     # Search groups
     sg_html = ""
@@ -348,6 +548,9 @@ def generate_html(data: dict) -> str:
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Prior Art Search Report</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js" onload="renderMathInElement(document.body,{{delimiters:[{{left:'$$',right:'$$',display:true}},{{left:'$',right:'$',display:false}},{{left:'\\\\(',right:'\\\\)',display:false}},{{left:'\\\\[',right:'\\\\]',display:true}}]}})"></script>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
 :root{{
@@ -380,6 +583,16 @@ body{{background:var(--bg);color:var(--text);padding:2rem 1rem;line-height:1.55}
 .sec-b{{font-size:0.88rem;color:var(--text2);line-height:1.7}}
 .sec-b p{{margin-bottom:0.5rem}}
 
+/* Markdown rendered content */
+.md-heading{{margin:1rem 0 0.4rem;color:var(--text)}}
+h3.md-heading{{font-size:1rem;font-weight:600;border-bottom:1px solid var(--border);padding-bottom:0.3rem}}
+h4.md-heading{{font-size:0.92rem;font-weight:600}}
+h5.md-heading{{font-size:0.88rem;font-weight:600}}
+.md-para{{margin-bottom:0.6rem;line-height:1.75;color:var(--text);font-size:0.9rem}}
+.md-list{{padding-left:1.5rem;margin:0.4rem 0 0.8rem}}
+.md-list li{{margin-bottom:0.4rem;line-height:1.65;font-size:0.9rem;color:var(--text)}}
+.md-list li code,.md-para code{{background:#f1f5f9;padding:0.1rem 0.35rem;border-radius:3px;font-size:0.85em;color:#be185d}}
+
 /* Invention summary */
 .sum-preamble{{font-size:0.92rem;font-weight:600;color:var(--text);margin-bottom:0.4rem}}
 .sum-list{{padding-left:1.3rem;margin:0.4rem 0}}
@@ -399,6 +612,7 @@ mark{{background:#fef3c7;color:#92400e;padding:0.05rem 0.2rem;border-radius:3px;
 .cl-item{{margin-bottom:0.45rem;line-height:1.6;font-size:0.85rem;color:var(--text);padding:0.3rem 0.5rem;border-radius:6px}}
 .cl-item:nth-child(odd){{background:#f3f4f6}}
 .cl-item::marker{{color:var(--accent);font-weight:700}}
+.cl-weight{{display:inline-block;font-size:0.68rem;padding:0.05rem 0.4rem;border-radius:99px;background:#eef1f5;color:var(--text2);margin-left:0.4rem;vertical-align:middle;font-weight:500}}
 .tog{{cursor:pointer;user-select:none}}
 .tog::before{{content:'\\25B8';margin-right:0.4rem;font-size:0.7rem;display:inline-block;transition:transform .15s}}
 .tog.open::before{{transform:rotate(90deg)}}
@@ -437,30 +651,27 @@ mark{{background:#fef3c7;color:#92400e;padding:0.05rem 0.2rem;border-radius:3px;
 .card-none{{opacity:0.7}}
 
 .card-top{{display:flex;align-items:center;justify-content:space-between;padding:0.75rem 1rem;cursor:pointer;gap:0.75rem}}
-.card-left{{display:flex;align-items:center;gap:0.6rem;flex:1;min-width:0}}
+.card-left{{display:flex;align-items:center;gap:0.6rem;flex:1;min-width:0;max-width:calc(100% - 140px)}}
+.card-title-wrap{{min-width:0;flex:1}}
 .type-dot{{width:8px;height:8px;border-radius:50%;flex-shrink:0}}
 .dot-patent{{background:var(--patent)}}
 .dot-paper{{background:var(--paper)}}
-.card-title{{font-size:0.88rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-decoration:none;color:var(--text)}}
+.card-title{{font-size:0.88rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-decoration:none;color:var(--text);display:block}}
 a.card-title:hover{{color:var(--accent);text-decoration:underline}}
-.card-id{{font-size:0.72rem;color:var(--text2);font-family:"SF Mono",Monaco,monospace}}
+.card-id{{font-size:0.72rem;color:var(--text2);font-family:"SF Mono",Monaco,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .card-right{{display:flex;align-items:center;gap:0.5rem;flex-shrink:0}}
-.hit-pct{{font-size:0.88rem;font-weight:700}}
+.hit-pct{{font-size:0.88rem;font-weight:700;white-space:nowrap}}
 .no-badge{{color:var(--miss);font-size:0.78rem}}
 .pdf-link{{font-size:0.72rem;color:var(--accent);text-decoration:none}}
 .src-badge{{display:inline-block;font-size:0.65rem;padding:0.05rem 0.4rem;border-radius:99px;margin-left:0.35rem;vertical-align:middle;font-weight:500;letter-spacing:0.02em;text-transform:uppercase}}
 .src-abs{{background:#fef3c7;color:#92400e;border:1px solid #fde68a}}
 .src-self{{background:#e0e7ff;color:#3730a3;border:1px solid #c7d2fe}}
-/* Single download button */
-.dl-btn{{display:inline-block;font-size:0.72rem;padding:0.25rem 0.7rem;border-radius:6px;background:var(--accent);color:#fff;text-decoration:none;font-weight:500;border:1px solid var(--accent)}}
+/* Download icon button */
+.dl-btn{{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:6px;background:var(--accent);color:#fff;text-decoration:none;border:1px solid var(--accent);cursor:pointer;flex-shrink:0}}
 .dl-btn:hover{{background:#1d4ed8;border-color:#1d4ed8}}
+.dl-btn svg{{pointer-events:none}}
 .dl-disabled{{background:#e5e7eb;color:#9ca3af;border-color:#e5e7eb;cursor:not-allowed}}
 .dl-disabled:hover{{background:#e5e7eb;border-color:#e5e7eb}}
-/* Title visibility by card state — plain when collapsed, link when expanded */
-.card-title-link{{display:none}}
-.card.open .card-title-plain{{display:none}}
-.card.open .card-title-link{{display:inline-block;color:var(--accent);text-decoration:none}}
-.card.open .card-title-link:hover{{text-decoration:underline}}
 /* Exact Find section — source paper indexed online, shown separately */
 .exact-find-sec{{border:2px solid #818cf8;background:#eef2ff;margin:1.5rem 0;padding:1rem 1.25rem;border-radius:10px}}
 .exact-find-sec .sec-t{{color:#3730a3}}
@@ -485,18 +696,19 @@ a.card-title:hover{{color:var(--accent);text-decoration:underline}}
 .fb-submit:hover{{background:#1d4ed8}}
 .fb-submit:disabled{{opacity:0.5;cursor:not-allowed}}
 .fb-status{{font-size:0.8rem;color:var(--text2)}}
-.md-btn{{font-size:0.68rem;color:var(--accent);background:none;border:1px solid var(--accent);border-radius:5px;padding:0.1rem 0.4rem;cursor:pointer;opacity:0;transition:opacity .15s}}
-.card:hover .md-btn{{opacity:1}}
-.md-btn:hover{{background:var(--accent);color:#fff}}
+.md-btn{{display:inline-flex;align-items:center;justify-content:center;width:30px;height:30px;border-radius:6px;font-size:0.68rem;font-weight:600;color:#fff;background:var(--accent);border:1px solid var(--accent);cursor:pointer;flex-shrink:0}}
+.md-btn:hover{{background:#1d4ed8;border-color:#1d4ed8}}
 
 /* Hover checklist — full lines, 300ms delay */
 .hover-hits{{padding:0 1rem 0.5rem;opacity:0;max-height:0;overflow:hidden;transition:opacity .2s ease .3s,max-height .25s ease .3s}}
 .card:hover .hover-hits{{opacity:1;max-height:500px}}
 .card.open .hover-hits{{opacity:0;max-height:0;transition:none}}
-.hv-item{{font-size:0.82rem;color:#166534;padding:0.2rem 0;display:flex;align-items:flex-start;gap:0.3rem;line-height:1.5}}
+.hv-item{{font-size:0.82rem;color:var(--text);padding:0.2rem 0;display:flex;align-items:flex-start;gap:0.3rem;line-height:1.5}}
 .hv-icon{{flex-shrink:0}}
+.hv-present{{color:#dc2626}}
+.hv-partial{{color:#ea580c}}
 
-.card-snippet{{font-size:0.82rem;color:var(--text2);padding:0.3rem 1rem 0.6rem;line-height:1.55;border-top:1px solid var(--border)}}
+.card-snippet{{font-size:0.82rem;color:var(--text2);padding:0.3rem 1rem 0.6rem;line-height:1.55;border-top:1px solid var(--border);cursor:pointer}}
 .snip-full{{display:none}}
 .card:hover .snip-short{{display:none}}
 .card:hover .snip-full{{display:inline}}
@@ -510,7 +722,8 @@ a.card-title:hover{{color:var(--accent);text-decoration:underline}}
 .detail-label{{font-size:0.75rem;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:0.03em;margin-bottom:0.35rem}}
 .d-item{{display:flex;gap:0.4rem;padding:0.3rem 0;align-items:flex-start}}
 .d-icon{{flex-shrink:0;font-size:0.8rem}}
-.d-hit .d-icon{{color:var(--hit)}}
+.d-hit .d-icon{{color:#dc2626}}
+.d-partial .d-icon{{color:#ea580c}}
 .d-miss .d-icon{{color:var(--miss)}}
 .d-req{{font-size:0.82rem;color:var(--text)}}
 .d-analysis{{font-size:0.75rem;color:var(--text2);margin-top:0.1rem}}
@@ -552,31 +765,33 @@ a.card-title:hover{{color:var(--accent);text-decoration:underline}}
   </div>
 </div>
 
+{_render_confidence_banner(data.get("entropy_profile"))}
+
 <div class="sec">
   <div class="sec-t">Invention Summary</div>
   <div class="sec-b">{format_summary(summary_text)}</div>
 </div>
 
-{f'<div class="sec eval-sec"><div class="sec-t sec-t-lg">Novelty Assessment</div><div class="sec-b">{format_eval_summary(overall_summary)}</div></div>' if overall_summary else ''}
+{f'<div class="sec eval-sec"><div class="sec-t sec-t-lg">Novelty Assessment</div><div class="sec-b">{render_markdown(overall_summary)}</div></div>' if overall_summary else ''}
 
 <div class="sec checklist-sec">
   <div class="sec-t sec-t-lg">Evaluation Checklist <span class="sec-count">{len(checklist)} items</span></div>
   <div class="sec-note">Each item is an atomic, testable requirement derived from the invention disclosure. Prior art is evaluated against every item.</div>
   <ol class="cl-list">
-    {"".join(f'<li class="cl-item">{esc(item)}</li>' for item in checklist)}
+    {cl_html_items}
   </ol>
 </div>
 
-{f'''<div class="sec">
+{f"""<div class="sec">
   <div class="sec-t tog" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">Search Groups ({len(search_groups)})</div>
   <div class="tog-body">{sg_html}</div>
-</div>''' if sg_html else ''}
+</div>""" if sg_html else ''}
 
-{f'''<div class="exact-find-sec">
+{f"""<div class="exact-find-sec">
   <div class="sec-t sec-t-lg">Exact Find <span class="sec-count">{len(exact_find)} found</span></div>
   <div class="sec-note">Your source paper was indexed online and retrieved by the search. Listed here for awareness; excluded from the novelty ranking below.</div>
   {exact_find_html}
-</div>''' if exact_find else ''}
+</div>""" if exact_find else ''}
 
 <div class="bar">
   <div class="bar-title">Possible Matches</div>
@@ -637,7 +852,15 @@ a.card-title:hover{{color:var(--accent);text-decoration:underline}}
 
 <script>
 let md='';
-function toggle(c){{c.classList.toggle('open')}}
+function toggle(c){{
+  const wasOpen=c.classList.contains('open');
+  document.querySelectorAll('.card.open').forEach(x=>x.classList.remove('open'));
+  if(!wasOpen)c.classList.add('open');
+}}
+document.addEventListener('click',e=>{{
+  if(!e.target.closest('.card')&&!e.target.closest('.overlay'))
+    document.querySelectorAll('.card.open').forEach(x=>x.classList.remove('open'));
+}});
 function showMd(c){{
   const r=c.getAttribute('data-md');
   md=r.replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').replace(/&#x27;/g,"'");
@@ -764,9 +987,10 @@ async function submitFeedback(){{
   if(!_fbRating && !comment && tags.length===0){{st.textContent='Pick a rating or write something first.';st.style.color='#b91c1c';return;}}
   btn.disabled=true;st.textContent='Sending...';st.style.color='';
   try{{
-    // Report is served via frontend proxy at /api/report/:id — so /api/feedback/:id
-    // is always the right target (backend direct is IAM-blocked from the browser).
-    const url=`/api/feedback/${{_JOB_ID}}`;
+    const isFile=location.protocol==='file:';
+    const base=isFile?'http://localhost:8000':'';
+    const prefix=isFile?'':'/api';
+    const url=`${{base}}${{prefix}}/feedback/${{_JOB_ID}}`;
     const r=await fetch(url,{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{rating:_fbRating||null,comment,tags}})}});
     if(!r.ok)throw new Error(`HTTP ${{r.status}}`);
     const j=await r.json();
@@ -781,6 +1005,199 @@ async function submitFeedback(){{
 }}
 </script>
 </body></html>'''
+
+
+def generate_markdown(data: dict) -> str:
+    if data.get("implied_invention"):
+        return _generate_implied_markdown(data)
+
+    phase1 = data.get("phase1", {})
+    phase2 = data.get("phase2", {})
+    evaluation = data.get("evaluation", {})
+    search = data.get("search", {})
+
+    source_title = data.get("source_title", data.get("source_filename", "Document"))
+    summary_text = phase1.get("summary", "")
+    invention_type = phase1.get("invention_type", "Unknown")
+    doc_mode = phase1.get("doc_mode", "unknown")
+    fields_map = phase1.get("fields_map", [])
+    cpc = phase1.get("cpc_subclass", "")
+    gen_at = data.get("generated_at", "")
+
+    checklist = phase2.get("checklist", [])
+    scoring_report = evaluation.get("scoring_report", [])
+    overall_summary = evaluation.get("summary", "")
+    stats = evaluation.get("stats", {})
+    risk_level = stats.get("risk_level", "unknown")
+    top_score = stats.get("top_score", 0)
+
+    total_patents = search.get("summary", {}).get("total_patents", 0)
+    total_papers = search.get("summary", {}).get("total_papers", 0)
+
+    exact_find = [m for m in scoring_report if m.get("is_self_match")]
+    non_self = [m for m in scoring_report if not m.get("is_self_match")]
+    hits_docs = [m for m in non_self if (m.get("similarity_score", 0) or 0) > 0]
+
+    lines = []
+    lines.append(f"# Patent Novelty Report: {source_title}")
+    lines.append("")
+    lines.append(f"**Generated:** {gen_at}  ")
+    lines.append(f"**Category:** {invention_type} · **Type:** {doc_mode}  ")
+    if fields_map:
+        lines.append(f"**Fields:** {', '.join(fields_map)}  ")
+    if cpc:
+        lines.append(f"**CPC:** {cpc}  ")
+    lines.append(f"**Risk Level:** {risk_level} · **Top Score:** {top_score:.2%}  ")
+    lines.append(f"**Prior Art Found:** {total_patents} patents, {total_papers} papers  ")
+    lines.append("")
+
+    ep = data.get("entropy_profile")
+    if ep:
+        conf = ep.get("overall_confidence", "medium").upper()
+        lines.append(f"**Analysis Confidence:** {conf}  ")
+        for dp in ep.get("degradation_points", []):
+            lines.append(f"- ⚠ {dp}")
+        lines.append("")
+
+    lines.append("## Invention Summary")
+    lines.append("")
+    lines.append(summary_text)
+    lines.append("")
+
+    if overall_summary:
+        lines.append("## Novelty Assessment")
+        lines.append("")
+        lines.append(overall_summary)
+        lines.append("")
+
+    if checklist:
+        lines.append("## Evaluation Criteria")
+        lines.append("")
+        for i, item in enumerate(checklist, 1):
+            if isinstance(item, dict):
+                w = item.get("weight", 0)
+                lines.append(f"{i}. [w={w:.2f}] {item.get('criterion', str(item))}")
+            else:
+                lines.append(f"{i}. {item}")
+        lines.append("")
+
+    if exact_find:
+        lines.append("## Exact Find (Source Self-Match)")
+        lines.append("")
+        for m in exact_find:
+            title = m.get("title", "Unknown")
+            url = m.get("url", "")
+            lines.append(f"- **{title}**" + (f" — [link]({url})" if url else ""))
+        lines.append("")
+
+    if hits_docs:
+        lines.append("## Prior Art Matches (Final Reference Table)")
+        lines.append("")
+        has_css = any(m.get("css") is not None for m in hits_docs)
+        if has_css:
+            lines.append("| # | Title | Type | CSS | EWSS | RS Synopsis |")
+            lines.append("|---|-------|------|-----|------|-------------|")
+        else:
+            lines.append("| # | Title | Type | Matched | Score |")
+            lines.append("|---|-------|------|---------|-------|")
+        for i, m in enumerate(hits_docs, 1):
+            title = m.get("title", "Unknown")[:80]
+            mtype = m.get("manuscript_type", "Doc")
+            if has_css:
+                css_v = m.get("css", 0) or 0
+                ewss_v = m.get("ewss", 0) or 0
+                rs_syn = (m.get("rs_synopsis", "") or "")[:100]
+                lines.append(
+                    f"| {i} | {title} | {mtype} | "
+                    f"{css_v:.0%} | {ewss_v:.0%} | {rs_syn} |")
+            else:
+                evals = m.get("similarity_categories", m.get("evaluations", {}))
+                hit_count = sum(1 for ev in (evals or {}).values()
+                               if isinstance(ev, dict) and ev.get("match"))
+                total = len(evals) if evals else len(checklist)
+                score = hit_count / total if total > 0 else 0
+                lines.append(
+                    f"| {i} | {title} | {mtype} | "
+                    f"{hit_count}/{total} | {score:.0%} |")
+        lines.append("")
+
+        lines.append("### Detailed Evaluations")
+        lines.append("")
+        for m in hits_docs:
+            title = m.get("title", "Unknown")
+            url = m.get("url", "")
+            mtype = m.get("manuscript_type", "Document")
+            evals = m.get("similarity_categories", m.get("evaluations", {}))
+            css_v = m.get("css", 0) or 0
+            ewss_v = m.get("ewss", 0) or 0
+            lines.append(f"#### {title}")
+            if url:
+                lines.append(f"**URL:** {url}  ")
+            lines.append(f"**Type:** {mtype}")
+            if css_v or ewss_v:
+                lines.append(f"**CSS:** {css_v:.0%} · **EWSS:** {ewss_v:.0%}")
+            lines.append("")
+            for req, ev in (evals or {}).items():
+                if not isinstance(ev, dict):
+                    continue
+                score_val = ev.get("score")
+                analysis = ev.get("analysis", "")
+                if score_val is not None:
+                    label = {2: "PRESENT", 1: "PARTIAL", 0: "ABSENT"}.get(score_val, "?")
+                else:
+                    label = "MATCH" if ev.get("match", False) else "NO MATCH"
+                lines.append(f"- **[{label}]** {req}")
+                if analysis:
+                    lines.append(f"  - {analysis}")
+            lines.append("")
+
+    lines.append("---")
+    lines.append("*Report generated by Patent Novelty Analyzer*")
+    return "\n".join(lines)
+
+
+def _generate_implied_markdown(data: dict) -> str:
+    phase1 = data.get("phase1", {})
+    phase2 = data.get("phase2", {})
+    title = data.get("source_title", data.get("source_filename", "Document"))
+    summary = phase1.get("summary", "")
+    reasoning = phase1.get("reasoning", "")
+    ucd = phase2.get("ucd", "")
+    fields = phase1.get("fields_map", [])
+    gen_at = data.get("generated_at", "")
+
+    lines = [
+        f"# Implied Invention Report: {title}",
+        "",
+        f"**Generated:** {gen_at}  ",
+        f"**Fields:** {', '.join(fields) if fields else 'Not classified'}  ",
+        "**Status:** Implied Invention",
+        "",
+        "> **Implied Invention** — This document describes an inventive concept but does not "
+        "provide concrete implementation details. No prior art search was conducted.",
+        "",
+        "## Why \"Implied\"?",
+        "",
+        reasoning,
+        "",
+        "## Invention Summary",
+        "",
+        summary,
+        "",
+        "## Technical Elements Identified",
+        "",
+        f"```\n{ucd if ucd else '(No decomposition available)'}\n```",
+        "",
+        "## Recommendation",
+        "",
+        "To proceed with a prior art search, the document would need to include concrete "
+        "implementation details — specific architectures, algorithms, materials, experimental "
+        "results, or system designs.",
+        "",
+        "---",
+        "*Report generated by Patent Novelty Analyzer*",
+    ]
+    return "\n".join(lines)
 
 
 def main():

@@ -18,10 +18,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException, Request
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 app = FastAPI(title="Patent Analyzer", version="0.3.0")
 
@@ -88,6 +88,15 @@ def _save_results_to_gcs(job_id: str, results_json: str):
         bucket = _get_gcs().bucket(GCS_BUCKET)
         blob = bucket.blob(f"{GCS_PREFIX}{job_id}/results.json")
         blob.upload_from_string(results_json, content_type="application/json")
+    except Exception:
+        pass
+
+
+def _save_md_to_gcs(job_id: str, md_text: str):
+    try:
+        bucket = _get_gcs().bucket(GCS_BUCKET)
+        blob = bucket.blob(f"{GCS_PREFIX}{job_id}/report.md")
+        blob.upload_from_string(md_text, content_type="text/markdown")
     except Exception:
         pass
 
@@ -182,6 +191,7 @@ async def start_analysis(
 async def get_upload_url(filename: str, content_type: str = "application/pdf"):
     """Generate a signed PUT URL so the client can upload directly to GCS, bypassing 32MB Cloud Run limit."""
     from datetime import timedelta
+
     from google.auth import default
     from google.auth.transport.requests import Request as AuthRequest
 
@@ -278,7 +288,9 @@ async def get_status(job_id: str):
     # Cross-instance reconciliation: if Phase 5 already wrote the report to GCS,
     # the pipeline finished on another Cloud Run instance — this instance's
     # in-memory view is stale. Trust the GCS artifact, not the heartbeat.
+    response = dict(job)
     if job.get("status") == "running":
+        # Cross-instance reconciliation: if report already in GCS, promote to completed
         try:
             bucket = _get_gcs().bucket(GCS_BUCKET)
             if bucket.blob(f"{GCS_PREFIX}{job_id}/report.html").exists():
@@ -288,19 +300,20 @@ async def get_status(job_id: str):
                 return job
         except Exception:
             pass
+        # Stale heartbeat is informational only — never flip status from a GET endpoint
         last_hb = job.get("last_heartbeat") or job.get("created_at")
         if last_hb:
             try:
                 from datetime import datetime as _dt
                 hb_time = _dt.fromisoformat(last_hb.replace("Z", "+00:00"))
                 age = (datetime.now(timezone.utc) - hb_time).total_seconds()
-                if age > 900:  # 15 minutes
-                    job["status"] = "error"
-                    job["error"] = f"Pipeline appears stuck (no heartbeat for {int(age)}s). Likely killed by Cloud Run instance shutdown."
-                    _save_job(job)
+                if age > 900:
+                    response["stale_heartbeat_warning"] = (
+                        f"No heartbeat for {int(age)}s — pipeline may be slow"
+                    )
             except Exception:
                 pass
-    return job
+    return response
 
 
 @app.get("/events/{job_id}")
@@ -331,11 +344,28 @@ async def get_report(job_id: str):
         bucket = _get_gcs().bucket(GCS_BUCKET)
         blob = bucket.blob(f"{GCS_PREFIX}{job_id}/report.html")
         if blob.exists():
-            from fastapi.responses import Response
             return Response(content=blob.download_as_bytes(), media_type="text/html")
     except Exception:
         pass
     raise HTTPException(404, "Report not generated yet")
+
+
+@app.get("/report-md/{job_id}")
+async def get_report_md(job_id: str):
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    md_path = Path(job.get("output_dir", f"/tmp/outputs/{job_id}")) / "report.md"
+    if md_path.exists():
+        return FileResponse(str(md_path), media_type="text/markdown")
+    try:
+        bucket = _get_gcs().bucket(GCS_BUCKET)
+        blob = bucket.blob(f"{GCS_PREFIX}{job_id}/report.md")
+        if blob.exists():
+            return Response(content=blob.download_as_bytes(), media_type="text/markdown")
+    except Exception:
+        pass
+    raise HTTPException(404, "Markdown report not generated yet")
 
 
 @app.get("/results/{job_id}")
@@ -350,7 +380,6 @@ async def get_results(job_id: str):
         bucket = _get_gcs().bucket(GCS_BUCKET)
         blob = bucket.blob(f"{GCS_PREFIX}{job_id}/results.json")
         if blob.exists():
-            from fastapi.responses import Response
             return Response(content=blob.download_as_bytes(), media_type="application/json")
     except Exception:
         pass
@@ -541,7 +570,25 @@ def _job_to_a2a_task(job: dict) -> dict:
 
     if job_status == "completed":
         task["metadata"]["report_url"] = f"/report/{job['id']}"
+        task["metadata"]["report_md_url"] = f"/report-md/{job['id']}"
         task["metadata"]["results_url"] = f"/results/{job['id']}"
+        md_path = Path(job.get("output_dir", f"/tmp/outputs/{job['id']}")) / "report.md"
+        md_text = None
+        if md_path.exists():
+            md_text = md_path.read_text(encoding="utf-8")
+        else:
+            try:
+                bucket = _get_gcs().bucket(GCS_BUCKET)
+                blob = bucket.blob(f"{GCS_PREFIX}{job['id']}/report.md")
+                if blob.exists():
+                    md_text = blob.download_as_text()
+            except Exception:
+                pass
+        if md_text:
+            task["artifacts"] = [{
+                "name": "report.md",
+                "parts": [{"type": "text", "text": md_text}],
+            }]
 
     if job_status == "error":
         task["metadata"]["error"] = job.get("error")
@@ -695,6 +742,21 @@ async def _handle_a2a_send(
 
 # ─── Pipeline ───────────────────────────────────────────────────
 
+
+def _load_cpc_context(cpc_subclass: str) -> str:
+    """Load CPC reference data for persona crafting."""
+    cpc_path = Path(__file__).parent / "cpc_reference.json"
+    try:
+        with open(cpc_path) as f:
+            data = json.load(f)
+        entry = data.get(cpc_subclass, {})
+        return json.dumps(entry, indent=2) if entry else json.dumps(
+            {"note": f"{cpc_subclass} not in reference", "available": list(data.keys())}
+        )
+    except Exception:
+        return "{}"
+
+
 async def run_pipeline(job_id: str):
     """Full async pipeline — all phases."""
     import sys
@@ -702,12 +764,13 @@ async def run_pipeline(job_id: str):
 
     from app.llm import (
         detect_and_summarize_invention,
-        decompose_invention, generate_checklist,
-        plan_delegation, evaluate_batch, generate_overall_summary,
-        self_check, review_phase_output,
+        evaluate_batch,
+        generate_overall_summary,
+        review_phase_output,
+        self_check,
     )
     from patent_analyzer.query_builder import build_all_queries
-    from patent_analyzer.scorer import compute_total_score, classify_risk
+    from patent_analyzer.scorer import classify_risk
 
     job = jobs[job_id]
     job_dir = Path(job["output_dir"])
@@ -716,9 +779,10 @@ async def run_pipeline(job_id: str):
     job["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
     evolve = bool(job.get("evolve", False))
 
-    def update(phase: str, status: str, data: dict | None = None):
+    def update(phase: str, phase_status: str, data: dict | None = None):
         job["phase"] = phase
-        job["status"] = status
+        if phase_status == "running":
+            job["status"] = "running"
         job["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
         if data:
             job["phases"][phase] = data
@@ -804,6 +868,7 @@ async def run_pipeline(job_id: str):
         phase: str,
         fn,
         validator_input: str | None = None,
+        validator_pdf: str | None = None,
         retry_with_feedback: bool = False,
     ):
         """
@@ -836,7 +901,9 @@ async def run_pipeline(job_id: str):
         if validator_input is not None and result is not None:
             try:
                 llm_label(phase, f"Self-check: {label}")
-                check = await self_check(label, validator_input, str(result))
+                check = await self_check(
+                    label, validator_input, str(result),
+                    source_pdf_path=validator_pdf)
                 if not check.get("ok"):
                     issues = ", ".join(check.get("issues", []))
                     event(phase, "quality_warning", f"{label}: {issues}", {"check": check})
@@ -909,7 +976,7 @@ async def run_pipeline(job_id: str):
             # conference/preprint header lines so Phase 3b self-citation filter has
             # a real title to compare against.
             meta_title = (doc.metadata or {}).get("title", "") or ""
-            if meta_title and len(meta_title) > 5 and not _is_header_boilerplate(meta_title):
+            if meta_title and len(meta_title) > 20 and not _is_header_boilerplate(meta_title):
                 source_title = meta_title.strip()
             else:
                 for line in (first_page_text or "").split("\n"):
@@ -947,39 +1014,53 @@ async def run_pipeline(job_id: str):
         # the first page actually discloses a patentable invention; if not, the
         # pipeline stops cleanly here. If yes, the produced summary is the
         # canonical summary used by all downstream phases AND shown to the user.
+        _pdf = input_path if input_path.endswith(".pdf") else None
         detection_result = await try_step(
             "Detecting and summarizing invention (page 1)",
             phase="phase1",
-            fn=lambda: detect_and_summarize_invention(first_page_text),
-            validator_input=first_page_text,
+            fn=lambda: detect_and_summarize_invention(
+                first_page_text, source_pdf_path=_pdf),
+            validator_input=first_page_text or "(PDF sent natively)",
         )
         if not detection_result:
             detection_result = {
+                "status_determination": "Present",
                 "has_innovation": True,
                 "reasoning": "(detection LLM call failed — see failure_reason)",
-                "doc_type": "other",
+                "doc_type": "invention",
                 "category": "None",
+                "fields_map": [],
+                "source_citation": "",
+                "cpc_subclass": "",
                 "summary": "(invention summary unavailable)",
             }
 
-        event("phase1", "info",
-              f"has_innovation={detection_result['has_innovation']} · "
-              f"doc_type={detection_result['doc_type']} · "
-              f"category={detection_result['category']}",
-              {"reasoning": detection_result.get("reasoning", "")})
+        status_det = detection_result.get("status_determination", "Present")
+        doc_type = detection_result.get("doc_type", "invention")
+        fields_map = detection_result.get("fields_map", [])
+        cpc_subclass = detection_result.get("cpc_subclass", "")
+        reasoning = detection_result.get("reasoning") or "(no reasoning provided)"
 
-        if not detection_result.get("has_innovation"):
-            reasoning = detection_result.get("reasoning") or "(no reasoning provided)"
-            event("phase1", "no_innovation",
-                  f"No innovation detected on page 1 — pipeline stopping cleanly. {reasoning[:200]}",
-                  {
-                      "reasoning": reasoning,
-                      "doc_type": detection_result.get("doc_type", "other"),
-                      "first_page_preview": first_page_text[:1000],
-                  })
+        event("phase1", "info",
+              f"status={status_det} · doc_type={doc_type} · "
+              f"category={detection_result.get('category', 'None')} · "
+              f"cpc={cpc_subclass} · fields={fields_map}",
+              {"reasoning": reasoning})
+
+        if not source_title:
+            cite = detection_result.get("source_citation", "")
+            if cite and len(cite) > 10:
+                source_title = cite.split(".")[0].strip()[:120]
+
+        # ── Route: Absent — no invention at all ──
+        if status_det == "Absent":
+            event("phase1", "no_invention",
+                  f"Status: Absent — {reasoning[:200]}",
+                  {"doc_type": doc_type, "first_page_preview": first_page_text[:1000]})
             update("phase1", "completed", {
+                "status_determination": "Absent",
                 "has_innovation": False,
-                "doc_mode": detection_result.get("doc_type", "other"),
+                "doc_mode": doc_type,
                 "summary": "",
                 "reasoning": reasoning,
             })
@@ -987,8 +1068,22 @@ async def run_pipeline(job_id: str):
             _save_job(job)
             return
 
+        # ── Route: talks_about_invention_but_no_invention — early exit ──
+        if doc_type == "talks_about_invention_but_no_invention":
+            event("phase1", "no_invention",
+                  "Document references inventions but presents none — stopping")
+            update("phase1", "completed", {
+                "status_determination": status_det,
+                "has_innovation": False,
+                "doc_mode": doc_type,
+                "summary": detection_result.get("summary", ""),
+                "reasoning": reasoning,
+            })
+            job["status"] = "completed"
+            _save_job(job)
+            return
+
         summary = detection_result.get("summary") or "(empty summary)"
-        doc_type = detection_result.get("doc_type", "other")
         category_label = detection_result.get("category", "None")
 
         # Optional full-context review (evolve mode only)
@@ -1002,64 +1097,211 @@ async def run_pipeline(job_id: str):
         )
 
         phase1 = {
-            "has_innovation": True,
+            "status_determination": status_det,
+            "has_innovation": status_det != "Absent",
             "doc_mode": doc_type,
+            "fields_map": fields_map,
+            "cpc_subclass": cpc_subclass,
+            "source_citation": detection_result.get("source_citation", ""),
             "summary": summary,
             "invention_type": category_label,
-            "reasoning": detection_result.get("reasoning", ""),
+            "reasoning": reasoning,
         }
         save_json(phase1, job_dir / "phase1.json")
         update("phase1", "completed", phase1)
-        # Synthetic category dict for legacy downstream code that expects it
-        category = {"invention_type": category_label, "reasoning": detection_result.get("reasoning", "")}
+        # ── Craft domain-specific personas (1 LLM call) ──
+        from app.llm import INITIAL_PERSONAS, craft_personas
+        personas = dict(INITIAL_PERSONAS)
+        try:
+            cpc_ctx = _load_cpc_context(cpc_subclass)
+            llm_label("phase1", "Crafting domain-specific personas")
+            personas = await craft_personas(
+                doc_type=doc_type,
+                fields_map=fields_map,
+                cpc_subclass=cpc_subclass,
+                cpc_context=cpc_ctx,
+                summary_excerpt=summary[:500],
+            )
+            event("phase1", "info", f"Crafted {len(personas)} domain-specific personas")
+        except Exception as e:
+            event("phase1", "persona_fallback", f"Persona crafting failed: {e}")
 
-        # ── Phase 2: Decomposition ──
+        # ── Phase 2: Expert-driven innovation analysis ──
         update("phase2", "running")
 
-        ucd = await try_step(
-            "Decomposing invention",
+        from app.llm import (
+            compute_ssr_grounding,
+            determine_patent_types,
+            expand_technology_choices,
+            generate_checklist_for_type,
+            generate_search_queries,
+            scan_innovation_landscape,
+        )
+        from app.llm import (
+            review_checklist as llm_review_checklist,
+        )
+
+        # Step B: Innovation landscape scan
+        llm_label("phase2", "Step B: Innovation landscape scan")
+        innovation_axes = await try_step(
+            "Scanning innovation landscape",
             phase="phase2",
-            fn=lambda feedback=None: decompose_invention(
-                paper_text,
-                feedback=feedback,
-                source_pdf_path=input_path if input_path.endswith(".pdf") else None,
+            fn=lambda: scan_innovation_landscape(
+                summary, fields_map, cpc_subclass, cpc_ctx,
+                source_pdf_path=_pdf,
+                persona=personas.get("landscape"),
             ),
-            validator_input=paper_text[:15000],  # match what summarize/decompose actually saw
-        )
-        if not ucd:
-            ucd = "(decomposition unavailable)"
-
-        checklist = await try_step(
-            "Generating evaluation checklist",
-            phase="phase2",
-            fn=lambda: generate_checklist(summary, ucd),
         ) or []
-        event("phase2", "info", f"Generated {len(checklist)} checklist items")
+        if not innovation_axes:
+            innovation_axes = [{"axis_name": "General technical contribution",
+                                "axis_description": summary[:200],
+                                "cpc_group": cpc_subclass, "relevance": "fallback"}]
+        event("phase2", "info", f"Step B: {len(innovation_axes)} innovation axes identified")
 
-        await maybe_review(
-            phase="phase2",
-            phase_name="evaluation checklist",
-            task_desc="Produce 20-30 atomic, testable items that distinguish THIS invention "
-                      "from generic prior art in the same field. Items must be specific (not "
-                      "generic ML/engineering boilerplate) and evidence-checkable against PDFs.",
-            original_input=f"INVENTION SUMMARY:\n{summary}\n\nDECOMPOSITION:\n{ucd}",
-            output_text="\n".join(f"{i+1}. {c}" for i, c in enumerate(checklist)),
+        # ── Implied early exit after landscape scan ──
+        if status_det == "Implied":
+            event("phase2", "implied_exit",
+                  "Implied invention — landscape scan done, skipping prior art search")
+            ucd = json.dumps({"innovation_axes": innovation_axes},
+                             indent=2, ensure_ascii=False)
+            phase2 = {"ucd": ucd, "innovation_axes": innovation_axes,
+                       "checklist": [], "delegation": {}}
+            save_json(phase2, job_dir / "phase2.json")
+            update("phase2", "completed", {"checklist_count": 0, "axes": len(innovation_axes)})
+            results = {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "source_filename": os.path.basename(input_path),
+                "source_title": source_title,
+                "implied_invention": True,
+                "phase1": phase1,
+                "phase2": phase2,
+                "evaluation": {"scoring_report": [], "summary": None,
+                               "stats": {"total_evaluated": 0, "top_score": 0, "risk_level": "implied"}},
+            }
+            results_str = json.dumps(results, indent=2, ensure_ascii=False, default=str)
+            (job_dir / "results.json").write_text(results_str)
+            _save_results_to_gcs(job_id, results_str)
+            from patent_analyzer.report_generator import generate_html, generate_markdown
+            html = generate_html(results)
+            (job_dir / "report.html").write_text(html, encoding="utf-8")
+            _save_report_to_gcs(job_id, html)
+            md = generate_markdown(results)
+            (job_dir / "report.md").write_text(md, encoding="utf-8")
+            _save_md_to_gcs(job_id, md)
+            event("phase5", "done", "Implied invention report generated")
+            job["status"] = "completed"
+            _save_job(job)
+            return
+
+        # Step C: Technology choice expansion (parallel per axis)
+        llm_label("phase2", "Step C: Technology choice expansion")
+
+        async def _expand_one(ax):
+            return await expand_technology_choices(
+                ax, summary, source_pdf_path=_pdf,
+                persona=personas.get("technology"),
+            )
+
+        tc_results = await asyncio.gather(
+            *[_expand_one(ax) for ax in innovation_axes],
+            return_exceptions=True,
         )
+        technology_choices = [tc for tc in tc_results if isinstance(tc, dict) and tc.get("known_approaches")]
+        for tc in tc_results:
+            if isinstance(tc, Exception):
+                event("phase2", "warning", f"Step C axis expansion failed: {tc}")
+        event("phase2", "info",
+              f"Step C: {len(technology_choices)} axes expanded, "
+              f"{sum(len(tc.get('known_approaches',[])) for tc in technology_choices)} total known approaches")
+        heartbeat()
 
-        delegation = await try_step(
-            "Planning search strategy",
+        # Step D: Patent type applicability
+        llm_label("phase2", "Step D: Patent type determination")
+        applicable_types = await try_step(
+            "Determining patent types",
             phase="phase2",
-            fn=lambda feedback=None: plan_delegation(summary, ucd, category["invention_type"], feedback=feedback),
-            validator_input=summary,  # full canonical summary, no truncation
-            retry_with_feedback=True,  # a hallucinated atom poisons all 5 query groups
-        ) or {"atoms": [], "groups": []}
-        n_atoms = len(delegation.get("atoms", []))
-        n_groups = len(delegation.get("groups", []))
-        event("phase2", "info", f"Plan: {n_atoms} atoms in {n_groups} search groups")
+            fn=lambda: determine_patent_types(
+                summary, technology_choices,
+                source_pdf_path=_pdf,
+                persona=personas.get("checklist"),
+            ),
+        ) or ["Process"]
+        event("phase2", "info", f"Step D: Applicable types: {applicable_types}")
+        heartbeat()
 
-        phase2 = {"ucd": ucd, "checklist": checklist, "delegation": delegation}
+        # Step E: Checklist generation (parallel per type)
+        llm_label("phase2", "Step E: Checklist generation")
+        cl_results = await asyncio.gather(
+            *[generate_checklist_for_type(
+                pt, summary, technology_choices,
+                source_pdf_path=_pdf,
+                persona=personas.get("checklist"),
+            ) for pt in applicable_types],
+            return_exceptions=True,
+        )
+        combined_checklist = []
+        for result in cl_results:
+            if isinstance(result, list):
+                combined_checklist.extend(result)
+        event("phase2", "info",
+              f"Step E: {len(combined_checklist)} raw checklist items across {len(applicable_types)} types")
+        heartbeat()
+
+        # Step F: Expert review
+        llm_label("phase2", "Step F: Expert checklist review")
+        checklist = await try_step(
+            "Expert review of combined checklist",
+            phase="phase2",
+            fn=lambda: llm_review_checklist(
+                combined_checklist, summary, technology_choices,
+                source_pdf_path=_pdf,
+                persona=personas.get("reviewer"),
+            ),
+        ) or combined_checklist
+        event("phase2", "info", f"Step F: Final checklist has {len(checklist)} items")
+        heartbeat()
+
+        # Step G: Search query generation
+        llm_label("phase2", "Step G: Search query generation")
+        delegation = await try_step(
+            "Generating search queries from checklist",
+            phase="phase2",
+            fn=lambda: generate_search_queries(
+                checklist, summary, cpc_subclass,
+                persona=personas.get("plan"),
+            ),
+        ) or {"groups": []}
+        n_groups = len(delegation.get("groups", []))
+        event("phase2", "info", f"Step G: {n_groups} search groups generated")
+
+        # Save Phase 2 outputs
+        ucd = json.dumps({
+            "innovation_axes": innovation_axes,
+            "technology_choices": technology_choices,
+        }, indent=2, ensure_ascii=False, default=str)
+        phase2 = {
+            "ucd": ucd,
+            "innovation_axes": innovation_axes,
+            "technology_choices": technology_choices,
+            "applicable_types": applicable_types,
+            "checklist": checklist,
+            "delegation": delegation,
+        }
         save_json(phase2, job_dir / "phase2.json")
-        update("phase2", "completed", {"checklist_count": len(checklist), "atoms": n_atoms, "groups": n_groups})
+        update("phase2", "completed", {
+            "checklist_count": len(checklist),
+            "axes": len(innovation_axes),
+            "types": applicable_types,
+            "groups": n_groups,
+        })
+
+        # Grounding metrics
+        ssr_grounding = compute_ssr_grounding(checklist)
+        event("phase2", "grounding", (
+            f"Landscape: {len(innovation_axes)} axes, "
+            f"{len(technology_choices)} expanded · "
+            f"SSR: weight_concentration={ssr_grounding['weight_concentration']:.0%}"
+        ))
 
         # ── Phase 3: Multi-channel recall ──
         update("phase3", "running")
@@ -1070,13 +1312,13 @@ async def run_pipeline(job_id: str):
         n_query_groups = len(queries.get("groups", []))
         event("phase3", "info", f"Built queries for {n_query_groups} groups")
 
-        from patent_analyzer.searcher import download_pdf
-        from patent_analyzer.recall import pool as recall_pool
-        from patent_analyzer.recall import serpapi as ch_serpapi
-        from patent_analyzer.recall import semantic_scholar as ch_ss
-        from patent_analyzer.recall import openalex as ch_oa
-        from patent_analyzer.recall import arxiv as ch_arxiv
         from app.llm import summarize_failure as _summarize_failure
+        from patent_analyzer.recall import arxiv as ch_arxiv
+        from patent_analyzer.recall import openalex as ch_oa
+        from patent_analyzer.recall import pool as recall_pool
+        from patent_analyzer.recall import semantic_scholar as ch_ss
+        from patent_analyzer.recall import serpapi as ch_serpapi
+        from patent_analyzer.searcher import download_pdf
 
         # Build recall queries for the semantic channels (SS / OA / arXiv).
         # Empirically ALL three choke on long natural-language queries:
@@ -1385,16 +1627,18 @@ async def run_pipeline(job_id: str):
         # all_docs already populated from the pooled multi-channel recall above
 
         # Filter out self-citations: documents whose title closely matches the source manuscript
+        _STOP = {"a","an","the","of","in","on","for","and","or","by","to","with","from","is","at","as","its","via","using","based","towards","toward"}
         def title_similarity(a: str, b: str) -> float:
-            """Quick token-based similarity for title matching."""
+            """Token Jaccard similarity excluding stop words."""
             if not a or not b:
                 return 0.0
-            ta = set(re.findall(r"\w+", a.lower()))
-            tb = set(re.findall(r"\w+", b.lower()))
+            ta = set(re.findall(r"\w+", a.lower())) - _STOP
+            tb = set(re.findall(r"\w+", b.lower())) - _STOP
             if not ta or not tb:
                 return 0.0
             inter = len(ta & tb)
-            return inter / min(len(ta), len(tb))
+            union = len(ta | tb)
+            return inter / union if union else 0.0
 
         # Self-match TAGGING (not removal):
         # Per product spec: when the source paper is indexed online and gets
@@ -1436,7 +1680,7 @@ async def run_pipeline(job_id: str):
         try:
             from patent_analyzer.semantic_search import rerank_by_embedding
             ranked = rerank_by_embedding(summary, all_docs, limit=30)
-            event("phase3b", "info", f"Top 30 selected by embedding similarity")
+            event("phase3b", "info", "Top 30 selected by embedding similarity")
         except Exception as e:
             event("phase3b", "warn", f"Embedding failed, fallback to keyword: {e}")
             ranked = sorted(all_docs, key=lambda x: x.get("_relevance", 0), reverse=True)[:30]
@@ -1485,7 +1729,9 @@ async def run_pipeline(job_id: str):
 
         # ── Phase 4: Deep evaluation ──
         update("phase4", "running")
-        event("phase4", "start", f"Evaluating up to {len(eval_candidates)} documents against {len(checklist)}-item checklist")
+        event("phase4", "start",
+              f"Evaluating up to {len(eval_candidates)} documents "
+              f"against {len(checklist)}-item checklist")
 
         scoring_report: list[dict] = []
 
@@ -1498,17 +1744,20 @@ async def run_pipeline(job_id: str):
                 summary, checklist, batch_docs, max_concurrent=2,
                 source_pdf_path=input_path if input_path.endswith(".pdf") else None,
                 source_title=source_title,
-                on_doc_done=heartbeat,  # keep zombie detector from flagging Phase 4
+                on_doc_done=heartbeat,
+                persona=personas.get("evaluate"),
             )
 
         def _absorb_results(eval_results: list[dict], batch_docs: list[dict]):
+            from patent_analyzer.scorer import compute_css_ewss
             for er, doc in zip(eval_results, batch_docs):
                 cr = er.get("checklist_results", {})
-                score = compute_total_score(cr)
-                # Is this doc the source paper (found online)? Trust the Phase 3b
-                # tag first, then the LLM's in-content detection as a backstop.
+                css, ewss, denom_count = compute_css_ewss(
+                    cr, checklist if isinstance(checklist, list) else None)
+                adjusted_ewss = round(
+                    ewss * min(1.0, denom_count / 5), 4,
+                ) if denom_count < 5 else ewss
                 is_self = bool(doc.get("is_self_match") or er.get("is_source_duplicate"))
-                # Normalize pdf_link to a single string (some channels give list)
                 pdf_link = doc.get("pdf_link", "")
                 if isinstance(pdf_link, list):
                     pdf_link = pdf_link[0] if pdf_link else ""
@@ -1516,10 +1765,15 @@ async def run_pipeline(job_id: str):
                     "title": er.get("title", ""),
                     "id": er.get("pub_num", "") or doc.get("pub_num", ""),
                     "manuscript_type": er.get("match_type", ""),
-                    "similarity_score": score,
+                    "similarity_score": adjusted_ewss,
+                    "css": css,
+                    "ewss": ewss,
+                    "adjusted_ewss": adjusted_ewss,
+                    "ewss_denom_count": denom_count,
                     "similarity_categories": cr,
                     "anticipation_assessment": er.get("anticipation_assessment", ""),
                     "key_teachings": er.get("key_teachings", ""),
+                    "rs_synopsis": er.get("rs_synopsis", ""),
                     "snippet": er.get("snippet", "") or doc.get("snippet", ""),
                     "abstract": er.get("abstract", "") or doc.get("abstract", ""),
                     "eval_source": er.get("source", "pdf"),
@@ -1535,7 +1789,9 @@ async def run_pipeline(job_id: str):
             batch_size = 5
             while cursor < len(eval_candidates):
                 batch = eval_candidates[cursor:cursor + batch_size]
-                event("phase4", "elastic_batch", f"Evaluating docs {cursor+1}-{cursor+len(batch)} of {len(eval_candidates)}")
+                event("phase4", "elastic_batch",
+                      f"Evaluating docs {cursor+1}-{cursor+len(batch)} "
+                      f"of {len(eval_candidates)}")
                 results_batch = await _evaluate_batch(batch)
                 _absorb_results(results_batch, batch)
                 cursor += batch_size
@@ -1544,7 +1800,8 @@ async def run_pipeline(job_id: str):
                 # Review after batch — feed top results so far to the reviewer
                 top_so_far = sorted(scoring_report, key=lambda x: x["similarity_score"], reverse=True)[:5]
                 preview = "\n".join(
-                    f"- ({s['similarity_score']:.0%}) {s['title'][:140]} :: {(s.get('key_teachings') or s.get('snippet') or '')[:160]}"
+                    f"- ({s['similarity_score']:.0%}) {s['title'][:140]} "
+                    f":: {(s.get('key_teachings') or s.get('snippet') or '')[:160]}"
                     for s in top_so_far
                 )
                 review = await maybe_review(
@@ -1557,7 +1814,10 @@ async def run_pipeline(job_id: str):
                               "you can ask to stop early.",
                     original_input=f"INVENTION SUMMARY:\n{summary}",
                     output_text=preview,
-                    extra_context=f"Top score so far: {top_so_far[0]['similarity_score']:.0%}" if top_so_far else "no results yet",
+                    extra_context=(
+                        f"Top score so far: {top_so_far[0]['similarity_score']:.0%}"
+                        if top_so_far else "no results yet"
+                    ),
                 )
                 if review and review.get("next_action") == "skip":
                     event("phase4", "elastic_stop", "Reviewer asked to stop early — remaining candidates skipped")
@@ -1602,9 +1862,21 @@ async def run_pipeline(job_id: str):
             overall = None
         else:
             llm_label("phase4", "Generating overall novelty summary")
-            overall = await generate_overall_summary(summary, hit_matches[:10])
+            overall = await generate_overall_summary(summary, hit_matches[:10], persona=personas.get("summary"))
 
         update("phase4", "completed", {"evaluated": len(scoring_report), "top_score": round(top_score, 4)})
+
+        # ── Entropy profile (deterministic, no LLM) ──
+        from app.llm import compute_entropy_profile, compute_eval_grounding
+        eval_grounding = compute_eval_grounding(scoring_report)
+        entropy_profile = compute_entropy_profile(
+            ssr_grounding, eval_grounding)
+        event("phase4", "grounding", (
+            f"Eval: denom_coverage={eval_grounding['avg_denom_coverage']:.0%} "
+            f"evidence_density={eval_grounding['avg_evidence_density']:.0%} "
+            f"low_conf={eval_grounding['low_confidence_docs']}/{eval_grounding['total_docs']} · "
+            f"Overall confidence: {entropy_profile['overall_confidence']}"
+        ))
 
         # ── Phase 5: Report ──
         update("phase5", "running")
@@ -1630,15 +1902,19 @@ async def run_pipeline(job_id: str):
                     "risk_level": classify_risk(top_score),
                 },
             },
+            "entropy_profile": entropy_profile,
         }
         results_str = json.dumps(results, indent=2, ensure_ascii=False, default=str)
         (job_dir / "results.json").write_text(results_str)
         _save_results_to_gcs(job_id, results_str)
 
-        from patent_analyzer.report_generator import generate_html
+        from patent_analyzer.report_generator import generate_html, generate_markdown
         html = generate_html(results)
         (job_dir / "report.html").write_text(html, encoding="utf-8")
         _save_report_to_gcs(job_id, html)
+        md = generate_markdown(results)
+        (job_dir / "report.md").write_text(md, encoding="utf-8")
+        _save_md_to_gcs(job_id, md)
 
         event("phase5", "done", f"Report uploaded to GCS: {GCS_BUCKET}/{GCS_PREFIX}{job_id}/")
         update("phase5", "completed", {"done": True})

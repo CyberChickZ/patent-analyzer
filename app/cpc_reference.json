@@ -1,0 +1,291 @@
+{
+  "G06N": {
+    "title": "Computing arrangements based on specific computational models",
+    "subcategories": {
+      "G06N3": "Biological models — neural networks, deep learning, connectionist systems",
+      "G06N5": "Knowledge-based models — expert systems, ontologies, rule engines",
+      "G06N7": "Mathematical models — Bayesian networks, Markov models, probabilistic graphical models",
+      "G06N10": "Quantum computing — quantum circuits, quantum error correction",
+      "G06N20": "Machine learning — ensemble methods, transfer learning, reinforcement learning, general ML"
+    },
+    "adjacent": ["G06F", "G06T", "G06V"],
+    "domain_hint": "AI/ML — novelty typically in architecture design, training methodology, loss function, or application-specific adaptation rather than in the general concept of using ML"
+  },
+  "G06F": {
+    "title": "Electric digital data processing",
+    "subcategories": {
+      "G06F3": "Input/output arrangements — HCI, display, interaction devices",
+      "G06F8": "Software engineering — compilers, interpreters, program analysis",
+      "G06F9": "Arrangements for program control — operating systems, scheduling, virtualization",
+      "G06F16": "Information retrieval, database structures — search, indexing, query processing",
+      "G06F18": "Pattern recognition — classification, clustering, feature extraction",
+      "G06F21": "Security — authentication, access control, tamper detection"
+    },
+    "adjacent": ["G06N", "G06Q", "H04L"],
+    "domain_hint": "Systems/software — novelty in system architecture, data structures, algorithms, or specific optimizations. Generic use of known techniques on new data is weak"
+  },
+  "G06T": {
+    "title": "Image data processing or generation",
+    "subcategories": {
+      "G06T1": "General image data processing — pipelines, architectures",
+      "G06T3": "Geometric image transformation — warping, registration, super-resolution",
+      "G06T5": "Image enhancement — denoising, contrast, restoration",
+      "G06T7": "Image analysis — segmentation, edge detection, motion estimation",
+      "G06T11": "2D image generation — rendering, synthesis, style transfer",
+      "G06T15": "3D image rendering — ray tracing, rasterization, volumetric rendering",
+      "G06T17": "3D modelling — mesh, point cloud, implicit representations (NeRF, SDF)"
+    },
+    "adjacent": ["G06V", "G06N", "H04N"],
+    "domain_hint": "Computer vision/graphics — novelty in representation, loss design, architecture for specific visual tasks. Cross-check medical imaging (A61B) and autonomous driving (B60W)"
+  },
+  "G06V": {
+    "title": "Image or video recognition or understanding",
+    "subcategories": {
+      "G06V10": "Arrangements for image/video recognition — feature extraction, matching",
+      "G06V20": "Scenes or specific objects — face recognition, OCR, scene understanding",
+      "G06V30": "Character recognition — handwriting, printed text",
+      "G06V40": "Biometric recognition — fingerprint, iris, gait"
+    },
+    "adjacent": ["G06T", "G06N", "G06K"],
+    "domain_hint": "Visual recognition — novelty in detection/recognition architectures, training data strategies, or domain-specific adaptations. Generic detector on new dataset is weak"
+  },
+  "G06Q": {
+    "title": "Data processing systems for administrative, commercial, financial purposes",
+    "subcategories": {
+      "G06Q10": "Administration — logistics, resource allocation, scheduling",
+      "G06Q20": "Payment — electronic payment, digital currency, transaction processing",
+      "G06Q30": "Commerce — advertising, marketing, recommendation systems",
+      "G06Q40": "Finance — trading, risk assessment, insurance, banking",
+      "G06Q50": "Systems for specific business sectors — healthcare admin, education, agriculture"
+    },
+    "adjacent": ["G06F", "G06N", "H04L"],
+    "domain_hint": "Business methods — Alice/Mayo eligibility is a major hurdle. Novelty must be in technical implementation, not abstract business concept"
+  },
+  "H04L": {
+    "title": "Transmission of digital information",
+    "subcategories": {
+      "H04L1": "Error detection/correction — coding, FEC, ARQ",
+      "H04L5": "Multiplexing — OFDM, CDMA, resource allocation",
+      "H04L9": "Cryptography — encryption, key exchange, digital signatures, blockchain",
+      "H04L12": "Data switching networks — routing, switching, network architecture",
+      "H04L41": "Network management — configuration, monitoring, fault detection",
+      "H04L67": "Network protocols — HTTP, DNS, streaming, peer-to-peer"
+    },
+    "adjacent": ["H04W", "G06F", "G06Q"],
+    "domain_hint": "Networking/communications — novelty in protocol design, resource allocation algorithms, or security mechanisms. Standards-essential patents (SEP) have special considerations"
+  },
+  "H04W": {
+    "title": "Wireless communication networks",
+    "subcategories": {
+      "H04W4": "Services or facilities — location-based, device-to-device",
+      "H04W12": "Security — authentication, integrity, privacy in wireless",
+      "H04W24": "Supervisory/monitoring — measurement, reporting",
+      "H04W52": "Power management — energy saving, power control",
+      "H04W72": "Resource management — scheduling, channel assignment, MIMO",
+      "H04W84": "Network topologies — mesh, ad-hoc, sensor networks"
+    },
+    "adjacent": ["H04L", "H04B", "G01S"],
+    "domain_hint": "Wireless/5G/6G — heavily patented by telecom companies. Cross-check 3GPP standards. Novelty often in PHY layer techniques, MAC scheduling, or beam management"
+  },
+  "H04N": {
+    "title": "Pictorial communication (television)",
+    "subcategories": {
+      "H04N19": "Video coding — compression, encoding, decoding (H.264/H.265/AV1)",
+      "H04N21": "Selective content distribution — streaming, DRM, interactive TV",
+      "H04N23": "Cameras — image sensors, camera modules, computational photography",
+      "H04N25": "Solid-state image sensors — CMOS, CCD, pixel architectures"
+    },
+    "adjacent": ["G06T", "H04L", "G06V"],
+    "domain_hint": "Video/imaging systems — codec patents are SEP-heavy. Novelty in compression algorithm, sensor architecture, or streaming protocol"
+  },
+  "A61B": {
+    "title": "Diagnosis; Surgery; Identification",
+    "subcategories": {
+      "A61B1": "Endoscopy — instruments and techniques",
+      "A61B5": "Diagnostic measurement — biosensors, physiological monitoring, wearables",
+      "A61B6": "Radiation diagnosis — X-ray, CT, imaging systems",
+      "A61B8": "Ultrasonic diagnosis — imaging, doppler",
+      "A61B17": "Surgical instruments — minimally invasive, robotic surgery",
+      "A61B34": "Computer-aided surgery — surgical navigation, robotic assistance"
+    },
+    "adjacent": ["G06T", "G06N", "G16H"],
+    "domain_hint": "Medical devices — FDA regulatory path matters. Novelty in device design, signal processing, or AI-assisted diagnosis. Cross-check G16H for health informatics"
+  },
+  "A61K": {
+    "title": "Preparations for medical, dental, or toilet purposes",
+    "subcategories": {
+      "A61K9": "Medicinal preparations — dosage forms, drug delivery systems",
+      "A61K31": "Organic active ingredients — small molecules, pharmaceuticals",
+      "A61K35": "Medicinal preparations containing materials from animals/microorganisms",
+      "A61K38": "Peptides — therapeutic peptides, protein drugs",
+      "A61K39": "Antigens/antibodies — vaccines, immunotherapy",
+      "A61K47": "Carriers/excipients — nanoparticles, liposomes, polymer conjugates",
+      "A61K48": "Gene therapy — gene editing, gene delivery vectors"
+    },
+    "adjacent": ["C07K", "C12N", "A61P"],
+    "domain_hint": "Pharma/biotech — Markush structures, genus/species claims. Novelty in formulation, mechanism of action, or specific compound. Enablement and written description are critical"
+  },
+  "B25J": {
+    "title": "Manipulators; Chambers provided with manipulation devices",
+    "subcategories": {
+      "B25J9": "Programme-controlled manipulators — robot arms, motion planning",
+      "B25J13": "Human-robot interaction — force feedback, collaborative robots",
+      "B25J15": "Gripping heads — end effectors, grippers, suction",
+      "B25J18": "Arms — articulated, parallel, cable-driven mechanisms",
+      "B25J19": "Safety devices — collision avoidance, force limiting"
+    },
+    "adjacent": ["G05B", "G05D", "G06N"],
+    "domain_hint": "Robotics — novelty in mechanical design, control algorithms, planning methods, or sensor fusion. Cross-check computer vision (G06T/V) for perception"
+  },
+  "C12N": {
+    "title": "Microorganisms or enzymes; Compositions thereof",
+    "subcategories": {
+      "C12N1": "Microorganisms — bacteria, fungi, culture methods",
+      "C12N5": "Undifferentiated human/animal cells — cell culture, stem cells",
+      "C12N9": "Enzymes — engineering, immobilization, activity modification",
+      "C12N15": "Mutation/genetic engineering — vectors, CRISPR, gene expression systems"
+    },
+    "adjacent": ["A61K", "C07K", "G16B"],
+    "domain_hint": "Biotechnology — sequence listings, deposit requirements. Novelty in engineered organisms, gene editing targets, or expression systems"
+  },
+  "G01N": {
+    "title": "Investigating or analysing materials",
+    "subcategories": {
+      "G01N21": "Optical analysis — spectroscopy, fluorescence, ellipsometry",
+      "G01N27": "Electrochemical analysis — biosensors, impedance, voltammetry",
+      "G01N29": "Ultrasonic analysis — NDT, acoustic microscopy",
+      "G01N30": "Separation/analysis — chromatography, mass spectrometry",
+      "G01N33": "Specific analysis — immunoassays, clinical chemistry, environmental testing"
+    },
+    "adjacent": ["G01S", "A61B", "C12N"],
+    "domain_hint": "Analytical instruments/sensors — novelty in sensing mechanism, signal processing, or assay design. Sensitivity/specificity improvements must be quantified"
+  },
+  "G01S": {
+    "title": "Radio direction-finding; Navigation; Measuring distance/velocity",
+    "subcategories": {
+      "G01S5": "Position fixing — GPS, trilateration, indoor positioning",
+      "G01S7": "Radar/lidar details — signal processing, antenna systems",
+      "G01S13": "Radar systems — SAR, FMCW, phased array",
+      "G01S17": "Lidar systems — time-of-flight, scanning, solid-state"
+    },
+    "adjacent": ["H04W", "G06T", "B60W"],
+    "domain_hint": "Radar/lidar/positioning — heavily relevant to autonomous driving and defense. Novelty in signal processing, waveform design, or sensor fusion"
+  },
+  "G02B": {
+    "title": "Optical elements, systems, or apparatus",
+    "subcategories": {
+      "G02B5": "Optical elements — lenses, prisms, diffraction gratings, metasurfaces",
+      "G02B6": "Light guides — optical fibers, waveguides, photonic crystals",
+      "G02B27": "Optical systems — holographic displays, AR/VR optics, projection"
+    },
+    "adjacent": ["G06T", "H04N", "G01N"],
+    "domain_hint": "Optics/photonics — novelty in optical design, material properties, or system integration. AR/VR optics is a hot filing area"
+  },
+  "G05B": {
+    "title": "Control or regulating systems; Functional elements",
+    "subcategories": {
+      "G05B13": "Adaptive control — model predictive control, fuzzy logic, neural control",
+      "G05B19": "Programme control — CNC, PLC, industrial automation"
+    },
+    "adjacent": ["G05D", "B25J", "G06N"],
+    "domain_hint": "Control systems — novelty in control algorithm, system architecture, or real-time optimization. Cross-check robotics (B25J) and ML (G06N)"
+  },
+  "G05D": {
+    "title": "Control of non-electric variables",
+    "subcategories": {
+      "G05D1": "Control of position/course/altitude — autonomous navigation, path planning, SLAM"
+    },
+    "adjacent": ["G05B", "B25J", "B60W"],
+    "domain_hint": "Autonomous systems navigation — SLAM, path planning, obstacle avoidance. Cross-check robotics and autonomous driving"
+  },
+  "G10L": {
+    "title": "Speech analysis or synthesis; Speech recognition",
+    "subcategories": {
+      "G10L13": "Speech synthesis — TTS, voice conversion, prosody",
+      "G10L15": "Speech recognition — ASR, keyword spotting, language models",
+      "G10L17": "Speaker recognition — verification, identification",
+      "G10L21": "Speech processing — enhancement, separation, noise reduction",
+      "G10L25": "Speech signal analysis — features, representations"
+    },
+    "adjacent": ["G06N", "G06F", "H04L"],
+    "domain_hint": "Speech/audio — novelty in model architecture, training procedure, or acoustic feature design. LLM-based approaches cross into G06N"
+  },
+  "G16H": {
+    "title": "Healthcare informatics",
+    "subcategories": {
+      "G16H10": "ICT for diagnosis — clinical decision support, AI-assisted diagnosis",
+      "G16H20": "ICT for therapies — treatment planning, dosage optimization",
+      "G16H30": "ICT for medical images — PACS, image analysis, radiomics",
+      "G16H40": "ICT for management — EHR, hospital information systems",
+      "G16H50": "ICT for medical prognosis — predictive models, risk scoring"
+    },
+    "adjacent": ["A61B", "G06N", "G06T"],
+    "domain_hint": "Health informatics — regulatory (FDA SaMD) matters. Novelty in clinical workflow integration, specific medical AI models, or data pipeline design"
+  },
+  "G16B": {
+    "title": "Bioinformatics",
+    "subcategories": {
+      "G16B15": "Structure prediction — protein folding, molecular dynamics",
+      "G16B20": "Sequence analysis — alignment, variant calling, phylogenetics",
+      "G16B25": "Assembly — genome assembly, scaffolding",
+      "G16B30": "Molecular interaction — docking, binding prediction",
+      "G16B40": "Drug design — virtual screening, QSAR, generative chemistry"
+    },
+    "adjacent": ["C12N", "G06N", "A61K"],
+    "domain_hint": "Bioinformatics/computational biology — novelty in algorithm for biological data, not just applying ML to bio data. AlphaFold-type structural prediction is heavily filed"
+  },
+  "H01L": {
+    "title": "Semiconductor devices; Electric solid state devices",
+    "subcategories": {
+      "H01L21": "Processes or apparatus for manufacture — lithography, etching, deposition",
+      "H01L23": "Packaging — chip packaging, interconnects, thermal management",
+      "H01L25": "Assemblies — multi-chip modules, 3D integration, chiplets",
+      "H01L27": "Devices consisting of a plurality of individual semiconductor components — memory arrays, image sensors",
+      "H01L29": "Semiconductor devices — transistors, FinFET, GAA"
+    },
+    "adjacent": ["H01S", "G06F", "H03M"],
+    "domain_hint": "Semiconductors — process patents are extremely valuable. Novelty in device structure, material, or manufacturing process"
+  },
+  "H02J": {
+    "title": "Circuit arrangements for electric power supply or distribution",
+    "subcategories": {
+      "H02J3": "AC distribution networks — smart grid, power quality, renewable integration",
+      "H02J7": "Charging/battery management — EV charging, wireless charging, BMS"
+    },
+    "adjacent": ["H02M", "B60L", "G05B"],
+    "domain_hint": "Power systems — smart grid, EV charging, energy storage. Novelty in power conversion topology, control strategy, or grid integration"
+  },
+  "B60W": {
+    "title": "Conjoint control of vehicle sub-units of different type or different function",
+    "subcategories": {
+      "B60W30": "Vehicle control for specific purposes — autonomous driving, ADAS, platooning",
+      "B60W40": "Estimation or calculation of non-directly measurable driving parameters — state estimation",
+      "B60W50": "Details of control systems — safety, fail-safe, driver override",
+      "B60W60": "Drive control systems for autonomous road vehicles — planning, decision-making"
+    },
+    "adjacent": ["G05D", "G01S", "G06V"],
+    "domain_hint": "Autonomous driving — perception/planning/control stack. Cross-check lidar (G01S), vision (G06V), and navigation (G05D)"
+  },
+  "F24F": {
+    "title": "Air-conditioning; Air-humidification; Ventilation",
+    "subcategories": {
+      "F24F1": "Room units — indoor units, split systems",
+      "F24F3": "Air-conditioning — central systems, air handling",
+      "F24F5": "Specialised systems — clean rooms, data center cooling",
+      "F24F11": "Control — HVAC controls, smart thermostats, building automation"
+    },
+    "adjacent": ["G05B", "G05D", "F25B"],
+    "domain_hint": "HVAC — novelty in system design, control algorithm, or energy efficiency. IoT/smart building integration is growing"
+  },
+  "C07K": {
+    "title": "Peptides",
+    "subcategories": {
+      "C07K1": "Peptide chemistry — synthesis, purification, analysis",
+      "C07K14": "Peptides from specific organisms — structural proteins, antigens, receptors",
+      "C07K16": "Immunoglobulins — monoclonal antibodies, antibody engineering, bispecifics",
+      "C07K19": "Fusion proteins — chimeric proteins, conjugates"
+    },
+    "adjacent": ["A61K", "C12N", "G16B"],
+    "domain_hint": "Protein/antibody engineering — sequence-based claims, CDR definitions. Novelty in binding specificity, engineering strategy, or therapeutic application"
+  }
+}

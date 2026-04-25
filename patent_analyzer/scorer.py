@@ -8,20 +8,88 @@ Takes evaluation results and computes:
 - Statistics
 """
 
-import json
 from .config import RISK_THRESHOLDS
 
 
 def compute_total_score(checklist_results: dict) -> float:
-    """
-    Compute total_score = matches / total_items.
-    Fully deterministic.
-    """
+    """Compute total_score. Uses 3-level scores if available, falls back to binary."""
     if not checklist_results:
         return 0.0
+    has_scores = any(
+        isinstance(v, dict) and "score" in v
+        for v in checklist_results.values())
+    if has_scores:
+        css, ewss, _dc = compute_css_ewss(checklist_results)
+        return ewss
     matches = sum(1 for v in checklist_results.values()
                   if isinstance(v, dict) and v.get("match", False))
     return matches / len(checklist_results)
+
+
+def compute_css_ewss(
+    checklist_results: dict,
+    ssr_criteria: list | None = None,
+) -> tuple[float, float, int]:
+    """Compute Conservative Similarity Score and Evidence-Weighted Similarity Score.
+
+    CSS: unknown/absent treated as 0, denominator = all criteria
+    EWSS: only criteria with score > 0 count in denominator
+
+    When ssr_criteria is provided, uses weights from it. Otherwise uniform weights.
+    """
+    if not checklist_results:
+        return 0.0, 0.0, 0
+
+    weights = {}
+    if ssr_criteria:
+        for c in ssr_criteria:
+            if isinstance(c, dict):
+                key = c.get("criterion", c.get("id", ""))
+                weights[key] = c.get("weight", 1.0)
+
+    total_weight = 0.0
+    css_num = 0.0
+    ewss_num = 0.0
+    ewss_denom = 0.0
+
+    for key, val in checklist_results.items():
+        if not isinstance(val, dict):
+            continue
+        score = val.get("score")
+        if score is None:
+            score = 2 if val.get("match", False) else 0
+
+        w = _find_weight(key, weights) if weights else 1.0
+        total_weight += w
+
+        if score >= 2:
+            css_num += w
+            ewss_num += w
+            ewss_denom += w
+        elif score == 1:
+            ewss_num += 0.5 * w
+            ewss_denom += w
+        # score == 0: contributes to total_weight but not numerators
+
+    css = css_num / total_weight if total_weight > 0 else 0.0
+    ewss = ewss_num / ewss_denom if ewss_denom > 0 else 0.0
+    denom_count = sum(
+        1 for v in checklist_results.values()
+        if isinstance(v, dict) and (v.get("score") or 0) > 0
+    )
+    return round(css, 4), round(ewss, 4), denom_count
+
+
+def _find_weight(key: str, weights: dict) -> float:
+    if key in weights:
+        return weights[key]
+    key_lower = key.lower().strip()
+    for wk, wv in weights.items():
+        if wk.lower().strip() == key_lower:
+            return wv
+        if key_lower[:40] in wk.lower() or wk.lower()[:40] in key_lower:
+            return wv
+    return 1.0
 
 
 def classify_risk(score: float) -> str:
