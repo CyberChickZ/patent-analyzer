@@ -19,6 +19,7 @@ dependencies = [
     "numpy>=1.26.0",
     "httpx>=0.28.0",
     "a2a-sdk>=0.2.0",
+    "tenacity>=8.0.0",
 ]
 
 [project.optional-dependencies]

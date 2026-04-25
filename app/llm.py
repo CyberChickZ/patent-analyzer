@@ -26,6 +26,8 @@ from typing import Any, Callable
 
 from google import genai
 from google.genai import types
+from google.genai.errors import APIError
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
 
 GC_PROJECT = os.getenv("GC_PROJECT", "aime-hello-world")
 MODEL = os.getenv("LLM_MODEL", "gemini-2.5-pro")
@@ -103,6 +105,22 @@ def _extract_text_and_thoughts(resp) -> tuple[str, str]:
     return text, thoughts
 
 
+def _is_retryable(exc: BaseException) -> bool:
+    if isinstance(exc, APIError) and exc.code in (429, 503, 500):
+        return True
+    name = type(exc).__name__
+    return any(k in name for k in ("Timeout", "ServiceUnavailable", "ResourceExhausted"))
+
+
+_retry_decorator = retry(
+    retry=retry_if_exception(_is_retryable),
+    wait=wait_random_exponential(multiplier=1, max=60),
+    stop=stop_after_attempt(4),
+    reraise=True,
+)
+
+
+@_retry_decorator
 async def call_llm(
     system: str,
     user: str,
@@ -144,6 +162,7 @@ async def call_llm_with_pdf(
 _INLINE_PDF_CAP_BYTES = 18 * 1024 * 1024
 
 
+@_retry_decorator
 async def call_llm_with_pdfs(
     system: str,
     user: str,
@@ -190,7 +209,6 @@ async def call_llm_with_pdfs(
         text = text.split("```", 2)[1].strip()
         if text.startswith("json"):
             text = text[4:].strip()
-    # Log the user prompt (without the PDF blob) + file list
     file_list = ", ".join(f"{Path(p).name} ({Path(p).stat().st_size//1024}KB)"
                           for p in pdf_paths if p and Path(p).exists())
     _emit(system, f"[PDFs: {file_list}]\n\n{user}", text, thoughts)
