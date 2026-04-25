@@ -11,20 +11,116 @@ AI-powered patent novelty analysis. Upload a paper or patent PDF → get a full 
 
 ## How it works
 
-The analyzer ingests a single PDF (a paper or a patent) and produces a novelty assessment grounded in real prior art. Internally it runs a five-phase pipeline:
+The analyzer ingests a single PDF and produces a novelty assessment grounded in real prior art. The pipeline has five phases:
 
-1. **Detect & summarize** — PyMuPDF extracts page 1 only for Phase 1 (abstract + intro live there; keeps the LLM focused on what the authors say they built, not on experimental tables). Deterministic keyword rules classify document type (patent / paper) and §101 category. Gemini 2.5 Pro then writes a faithful summary. A self-check LLM call verifies the summary against the source and emits a `quality_warning` if anything is hallucinated.
-2. **Decompose & plan** — The invention is broken into 8–20 atomic elements, a 20–30 item testable checklist is generated, and a search plan (atoms × groups with anchor and expansion terms) is produced. Plan self-check is **retry-enabled**: if the reviewer flags a hallucinated atom (e.g. "the paper mentions X" when it doesn't), the plan is regenerated once with the reviewer's feedback injected into the prompt. This prevents one fake atom from poisoning all five search groups downstream.
-3. **Multi-channel recall (parallel)** — Five channels run concurrently via `asyncio.gather`: SerpAPI Google Patents, SerpAPI Google Scholar, Semantic Scholar, OpenAlex, arXiv. Each returns `(candidates, error)`; per-query errors that didn't kill the channel are downgraded from `channel_error` to a compact `query_partial` note (no log spam). SerpAPI is globally throttled to 1 in-flight request with a 1.5 s cooldown to stay under the account quota. The pool layer deduplicates candidates by stable identity (DOI / arXiv ID / patent number / title hash) and boosts cross-channel consensus.
-4. **Semantic rerank & self-citation filter (Phase 3b)** — `sentence-transformers` (all-MiniLM-L6-v2) reranks the pool against the invention fingerprint. A three-layer self-citation filter then removes the source paper from the results: (A) arXiv ID / DOI identity match extracted from the source PDF, (B) title token similarity ≥ 0.75, (C) a Phase 4 post-eval backstop that drops any candidate scoring ≥ 95 % with ≥ 60 % title overlap. This matters: without it, the paper can win "92 % prior art" against itself.
-5. **Deep eval & report** — Up to 20 top candidates go to Phase 4. For each candidate the LLM sees **both the source PDF and the candidate PDF as native multi-modal inputs** (no text extraction, no truncation, up to 18 MB per file inline) along with the checklist. It explicitly answers `is_source_duplicate: true/false` before scoring. When a candidate PDF can't be downloaded (paywall), a text-fallback path evaluates against the abstract and marks the result with an "abstract only" badge. Post-eval, docs with zero matches are dropped (noise, not prior art). Phase 5 generates an interactive HTML report with a feedback form and uploads everything to GCS.
+### Phase 1 — Invention Detection, Classification & Assignment (IDCA)
 
-Throughout, every LLM call (system prompt, user prompt, response, thinking trace) is captured in `state.json` so the frontend can render a full event timeline — click any step to see exactly what Gemini saw.
+PyMuPDF reads the PDF. Deterministic keyword rules run first (`detect_invention`, `classify_document`, `classify_category` — zero LLM tokens). Then a single Gemini 2.5 Pro call performs IDCA:
 
-**Defensive design principles** informing every phase:
-- Refuse-to-hallucinate guards: if recall returns zero candidates, the pipeline marks the job `failed_recall` and does **not** call the novelty-summary LLM. An earlier incident had the summarizer invent three fake US patent numbers when given an empty matches list.
-- Honest failure signals over silent retries: a failed step emits a human-readable `failure_reason` (LLM-summarized from the raw error) to the event timeline. No hidden retries that mask real problems.
-- Truth-grounded output: the novelty summary is only allowed to cite documents that actually appear in the scoring report, and the LLM is instructed to flag self-duplicates explicitly.
+- **Status determination**: Present (concrete invention) / Implied (concept without implementation) / Absent (no invention — survey, review, etc.)
+- **Document type**: invention / design_engineering / literature_review / talks_about_invention_but_no_invention
+- **Field classification**: 3-7 technical field labels, best-guess CPC subclass (4-char code like G06N), §101 patent category
+- **Summary**: 200-400 word canonical description of the invention
+
+A self-check LLM call verifies the IDCA output against the source PDF. If the status is Absent or the doc type is `talks_about_invention_but_no_invention`, the pipeline exits early.
+
+**Persona crafting**: For Present documents, a single LLM call rewrites 8 generic expert personas into domain-specific versions using the detected fields, CPC subclass, and a CPC taxonomy reference (`cpc_reference.json`, 25 subclasses). These personas are threaded through all downstream LLM calls. The 8 roles:
+
+| Role | Purpose |
+|---|---|
+| `landscape` | Identifies innovation axes — technical dimensions with deliberate design choices |
+| `technology` | Enumerates known approaches per axis from the literature |
+| `reviewer` | Reviews checklists for specificity, gaps, overlaps, weight calibration |
+| `decompose` | (reserved) Patent claim element extraction |
+| `checklist` | Converts innovation analysis into testable evaluation criteria |
+| `plan` | Designs search strategies with anchor/expansion terms |
+| `evaluate` | Side-by-side prior art comparison with evidence requirements |
+| `summary` | Explains results to faculty inventors in their own vocabulary |
+
+### Phase 2 — Expert-Driven Innovation Analysis
+
+Six sequential LLM steps build the evaluation framework:
+
+1. **Scan innovation landscape** (`scan_innovation_landscape`) — Identifies 3-7 innovation axes: technical dimensions where the paper made deliberate choices among known alternatives. Each axis maps to a CPC group. Uses the full PDF as native multimodal input.
+
+2. **Expand technology choices** (`expand_technology_choices`, sequential per axis) — For each axis, enumerates 4-8 known approaches from the literature (including ones the paper did NOT cite), identifies which approach the paper chose, and states what makes it distinct. Sequential execution avoids Gemini API rate limits.
+
+3. **Determine patent types** (`determine_patent_types`) — Classifies which §101 types apply (Process / Machine / Manufacture / Composition / Design) based on the invention summary and technology choices.
+
+4. **Generate checklist per type** (`generate_checklist_for_type`, parallel per type) — For each applicable patent type, generates 10-15 evaluation criteria. Each criterion:
+   - Tests ONE specific technical choice (not "uses ML" but "uses stop-gradient on the context branch rather than GRL")
+   - Includes `known_approaches` so evaluators can distinguish Present (exact match) from Partial (same category, different method)
+   - Has a weight reflecting novelty contribution and a 3-level scale (0=Absent, 1=Partial, 2=Present) with specific definitions
+
+5. **Review checklist** (`review_checklist`) — Expert review merges duplicates across patent types, tightens vague items, fills coverage gaps, splits multi-test items, and normalizes weights (sum ≈ 1.0, no single item > 0.15).
+
+6. **Generate search queries** (`generate_search_queries`) — Converts the final checklist into search groups. Each checklist item gets 2-3 query formulations: paper's exact terminology, synonyms/alternatives, and adjacent-field targeting. Grouped by innovation axis with anchor and expansion terms.
+
+### Phase 3 — Multi-Channel Recall
+
+Five channels run concurrently via `asyncio.gather`:
+
+- SerpAPI Google Patents
+- SerpAPI Google Scholar
+- Semantic Scholar (search + recommendations + references + citations)
+- OpenAlex
+- arXiv
+
+SerpAPI is globally throttled (1 in-flight, 1.5s cooldown). Each channel returns `(candidates, error)` — channel failures don't kill the pipeline. The pool layer deduplicates by stable identity (DOI / arXiv ID / patent number / title hash) and applies a √N consensus bonus for cross-channel hits.
+
+**Adaptive refinement**: After each query, quick-rerank with sentence-transformers. If a group's top similarity is ≥ 0.65, stop early. If a group ends weak (< 0.50), `refine_search_query` asks the LLM to diagnose why queries failed and propose refined versions.
+
+### Phase 3b — Semantic Ranking & Self-Citation Filter
+
+`sentence-transformers` (all-MiniLM-L6-v2) reranks all pooled candidates against the invention fingerprint. A three-layer self-citation filter removes the source paper:
+
+1. **Identity match**: arXiv ID or DOI extracted from the source PDF
+2. **Title similarity**: Token Jaccard similarity ≥ 0.75 (with stop word filtering)
+3. **Post-eval backstop**: Phase 4 drops any candidate scoring ≥ 95% with ≥ 60% title overlap
+
+Top 30 candidates have their PDFs downloaded. Up to 20 go to deep evaluation.
+
+### Phase 4 — Deep Evaluation
+
+`evaluate_batch` runs up to 20 evaluations with `max_concurrent=2`. For each candidate:
+
+- The LLM sees **both the source PDF and the candidate PDF** as native multimodal inputs (no text extraction) plus the full weighted checklist with known_approaches and 3-level scales
+- First checks: is this the same document as the source? (`is_source_duplicate`)
+- Then scores each criterion: 0 (Absent), 1 (Partial), 2 (Present) with mandatory `evidence_quote` for scores ≥ 1
+- When a PDF can't be downloaded (paywall), falls back to abstract-only evaluation
+
+**Dual scoring**:
+- **CSS** (Conservative Similarity Score): unknown criteria scored as 0
+- **EWSS** (Evidence-Weighted Similarity Score): unknown criteria excluded from denominator
+- Low-sample penalty: when EWSS denominator < 5, `adjusted_ewss = ewss × min(1.0, denom_count / 5)`
+
+`generate_overall_summary` writes a plain-English novelty assessment structured for faculty inventors (not patent lawyers): what you invented, what's already out there, what appears genuinely new, honest assessment, suggested next steps.
+
+### Phase 5 — Report Generation
+
+Interactive HTML report uploaded to GCS with:
+- Confidence banner (high/medium/low) based on entropy profile
+- Per-document cards showing CSS + EWSS + evidence quotes
+- SSR criteria with weights and 3-level scale definitions
+- Exact Find section for title-matched results
+- Full event timeline (click any LLM event to see complete prompts and responses)
+
+### Observability — Entropy Profile
+
+Every pipeline run computes deterministic grounding metrics:
+
+- **SSR grounding**: evidence coverage, weight concentration
+- **Eval grounding**: average denominator coverage, average evidence density, low-confidence doc count
+- **Overall confidence**: high (all metrics above threshold) / medium / low
+
+These are stored in `results.json` as `entropy_profile` and displayed in the report's confidence banner with specific degradation points when confidence is not high.
+
+### Retry & Error Handling
+
+- All LLM calls (`call_llm`, `call_llm_with_pdfs`) have exponential backoff retry via `tenacity` (up to 4 attempts, randomized wait 1-60s) for 429/503/500 and timeout errors
+- Critical steps (IDCA summary) are wrapped in `with_harness`: self-check → if hallucination detected, retry with feedback injected
+- Failed steps emit LLM-summarized `failure_reason` to the event timeline
+- If recall returns zero candidates, the pipeline marks the job `failed_recall` and does NOT call the novelty-summary LLM
 
 ---
 
@@ -51,87 +147,47 @@ Throughout, every LLM call (system prompt, user prompt, response, thinking trace
 │  Backend (FastAPI)  ·  Cloud Run  ·  us-west1                  │
 │  app/main.py · run_pipeline()                                  │
 │                                                                │
-│  REST  /analyze[?evolve=true]  /analyze-gcs[?evolve=true]      │
-│        /status/{id}  /events/{id}  /report/{id}  /results/{id} │
-│        /upload-url   /jobs   /jobs/{id}                        │
-│  A2A   /.well-known/agent-card.json                            │
-│        /a2a   (message/send, tasks.get, agent.getCard)         │
+│  REST  /analyze  /analyze-gcs  /status/{id}  /events/{id}      │
+│        /report/{id}  /results/{id}  /upload-url  /jobs         │
+│  A2A   /.well-known/agent-card.json  /a2a                      │
 └────┬───────────────────────────────────────────────────────────┘
      │
-     │  Phase 1-2: Gemini 2.5 Pro w/ thinking budget (4096-8192 tok)
-     │             summarize · decompose · checklist · plan
+     │  Phase 1: IDCA (Gemini 2.5 Pro, thinking 4096)
+     │           + persona crafting (8 domain-specific roles)
      │
-     │  Phase 3: Multi-channel parallel recall + pool + rerank
+     │  Phase 2: Innovation landscape → technology choices →
+     │           patent types → checklist → review → search queries
+     │           (Gemini 2.5 Pro, thinking 2048-8192)
+     │
+     │  Phase 3: 5-channel parallel recall + adaptive refinement
      ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │   ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐   │
 │   │ SerpAPI      │  │ SerpAPI      │  │ Semantic Scholar     │   │
-│   │ Google       │  │ Google       │  │ /paper/search        │   │
-│   │ Patents      │  │ Scholar      │  │ /recommendations     │   │
-│   │              │  │              │  │ /references /citations│  │
+│   │ Google       │  │ Google       │  │ search + refs +      │   │
+│   │ Patents      │  │ Scholar      │  │ citations + recs     │   │
 │   └──────┬───────┘  └──────┬───────┘  └──────┬───────────────┘   │
 │          │                 │                 │                   │
-│   ┌──────┴───────┐  ┌──────┴───────┐  ┌──────┴───────┐           │
-│   │ OpenAlex     │  │ arXiv API    │  │ (evolve mode)│           │
-│   │ /works       │  │              │  │ S2 fan-out   │           │
-│   │ + concepts   │  │ HTTPS Atom   │  │ from top hit │           │
-│   └──────┬───────┘  └──────┬───────┘  └──────┬───────┘           │
-│          │                 │                 │                   │
-│          └─────────────────┴────────┬────────┘                   │
+│   ┌──────┴───────┐  ┌──────┴───────┐                             │
+│   │ OpenAlex     │  │ arXiv API    │                             │
+│   │ /works       │  │ HTTPS Atom   │                             │
+│   └──────┬───────┘  └──────┬───────┘                             │
+│          └─────────────────┴────────┬────────────────────────┘   │
 │                                     ▼                            │
 │                  ┌──────────────────────────┐                    │
-│                  │ Pool: dedupe by          │                    │
-│                  │  DOI / arxiv id /        │                    │
-│                  │  pub_num / title hash    │                    │
-│                  │ + sqrt(N) consensus boost│                    │
-│                  └────────────┬─────────────┘                    │
-│                               ▼                                  │
-│                  ┌──────────────────────────┐                    │
+│                  │ Pool: dedupe + consensus │                    │
 │                  │ sentence-transformers    │                    │
-│                  │ all-MiniLM-L6-v2         │                    │
-│                  │ rerank vs invention      │                    │
-│                  │ fingerprint → top 30     │                    │
+│                  │ rerank → top 30 → DL PDFs│                    │
 │                  └────────────┬─────────────┘                    │
-└─────────────────────────────────┼────────────────────────────────┘
-                                  │
-                                  ▼
-   Phase 3b: filter self-citations · download PDFs (top 30)
-   Phase 4: per-doc deep eval (Gemini thinking budget 8192) ×5 concurrent
-            (evolve mode = elastic batches of 5 with mid-loop review)
-   Phase 5: HTML report → GCS
-
-   ┌──────┐  state.json + report.html persisted to
-   │ GCS  │  gs://aime-hello-world-amie-uswest1/patent-analyzer/jobs/{id}/
-   └──────┘
+└──────────────────────────────┼───────────────────────────────────┘
+                               ▼
+   Phase 3b: self-citation filter (identity + Jaccard + post-eval)
+   Phase 4:  deep eval (Gemini, thinking 8192, max 2 concurrent)
+             dual scoring (CSS + EWSS)
+   Phase 5:  HTML report + entropy profile → GCS
 ```
 
-**Stack**: FastAPI · google-genai (Vertex AI Gemini 2.5 Pro w/ extended thinking) · 5 parallel recall channels (SerpAPI Patents, SerpAPI Scholar, Semantic Scholar, OpenAlex, arXiv) · sentence-transformers (local rerank) · PyMuPDF · a2a-sdk · GCS · Vite + TypeScript frontend with Express IAM proxy
-
-## Pipeline — 5 phases
-
-| Phase | Name | What happens |
-|---|---|---|
-| 1 | Invention Detection | Read PDF, detect invention (deterministic keyword), classify document type & §101 category (deterministic), LLM-summarize with **thinking budget 4096**. `try_step` wraps the call: failures emit `failure_reason` (LLM-summarized human-readable cause) instead of silent retry. |
-| 2 | Decomposition | LLM-decompose elements (thinking 4096), generate 20-30 testable checklist (thinking 4096), plan search atoms + groups (thinking 4096). |
-| 3 | Multi-channel recall | **5 channels in parallel** via `asyncio.gather`: SerpAPI Patents, SerpAPI Scholar, Semantic Scholar, OpenAlex, arXiv. Each channel returns `(candidates, error)` — channel-level failures are surfaced as `channel_error` events with `failure_reason`, the pipeline keeps going on the surviving channels. Pool layer dedupes by stable identity (DOI / arXiv ID / patent number / title hash) and applies a √N consensus bonus. |
-| 3b | Semantic Ranking | sentence-transformers reranks the pooled candidates against the invention fingerprint (no PDFs yet), filter self-citations, then download top 30 PDFs only. |
-| 4 | Deep Evaluation | LLM evaluates each top doc against the checklist with **thinking budget 8192**, max 5 concurrent. In evolve mode, evaluates in elastic batches of 5 (cap 30) with a reviewer between batches. |
-| 5 | Report | Generate HTML report, upload to GCS. |
-
-Every LLM call is captured (system + user prompt + response + **thought summary** when thinking is enabled) and persisted to `state.json` in GCS, so the frontend can show a complete event timeline. Click any event to see the exact prompt, response, and reasoning trace.
-
-## Evolve mode (`?evolve=true`)
-
-Opt-in per request: `POST /analyze?evolve=true` or `POST /analyze-gcs?evolve=true`. When enabled, the pipeline runs an additional **full-context reviewer** after each phase output. The reviewer sees both the original input (e.g. paper text) and the produced output (e.g. invention summary) and decides whether the output is good enough for the next step.
-
-| Phase | What evolve mode adds |
-|---|---|
-| 1 | Reviewer judges the invention summary against the full PDF text → `review_pass` / `review_warning` events. No backtracking — warnings are dev signal only. |
-| 2 | Reviewer judges the 20-30 item checklist for goldilocks specificity → warning events. |
-| 3 | Reviewer judges the pooled candidate set. If `do_more`, **fan out via Semantic Scholar** from the top pooled hit: pull `recommendations` + `references` + `citations` (1-hop citation graph) and re-pool. Bounded to one expansion round. |
-| 4 | Evaluates in **elastic batches of 5** (up to 30 docs total). Reviewer between batches can request `elastic_stop` to finish early when the top hits are clearly irrelevant. |
-
-Failure observability is **always on** regardless of evolve mode: every failure point produces an LLM-summarized `failure_reason` in plain language so the developer can see in the timeline why a step did not produce useful output (e.g. *"All 5 recall channels returned 0 candidates. SerpAPI hit HTTP 401 — quota likely exhausted. Semantic Scholar / OpenAlex / arXiv each returned 0 — the query is genuinely too niche or the invention summary is too vague."*).
+**Stack**: FastAPI · google-genai (Vertex AI Gemini 2.5 Pro w/ extended thinking) · tenacity (retry w/ backoff) · 5 recall channels (SerpAPI Patents, SerpAPI Scholar, Semantic Scholar, OpenAlex, arXiv) · sentence-transformers (local rerank) · PyMuPDF · a2a-sdk · GCS · Vite + TypeScript frontend with Express IAM proxy
 
 ## API Endpoints
 
@@ -142,8 +198,8 @@ Failure observability is **always on** regardless of evolve mode: every failure 
 | `POST` | `/analyze` | Multipart upload (≤32 MB), returns `{job_id}` |
 | `GET` | `/upload-url?filename=&content_type=` | Get a v4 signed PUT URL for direct GCS upload (large files) |
 | `POST` | `/analyze-gcs` | Start analysis from a `gs://` URI uploaded via signed URL |
-| `GET` | `/status/{job_id}` | Job state + per-phase data + zombie detection |
-| `GET` | `/events/{job_id}?since=N` | Event timeline (incremental). Each event has phase, kind, message, optional payload (LLM prompts/responses) |
+| `GET` | `/status/{job_id}` | Job state + per-phase data + stale heartbeat warning |
+| `GET` | `/events/{job_id}?since=N` | Event timeline (incremental) |
 | `GET` | `/report/{job_id}` | Generated HTML report (falls back to GCS) |
 | `GET` | `/results/{job_id}` | Raw `results.json` |
 | `GET` | `/jobs` | List all jobs (scans GCS) |
@@ -152,21 +208,19 @@ Failure observability is **always on** regardless of evolve mode: every failure 
 
 ### A2A protocol
 
-Agent Card at `GET /.well-known/agent-card.json` (also `/agent-card.json`).
+Agent Card at `GET /.well-known/agent-card.json`.
 
 JSON-RPC at `POST /a2a`. Methods:
 
 | Method | Description |
 |---|---|
 | `agent.getCard` | Returns the agent card |
-| `message/send` | Start an analysis (skill `patent_analyze`) or poll status (skill `patent_status`) |
+| `message/send` | Start analysis (send PDF as FilePart) or poll status |
 | `tasks.get` / `tasks/get` | Get a task by `taskId` |
-| `tasks.create` | Compatibility shim |
 
 #### Example: send a PDF via A2A
 
 ```bash
-# Base64-encode the PDF
 BYTES=$(base64 -w 0 paper.pdf)
 
 curl -X POST https://patent-analyzer-2mk262glgq-uw.a.run.app/a2a \
@@ -176,19 +230,18 @@ curl -X POST https://patent-analyzer-2mk262glgq-uw.a.run.app/a2a \
     "id": "1",
     "method": "message/send",
     "params": {
-      "metadata": {"skill_id": "patent_analyze"},
+      "id": "my-task-id",
       "message": {
         "role": "user",
         "parts": [
-          {"file": {"name": "paper.pdf", "mimeType": "application/pdf", "bytes": "'"$BYTES"'"}}
+          {"type": "file", "file": {"name": "paper.pdf", "mimeType": "application/pdf", "bytes": "'"$BYTES"'"}}
         ]
       }
     }
   }'
-# → {"jsonrpc":"2.0","id":"1","result":{"id":"abc12345","status":{"state":"submitted",...}}}
 ```
 
-#### Example: poll status via A2A
+#### Example: poll status
 
 ```bash
 curl -X POST https://patent-analyzer-2mk262glgq-uw.a.run.app/a2a \
@@ -197,45 +250,9 @@ curl -X POST https://patent-analyzer-2mk262glgq-uw.a.run.app/a2a \
     "jsonrpc": "2.0",
     "id": "2",
     "method": "tasks/get",
-    "params": {"taskId": "abc12345"}
+    "params": {"taskId": "my-task-id"}
   }'
 ```
-
-The returned task `metadata` includes `phase`, `phases` (per-phase data), and once completed, `report_url` and `results_url`.
-
-### REST example (small file)
-
-```bash
-curl -X POST https://patent-analyzer-2mk262glgq-uw.a.run.app/analyze \
-  -F "file=@paper.pdf"
-# → {"job_id": "a1b2c3d4", "status": "queued"}
-
-curl https://patent-analyzer-2mk262glgq-uw.a.run.app/status/a1b2c3d4
-curl https://patent-analyzer-2mk262glgq-uw.a.run.app/events/a1b2c3d4
-open  https://patent-analyzer-2mk262glgq-uw.a.run.app/report/a1b2c3d4
-```
-
-### Large file (>25 MB) — signed URL flow
-
-```bash
-# 1. Get signed PUT URL
-curl "https://.../upload-url?filename=big.pdf&content_type=application/pdf"
-# → {job_id, signed_url, gcs_uri, ...}
-
-# 2. PUT directly to GCS (bypasses Cloud Run 32 MB limit)
-curl -X PUT -H "Content-Type: application/pdf" --data-binary @big.pdf "$SIGNED_URL"
-
-# 3. Start analysis from GCS URI
-curl -X POST -H "Content-Type: application/json" \
-  -d '{"job_id":"...","gcs_uri":"gs://...","filename":"big.pdf"}' \
-  https://.../analyze-gcs
-```
-
-## Observability
-
-Every job's state is persisted to GCS at `gs://aime-hello-world-amie-uswest1/patent-analyzer/jobs/{job_id}/state.json`. Each `state.json` contains an `events` array with one entry per pipeline step. LLM-call events include the **complete system prompt, complete user prompt, and complete response**, so you can audit and debug what the AI saw and produced at every step.
-
-The frontend renders this as a timeline: click any phase to expand events, click any LLM event to see the full conversation in a modal (with template/data sections color-coded).
 
 ## Deployment (GCP Cloud Run)
 
@@ -243,22 +260,9 @@ The frontend renders this as a timeline: click any phase to expand events, click
 gcloud auth login
 gcloud config set project aime-hello-world
 
-# Backend
-gcloud run deploy patent-analyzer \
-  --source . --region us-west1 \
-  --service-account amie-backend-sa@aime-hello-world.iam.gserviceaccount.com \
-  --allow-unauthenticated --env-vars-file .env.yaml \
-  --memory 4Gi --cpu 2 --timeout 900 --concurrency 80 --max-instances 3
-
-# Frontend
-cd frontend
-gcloud run deploy patent-analyzer-frontend \
-  --source . --region us-west1 \
-  --service-account amie-frontend-sa@aime-hello-world.iam.gserviceaccount.com \
-  --allow-unauthenticated --env-vars-file .env.yaml
+# Deploy backend + frontend
+./deploy/deploy.sh both
 ```
-
-Or use the helper: `./deploy/deploy.sh [backend|frontend|both]`
 
 ### Cloud Run config
 
@@ -266,8 +270,8 @@ Or use the helper: `./deploy/deploy.sh [backend|frontend|both]`
 |---|---|---|
 | Region | us-west1 | Same region as Vertex AI Gemini |
 | Memory | 4 GiB | sentence-transformers + PDF parsing |
-| Timeout | 900 s | Full pipeline can take 5-10 min |
-| Concurrency | 80 | Pipeline + poll requests share an instance (avoids zombie jobs) |
+| Timeout | 900 s | Full pipeline can take 10-15 min |
+| Concurrency | 1 | Long pipeline + poll on same instance caused zombie jobs |
 | Max instances | 3 | Cost cap |
 | LLM auth | Service account → Vertex AI | No API key needed |
 
@@ -277,8 +281,8 @@ Or use the helper: `./deploy/deploy.sh [backend|frontend|both]`
 |---|---|---|
 | `GC_PROJECT` | `aime-hello-world` | GCP project for Vertex AI |
 | `LLM_MODEL` | `gemini-2.5-pro` | Gemini model ID |
-| `SERPAPI_KEY` | (in .env.yaml) | SerpAPI key for patent + Scholar search |
-| `OPENALEX_KEY` | (in .env.yaml) | OpenAlex key (free, optional) |
+| `SERPAPI_KEY` | — | SerpAPI key for patent + Scholar search |
+| `OPENALEX_KEY` | — | OpenAlex key (free, optional) |
 | `OUTPUT_DIR` | `/tmp/outputs` | Local job dir (Cloud Run ephemeral) |
 | `GCS_BUCKET` | `aime-hello-world-amie-uswest1` | Persistent storage bucket |
 | `GCS_PREFIX` | `patent-analyzer/jobs/` | Path prefix in bucket |
@@ -288,25 +292,21 @@ Or use the helper: `./deploy/deploy.sh [backend|frontend|both]`
 ```bash
 # Backend
 pip install -e ".[dev]"
-gcloud auth application-default login   # for Vertex AI
+gcloud auth application-default login
 export SERPAPI_KEY=...
 uvicorn app.main:app --reload --port 8000
 
-# Frontend (in another terminal)
-cd frontend
-npm install
+# Frontend (separate terminal)
+cd frontend && npm install
 BACKEND_URL=http://localhost:8000 BACKEND_ENV=dev npm run serve
-# → http://localhost:8080
 ```
 
 ## Per-job storage layout
 
 ```
 gs://aime-hello-world-amie-uswest1/patent-analyzer/jobs/{job_id}/
-├── state.json          # full job state including events with complete LLM prompts
-├── results.json        # final scored results
+├── state.json          # full job state + events with complete LLM prompts
+├── results.json        # scored results + entropy_profile
 ├── report.html         # interactive HTML report
-└── upload/{filename}   # original uploaded PDF (only when via signed-URL flow)
+└── upload/{filename}   # original PDF (signed-URL uploads only)
 ```
-
-Local copies during processing live under `OUTPUT_DIR/{job_id}/`.

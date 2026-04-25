@@ -878,7 +878,7 @@ async def run_pipeline(job_id: str):
         When retry_with_feedback=True AND self_check says not ok, re-invoke `fn`
         with `feedback={issues, suggestion, previous}` injected and return the
         retried result. Used for steps whose hallucinations poison downstream
-        (e.g. plan_delegation: a fake atom pollutes all search queries). `fn`
+        (e.g. a fake search query pollutes all recall results). `fn`
         must accept a `feedback` kwarg.
         """
         llm_label(phase, label)
@@ -1141,8 +1141,8 @@ async def run_pipeline(job_id: str):
             review_checklist as llm_review_checklist,
         )
 
-        # Step B: Innovation landscape scan
-        llm_label("phase2", "Step B: Innovation landscape scan")
+        # Scanning innovation landscape
+        llm_label("phase2", "Scanning innovation landscape")
         innovation_axes = await try_step(
             "Scanning innovation landscape",
             phase="phase2",
@@ -1156,7 +1156,7 @@ async def run_pipeline(job_id: str):
             innovation_axes = [{"axis_name": "General technical contribution",
                                 "axis_description": summary[:200],
                                 "cpc_group": cpc_subclass, "relevance": "fallback"}]
-        event("phase2", "info", f"Step B: {len(innovation_axes)} innovation axes identified")
+        event("phase2", "info", f"{len(innovation_axes)} innovation axes identified")
 
         # ── Implied early exit after landscape scan ──
         if status_det == "Implied":
@@ -1193,8 +1193,8 @@ async def run_pipeline(job_id: str):
             _save_job(job)
             return
 
-        # Step C: Technology choice expansion (sequential to avoid Gemini RPM limits)
-        llm_label("phase2", "Step C: Technology choice expansion")
+        # Expanding technology choices (sequential to avoid Gemini RPM limits)
+        llm_label("phase2", "Expanding technology choices")
         technology_choices = []
         for ax in innovation_axes:
             try:
@@ -1206,15 +1206,15 @@ async def run_pipeline(job_id: str):
                     technology_choices.append(tc)
             except Exception as exc:
                 event("phase2", "warning",
-                      f"Step C axis expansion failed for '{ax.get('axis_name','?')}': "
+                      f"Technology expansion failed for '{ax.get('axis_name','?')}': "
                       f"{type(exc).__name__}: {exc}")
         event("phase2", "info",
-              f"Step C: {len(technology_choices)} axes expanded, "
+              f"{len(technology_choices)} axes expanded, "
               f"{sum(len(tc.get('known_approaches',[])) for tc in technology_choices)} total known approaches")
         heartbeat()
 
-        # Step D: Patent type applicability
-        llm_label("phase2", "Step D: Patent type determination")
+        # Patent type applicability
+        llm_label("phase2", "Determining patent types")
         applicable_types = await try_step(
             "Determining patent types",
             phase="phase2",
@@ -1224,11 +1224,11 @@ async def run_pipeline(job_id: str):
                 persona=personas.get("checklist"),
             ),
         ) or ["Process"]
-        event("phase2", "info", f"Step D: Applicable types: {applicable_types}")
+        event("phase2", "info", f"Applicable types: {applicable_types}")
         heartbeat()
 
-        # Step E: Checklist generation (parallel per type)
-        llm_label("phase2", "Step E: Checklist generation")
+        # Generating evaluation checklist (parallel per type)
+        llm_label("phase2", "Generating evaluation checklist")
         cl_results = await asyncio.gather(
             *[generate_checklist_for_type(
                 pt, summary, technology_choices,
@@ -1242,11 +1242,11 @@ async def run_pipeline(job_id: str):
             if isinstance(result, list):
                 combined_checklist.extend(result)
         event("phase2", "info",
-              f"Step E: {len(combined_checklist)} raw checklist items across {len(applicable_types)} types")
+              f"{len(combined_checklist)} raw checklist items across {len(applicable_types)} types")
         heartbeat()
 
-        # Step F: Expert review
-        llm_label("phase2", "Step F: Expert checklist review")
+        # Expert review
+        llm_label("phase2", "Reviewing checklist")
         checklist = await try_step(
             "Expert review of combined checklist",
             phase="phase2",
@@ -1256,11 +1256,11 @@ async def run_pipeline(job_id: str):
                 persona=personas.get("reviewer"),
             ),
         ) or combined_checklist
-        event("phase2", "info", f"Step F: Final checklist has {len(checklist)} items")
+        event("phase2", "info", f"Final checklist has {len(checklist)} items")
         heartbeat()
 
-        # Step G: Search query generation
-        llm_label("phase2", "Step G: Search query generation")
+        # Generating search queries
+        llm_label("phase2", "Generating search queries")
         delegation = await try_step(
             "Generating search queries from checklist",
             phase="phase2",
@@ -1270,7 +1270,7 @@ async def run_pipeline(job_id: str):
             ),
         ) or {"groups": []}
         n_groups = len(delegation.get("groups", []))
-        event("phase2", "info", f"Step G: {n_groups} search groups generated")
+        event("phase2", "info", f"{n_groups} search groups generated")
 
         # Save Phase 2 outputs
         ucd = json.dumps({

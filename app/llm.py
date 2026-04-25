@@ -1,19 +1,16 @@
 """
-LLM calls via Google GenAI (Vertex AI) — MINIMAL token usage.
+LLM calls via Google GenAI (Vertex AI).
 
-Design principle: tokens go to PDF analysis, not routing.
-Only 6 LLM calls in entire pipeline (was 10):
-  1. summarize_invention     — must be LLM
-  2. decompose_invention     — must be LLM
-  3. generate_checklist       — must be LLM
-  4. plan_delegation          — must be LLM
-  5. evaluate_single_document — must be LLM × N (bulk of tokens, as intended)
-  6. generate_overall_summary — must be LLM
+Pipeline LLM calls:
+  Phase 1: detect_and_summarize_invention, craft_personas
+  Phase 2: scan_innovation_landscape, expand_technology_choices,
+           determine_patent_types, generate_checklist_for_type,
+           review_checklist, generate_search_queries
+  Phase 4: evaluate_single_document (×N), generate_overall_summary
+  Harness: self_check, refine_search_query
 
-Removed (replaced with deterministic code):
-  - detect_invention → keyword rules
-  - classify_document → PyMuPDF metadata
-  - classify_category → keyword rules on summary
+Deterministic (zero LLM tokens):
+  detect_invention, classify_document, classify_category
 """
 
 import asyncio
@@ -565,24 +562,9 @@ Output strictly this JSON, no preamble:
     }
 
 
-async def summarize_invention(paper_text: str, feedback: dict | None = None) -> str:
-    return await call_llm(
-        "You are a patent analyst. Be concise. Only state facts present in the input — never invent details.",
-        f"""════ TASK (template) ════
-Summarize the invention(s). Focus on WHAT is built/done.
-Use the paper's terminology. List as (1)...(2)... if multiple.
-200-400 words. No preamble.
-Critical: only use information present in the input below. Do not hallucinate specifics \
-(numbers, names, components) that are not explicitly stated.{_feedback_block(feedback)}
-
-════ INPUT (paper text, first 15000 chars) ════
-{paper_text[:15000]}""",
-        thinking_budget=4096,
-    )
-
 
 # ════════════════════════════════════════════════════════════
-# Phase 2 v2: Expert-driven innovation analysis (Steps B–G)
+# Phase 2: Expert-driven innovation analysis
 # ════════════════════════════════════════════════════════════
 
 
@@ -594,7 +576,7 @@ async def scan_innovation_landscape(
     source_pdf_path: str | None = None,
     persona: str | None = None,
 ) -> list[dict]:
-    """Step B: Identify innovation axes — technical dimensions where the paper
+    """Identify innovation axes — technical dimensions where the paper
     may have novel contributions. Uses LLM's field knowledge, not text extraction."""
     system = (persona or INITIAL_PERSONAS["landscape"]) + " Output JSON only."
     fields_str = ", ".join(fields_map) if fields_map else "general technology"
@@ -640,7 +622,7 @@ async def expand_technology_choices(
     source_pdf_path: str | None = None,
     persona: str | None = None,
 ) -> dict:
-    """Step C: For one innovation axis, enumerate known approaches from the
+    """For one innovation axis, enumerate known approaches from the
     literature and identify which specific one this paper chose."""
     system = (persona or INITIAL_PERSONAS["technology"]) + " Output JSON only."
     axis_name = axis.get("axis_name", "unknown")
@@ -694,7 +676,7 @@ async def determine_patent_types(
     source_pdf_path: str | None = None,
     persona: str | None = None,
 ) -> list[str]:
-    """Step D: Determine which patent types (Process/Machine/Manufacture/
+    """Determine which patent types (Process/Machine/Manufacture/
     Composition/Design) apply to this invention."""
     system = (persona or "You are a patent classification expert.") + " Output JSON only."
     tc_summary = json.dumps(
@@ -742,7 +724,7 @@ async def generate_checklist_for_type(
     source_pdf_path: str | None = None,
     persona: str | None = None,
 ) -> list[dict]:
-    """Step E: Generate specific, testable checklist items for one patent type.
+    """Generate specific, testable checklist items for one patent type.
     Each item embeds known_approaches so the evaluator can distinguish
     'same method' (Present) from 'same category, different method' (Partial)."""
     system = (persona or INITIAL_PERSONAS["checklist"]) + " Output JSON only."
@@ -807,7 +789,7 @@ async def review_checklist(
     source_pdf_path: str | None = None,
     persona: str | None = None,
 ) -> list[dict]:
-    """Step F: Expert review — merge duplicates, tighten vague items,
+    """Expert review — merge duplicates, tighten vague items,
     fill gaps, normalize weights."""
     system = (persona or INITIAL_PERSONAS["reviewer"]) + " Output JSON only."
     cl_text = json.dumps(combined_checklist, indent=2, ensure_ascii=False)
@@ -859,7 +841,7 @@ async def generate_search_queries(
     cpc_subclass: str,
     persona: str | None = None,
 ) -> dict:
-    """Step G: Generate search queries from checklist items. Each item gets
+    """Generate search queries from checklist items. Each item gets
     2-3 query formulations, grouped by innovation axis."""
     system = (persona or INITIAL_PERSONAS["plan"]) + " Output JSON only."
     cl_text = "\n".join(
@@ -905,250 +887,6 @@ Output JSON:
         except json.JSONDecodeError:
             pass
     return {"groups": []}
-
-
-async def decompose_invention(
-    paper_text: str,
-    feedback: dict | None = None,
-    source_pdf_path: str | None = None,
-    persona: str | None = None,
-) -> str:
-    """3-step ask-loop decompose:
-    Step 0: LLM identifies the paper's own sections/aspects.
-    Step 1: For each section, extract elements with verbatim quotes (1 call per section).
-    Step 2: Classify all elements and build SS structure.
-    """
-
-    system = (persona or "You are a patent analyst.") + " Output JSON only."
-
-    # ── Step 0: Let LLM discover the paper's sections ──
-    step0_prompt = f"""Read this paper and list its major technical sections or aspects.
-Do NOT use generic labels — use the paper's own section titles or describe
-the specific technical aspect covered. Aim for 3-7 sections that together
-cover the entire invention.
-
-Output JSON:
-{{"sections": ["section name or aspect", ...]}}
-{_feedback_block(feedback)}"""
-
-    if source_pdf_path and Path(source_pdf_path).exists():
-        step0_raw = await call_llm_with_pdfs(
-            system, step0_prompt, [source_pdf_path], thinking_budget=2048)
-    else:
-        step0_raw = await call_llm(
-            system,
-            f"{step0_prompt}\n\n════ PAPER TEXT ════\n{paper_text[:15000]}",
-            thinking_budget=2048,
-        )
-
-    sections = []
-    m0 = re.search(r'\{.*\}', step0_raw, re.DOTALL)
-    if m0:
-        try:
-            sections = json.loads(m0.group()).get("sections", [])
-        except json.JSONDecodeError:
-            pass
-    if not sections:
-        sections = ["Full document"]
-
-    # ── Step 1: Extract elements per section ──
-    all_sections_list = ", ".join(f'"{s}"' for s in sections)
-    all_elements = []
-    for sec in sections:
-        step1_prompt = f"""════ EXTRACT ELEMENTS: "{sec}" ════
-This paper has these sections/aspects: [{all_sections_list}].
-You are now extracting elements for: "{sec}".
-
-Read the FULL paper for context, but extract elements that primarily
-belong to "{sec}". If an element spans multiple sections, include it
-in whichever section it is most central to.
-
-Extract every distinct technical component, method, algorithm, or design
-decision relevant to this aspect.
-
-Rules:
-- Use the paper's own terminology
-- Each quote: a SHORT verbatim excerpt (under 40 words)
-- Do NOT add elements not described in the paper
-
-Output JSON:
-{{"section": "{sec}", "elements": [
-  {{"name": "short name", "quote": "verbatim quote", "section": "{sec}"}},
-  ...
-]}}"""
-
-        if source_pdf_path and Path(source_pdf_path).exists():
-            raw = await call_llm_with_pdfs(
-                system, step1_prompt, [source_pdf_path], thinking_budget=2048)
-        else:
-            raw = await call_llm(
-                system,
-                f"{step1_prompt}\n\n════ PAPER TEXT ════\n{paper_text[:15000]}",
-                thinking_budget=2048,
-            )
-
-        m1 = re.search(r'\{.*\}', raw, re.DOTALL)
-        if m1:
-            try:
-                parsed = json.loads(m1.group())
-                for el in parsed.get("elements", []):
-                    el["section"] = sec
-                    all_elements.append(el)
-            except json.JSONDecodeError:
-                pass
-
-    if not all_elements:
-        return json.dumps(_salvage_ss_from_text(step0_raw), ensure_ascii=False)
-
-    # Deduplicate by name (case-insensitive)
-    seen_names: set[str] = set()
-    deduped: list[dict] = []
-    for el in all_elements:
-        key = (el.get("name") or "").strip().lower()
-        if key and key not in seen_names:
-            seen_names.add(key)
-            deduped.append(el)
-    all_elements = deduped
-
-    step1 = {"elements": all_elements}
-    elements_text = json.dumps(all_elements, indent=2, ensure_ascii=False)
-
-    system_structure = (persona or "You are a patent analyst.") + " Output JSON only."
-    step2_raw = await call_llm(
-        system_structure,
-        f"""════ STEP 2: CLASSIFY AND STRUCTURE ════
-Below are technical elements extracted from a paper WITH verbatim quotes.
-Now classify each and build a Source Structure (SS).
-
-For each element, assign a role:
-- "novel" — the paper explicitly claims this as their contribution
-- "building_block" — known technique used as part of the system
-- "cited_prior" — explicitly cited as someone else's prior work
-
-Then identify connections between elements (how they feed into each other).
-
-Finally, write an SS Synopsis: ONE sentence summarizing the invention
-following actor → operation → object/outcome.
-
-EXTRACTED ELEMENTS:
-{elements_text}
-
-Output JSON:
-{{
-  "elements": [
-    {{"id": "e1", "name": "...", "role": "novel|building_block|cited_prior",
-      "source_quote": "copy the verbatim quote from the input elements",
-      "description": "1-sentence what it does in this invention"}},
-    ...
-  ],
-  "connections": [
-    {{"from": "e1", "to": "e2", "relation": "short description"}},
-    ...
-  ],
-  "synopsis": "One sentence: actor → operation → object/outcome"
-}}""",
-        thinking_budget=4096,
-    )
-
-    m2 = re.search(r'\{.*\}', step2_raw, re.DOTALL)
-    ss = None
-    if m2:
-        try:
-            ss = json.loads(m2.group())
-        except json.JSONDecodeError:
-            pass
-
-    if not ss or not ss.get("elements"):
-        ss = _promote_step1_to_ss(step1)
-
-    ss["_raw_elements"] = step1.get("elements", [])
-    _backfill_quotes(ss, step1.get("elements", []))
-    return json.dumps(ss, indent=2, ensure_ascii=False)
-
-
-def _promote_step1_to_ss(step1: dict) -> dict:
-    """Step 2 failed — build a valid SS from Step 1's raw elements."""
-    elements = []
-    for i, raw in enumerate(step1.get("elements", []), 1):
-        elements.append({
-            "id": f"e{i}",
-            "name": raw.get("name", f"element_{i}"),
-            "role": "unknown",
-            "source_quote": raw.get("quote", ""),
-            "description": raw.get("section", ""),
-        })
-    return {
-        "elements": elements,
-        "connections": [],
-        "synopsis": "(Step 2 classification failed — elements unclassified)",
-    }
-
-
-def _salvage_ss_from_text(raw_text: str) -> dict:
-    """Both steps failed to produce JSON — extract what we can from text."""
-    lines = [ln.strip() for ln in raw_text.split("\n") if ln.strip()]
-    elements = []
-    for i, line in enumerate(lines[:30], 1):
-        cleaned = re.sub(r'^[\d\-\.\)\*]+\s*', '', line).strip()
-        if len(cleaned) > 5:
-            elements.append({
-                "id": f"e{i}",
-                "name": cleaned[:120],
-                "role": "unknown",
-                "source_quote": "",
-                "description": "",
-            })
-    return {
-        "elements": elements or [{"id": "e1", "name": "(extraction failed)",
-                                   "role": "unknown", "source_quote": "",
-                                   "description": ""}],
-        "connections": [],
-        "synopsis": "(Structured extraction failed — salvaged from text)",
-        "_salvaged": True,
-    }
-
-
-def _backfill_quotes(ss: dict, raw_elements: list[dict]):
-    """Ensure SS elements carry source_quote from Step 1 raw extraction."""
-    raw_by_name = {}
-    for r in raw_elements:
-        name = (r.get("name") or "").lower().strip()
-        if name:
-            raw_by_name[name] = r.get("quote", "")
-    for elem in ss.get("elements", []):
-        if elem.get("source_quote"):
-            continue
-        name = (elem.get("name") or "").lower().strip()
-        if name in raw_by_name:
-            elem["source_quote"] = raw_by_name[name]
-            continue
-        for rn, rq in raw_by_name.items():
-            if rn in name or name in rn:
-                elem["source_quote"] = rq
-                break
-
-
-def compute_decompose_grounding(ucd_str: str) -> dict:
-    """Compute grounding metrics for decompose output. Deterministic."""
-    try:
-        ss = json.loads(ucd_str) if isinstance(ucd_str, str) else ucd_str
-    except (json.JSONDecodeError, TypeError):
-        return {"grounding_ratio": 0.0, "novel_ratio": 0.0, "ambiguous_count": 0,
-                "total_elements": 0}
-    elements = ss.get("elements", [])
-    if not elements:
-        return {"grounding_ratio": 0.0, "novel_ratio": 0.0, "ambiguous_count": 0,
-                "total_elements": 0}
-    quoted = sum(1 for e in elements if e.get("source_quote"))
-    novel = sum(1 for e in elements if e.get("role") == "novel")
-    ambiguous = sum(1 for e in elements
-                    if e.get("role") in (None, "", "unknown"))
-    return {
-        "grounding_ratio": round(quoted / len(elements), 4),
-        "novel_ratio": round(novel / len(elements), 4),
-        "ambiguous_count": ambiguous,
-        "total_elements": len(elements),
-    }
 
 
 def compute_ssr_grounding(checklist: list) -> dict:
@@ -1241,128 +979,6 @@ def compute_entropy_profile(
         "overall_confidence": confidence,
         "degradation_points": degradation,
     }
-
-
-async def generate_checklist(
-    summary: str, ucd: str, persona: str | None = None
-) -> list[str]:
-    """Generate SSR (Structural Scoring Rubric) with weighted criteria and 3-level scale.
-    Returns a list of dicts, but falls back to list of strings for backward compat."""
-    system = (persona + " Output JSON only.") if persona else (
-        "You are a patent claim analyst. Output JSON only.")
-
-    # Try to parse ucd as structured SS
-    ss = None
-    try:
-        ss = json.loads(ucd)
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    if ss and "elements" in ss:
-        novel_elements = [e for e in ss["elements"]
-                          if e.get("role") == "novel"]
-        elements_block = json.dumps(
-            novel_elements or ss["elements"], indent=2, ensure_ascii=False)
-        resp = await call_llm(
-            system,
-            f"""════ TASK: BUILD SSR (Structural Scoring Rubric) ════
-From the Source Structure below, create 10-20 weighted evaluation criteria.
-
-Each criterion must:
-- Test ONE specific technical element
-- Use the invention's actual terminology
-- Have a weight (0.0-1.0) reflecting importance to the overall invention
-  (weights should sum to ~1.0)
-- Define a 3-level match scale specific to that criterion
-
-Focus criteria on NOVEL elements (higher weights) but include key
-building blocks too (lower weights) since their specific combination
-or configuration may be novel.
-
-SOURCE STRUCTURE ELEMENTS:
-{elements_block}
-
-INVENTION SUMMARY:
-{summary[:2000]}
-
-Output JSON:
-{{"criteria": [
-  {{"id": "c1", "element_id": "e1",
-    "criterion": "what to test — specific, testable statement",
-    "weight": 0.15,
-    "scale": {{
-      "0": "what Absent looks like for this criterion",
-      "1": "what Partial looks like",
-      "2": "what Present looks like"
-    }}
-  }},
-  ...
-]}}""",
-            thinking_budget=4096,
-        )
-    else:
-        resp = await call_llm(
-            system,
-            f"""════ TASK ════
-Derive 15-20 testable criteria from this invention.
-Each: atomic, specific, testable, with a weight (0.0-1.0, sum to ~1.0).
-"The system includes X that performs Y."
-Output JSON: {{"criteria": [{{"id":"c1","criterion":"...","weight":0.1,
-"scale":{{"0":"absent","1":"partial","2":"present"}}}},...]}}.
-
-════ INPUT ════
-<summary>{summary}</summary>
-<breakdown>{ucd}</breakdown>""",
-            thinking_budget=4096,
-        )
-
-    m = re.search(r'\{.*\}', resp, re.DOTALL)
-    if m:
-        try:
-            parsed = json.loads(m.group())
-            criteria = parsed.get("criteria", [])
-            if criteria and isinstance(criteria[0], dict):
-                return criteria
-        except json.JSONDecodeError:
-            pass
-
-    # Fallback: try as flat array
-    m2 = re.search(r'\[.*\]', resp, re.DOTALL)
-    if m2:
-        try:
-            return json.loads(m2.group())
-        except json.JSONDecodeError:
-            pass
-    return [line.strip("- •").strip()
-            for line in resp.split("\n")
-            if line.strip().startswith(("-", "•", "*"))]
-
-
-async def plan_delegation(
-    summary: str, ucd: str, invention_type: str,
-    feedback: dict | None = None, persona: str | None = None,
-) -> dict:
-    resp = await call_llm(
-        (persona + " Output JSON only.") if persona else "You are a USPTO examiner. Output JSON only.",
-        f"""════ TASK (template) ════
-Create search plan. Output JSON with: a_core, atoms[], groups[].
-atoms: id, name, keywords[], core_score, distinctiveness_score.
-groups: group_id, atoms[], label, intent, anchor_terms[][], expansion_terms[][].
-8-20 atoms, 3-6 groups. Follow 102/103 methodology.{_feedback_block(feedback)}
-
-════ INPUT (from prior LLM steps) ════
-<summary>{summary}</summary>
-<breakdown>{ucd}</breakdown>
-<type>{invention_type}</type>""",
-        thinking_budget=4096,
-    )
-    match = re.search(r'\{.*\}', resp, re.DOTALL)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
-    return {"atoms": [], "groups": []}
 
 
 def _extract_pdf_text(path: str, max_pages: int = 10, max_chars: int = 60000) -> str:
