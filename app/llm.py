@@ -389,13 +389,15 @@ async def craft_personas(
     summary_excerpt: str,
 ) -> dict[str, str]:
     """ONE LLM call: read initial personas + document classification → output
-    5 domain-specific personas. Falls back to INITIAL_PERSONAS on failure."""
+    domain-specific personas. Falls back to INITIAL_PERSONAS on failure."""
     roles_block = "\n\n".join(
         f"### {role}\n{text}" for role, text in INITIAL_PERSONAS.items()
     )
+    keys_list = ", ".join(INITIAL_PERSONAS.keys())
+    n = len(INITIAL_PERSONAS)
     resp = await call_llm(
         "You rewrite expert personas to be domain-specific. Output JSON only.",
-        f"""Take these 5 generic expert personas and rewrite each to be specific
+        f"""Take these {n} generic expert personas and rewrite each to be specific
 to the document being analyzed. Keep the same expertise level and behavioral
 instructions. Add domain-specific knowledge, terminology, and awareness of
 the field's typical prior art landscape. Each rewrite should be roughly the
@@ -411,9 +413,9 @@ DOCUMENT CONTEXT:
 - CPC taxonomy: {cpc_context[:2000]}
 - Invention excerpt: {summary_excerpt[:500]}
 
-Output JSON with keys: decompose, checklist, plan, evaluate, summary.
+Output JSON with keys: {keys_list}.
 Each value is the rewritten persona string.""",
-        max_tokens=3000,
+        max_tokens=5000,
     )
     m = re.search(r'\{.*\}', resp, re.DOTALL)
     if m:
