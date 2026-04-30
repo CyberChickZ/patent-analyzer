@@ -1103,6 +1103,7 @@ async def run_pipeline(job_id: str):
             "fields_map": fields_map,
             "cpc_subclass": cpc_subclass,
             "source_citation": detection_result.get("source_citation", ""),
+            "publication_date": detection_result.get("publication_date", ""),
             "summary": summary,
             "invention_type": category_label,
             "reasoning": reasoning,
@@ -1862,6 +1863,17 @@ async def run_pipeline(job_id: str):
             llm_label("phase4", "Generating overall novelty summary")
             overall = await generate_overall_summary(summary, hit_matches[:10], persona=personas.get("summary"))
 
+        # §103 combination analysis
+        combination_analysis = None
+        if hit_matches and len(hit_matches) >= 2:
+            try:
+                from app.llm import generate_combination_analysis
+                llm_label("phase4", "Assessing combination obviousness")
+                combination_analysis = await generate_combination_analysis(
+                    summary, hit_matches[:5], persona=personas.get("evaluate"))
+            except Exception as e:
+                event("phase4", "info", f"Combination analysis skipped: {e}")
+
         update("phase4", "completed", {"evaluated": len(scoring_report), "top_score": round(top_score, 4)})
 
         # ── Entropy profile (deterministic, no LLM) ──
@@ -1894,6 +1906,7 @@ async def run_pipeline(job_id: str):
             "evaluation": {
                 "scoring_report": scoring_report,
                 "summary": overall,
+                "combination_analysis": combination_analysis,
                 "stats": {
                     "total_evaluated": len(scoring_report),
                     "top_score": round(top_score, 4),
