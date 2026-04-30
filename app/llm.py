@@ -493,14 +493,23 @@ STEP 2 — Document Type:
   - "talks_about_invention_but_no_invention": discusses/references others'
     inventions but does not present one itself.
 
-STEP 3 — Fields & Classification:
+STEP 3 — Input Mode (how is this document structured?):
+  - "academic_paper": formal paper with abstract, methods, results structure.
+  - "informal_description": handwritten notes, project description, proposal,
+    or informal write-up describing what someone is building/planning.
+  - "patent_draft": document with patent claim language or structured as a
+    patent application.
+  - "technical_report": formal but not claiming novelty — engineering report,
+    technical documentation.
+
+STEP 4 — Fields & Classification:
   - fields_map: 3-7 technical field labels from broad to specific.
     Example: ["Computer Vision", "Object Detection", "Anchor-Free Detection"]
   - cpc_subclass: best-guess 4-character CPC subclass code (e.g. G06N, H04L,
     A61B). Pick the single most relevant one.
   - category: §101 type (Process/Machine/Manufacture/Composition/Design/None).
 
-STEP 4 — Summary (only if status is Present or Implied):
+STEP 5 — Summary (only if status is Present or Implied):
   200-400 words describing WHAT is built/done, using the paper's own
   terminology. Focus on technical contribution, not motivation. If Implied,
   describe what is proposed rather than what is implemented.
@@ -514,6 +523,7 @@ Output strictly this JSON, no preamble:
   "category": "Process" | "Machine" | "Manufacture" | "Composition"
             | "Design" | "None",
   "fields_map": ["Field1", "Field2", "..."],
+  "input_mode": "academic_paper" | "informal_description" | "patent_draft" | "technical_report",
   "source_citation": "APA citation from first-page info, or empty string",
   "cpc_subclass": "G06N",
   "publication_date": "YYYY-MM-DD if determinable from the document (arXiv date, copyright year, conference date), or empty string",
@@ -542,6 +552,7 @@ Output strictly this JSON, no preamble:
                 "has_innovation":  status != "Absent",
                 "reasoning":       str(d.get("reasoning", "") or ""),
                 "doc_type":        str(d.get("doc_type", "invention") or "invention"),
+                "input_mode":      str(d.get("input_mode", "academic_paper") or "academic_paper"),
                 "category":        str(d.get("category", "None") or "None"),
                 "fields_map":      list(d.get("fields_map", []) or []),
                 "source_citation":  str(d.get("source_citation", "") or ""),
@@ -556,6 +567,7 @@ Output strictly this JSON, no preamble:
         "has_innovation": True,
         "reasoning":      "(JSON parse failed — defaulting to proceed)",
         "doc_type":       "invention",
+        "input_mode":     "academic_paper",
         "category":       "None",
         "fields_map":     [],
         "source_citation":  "",
@@ -812,6 +824,13 @@ REVIEW CRITERIA:
 5. WEIGHTS: Normalize so total weight ≈ 1.0. No single item > 0.15.
 6. KNOWN APPROACHES: Ensure every item with score=1 (Partial) has clear
    guidance on which alternative approaches count as partial matches.
+7. SEARCHABILITY — Each item must be specific enough to produce meaningful
+   search results in patent/paper databases, but NOT so narrow that no prior
+   art could ever match it. If an item describes a minor implementation detail
+   (e.g., a specific normalization constant, a specific loss scaling trick) that
+   would never appear as the primary contribution of any paper or patent,
+   MERGE it into the parent axis’s broader item. A good test: "Could someone
+   write a paper primarily about this specific technique?" If no, merge it.
 
 TECHNOLOGY CHOICES:
 {tc_text}

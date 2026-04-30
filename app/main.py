@@ -1041,8 +1041,10 @@ async def run_pipeline(job_id: str):
         cpc_subclass = detection_result.get("cpc_subclass", "")
         reasoning = detection_result.get("reasoning") or "(no reasoning provided)"
 
+        input_mode = detection_result.get("input_mode", "academic_paper")
         event("phase1", "info",
               f"status={status_det} · doc_type={doc_type} · "
+              f"input_mode={input_mode} · "
               f"category={detection_result.get('category', 'None')} · "
               f"cpc={cpc_subclass} · fields={fields_map}",
               {"reasoning": reasoning})
@@ -1100,6 +1102,7 @@ async def run_pipeline(job_id: str):
             "status_determination": status_det,
             "has_innovation": status_det != "Absent",
             "doc_mode": doc_type,
+            "input_mode": input_mode,
             "fields_map": fields_map,
             "cpc_subclass": cpc_subclass,
             "source_citation": detection_result.get("source_citation", ""),
@@ -1490,6 +1493,50 @@ async def run_pipeline(job_id: str):
                 "failure_reason": reason,
                 "channel_meta": channel_meta,
             })
+
+        # ── Citation chaining: expand pool via references/citations of top hits ──
+        # Always runs (not gated on evolve) for the top-5 candidates that have a
+        # Semantic Scholar paperId. References + citations are fetched via the
+        # existing ch_ss module (httpx, throttled) and merged back into pooled.
+        if pooled and len(pooled) >= 3:
+            top_for_chaining = sorted(pooled, key=lambda c: c.source_score, reverse=True)[:5]
+            chain_channel_results: dict[str, list[recall_pool.Candidate]] = {}
+            for cand in top_for_chaining:
+                ss_id = ((cand.raw or {}).get("semantic_scholar") or {}).get("paperId") or ""
+                if not ss_id:
+                    # Fallback: try pub_num or arxiv_id as SS can resolve those too
+                    ss_id = cand.arxiv_id or ""
+                if not ss_id:
+                    continue
+                try:
+                    ref_cands, ref_err = await ch_ss.references(ss_id, limit=20)
+                    cit_cands, cit_err = await ch_ss.citations(ss_id, limit=20)
+                    if ref_err:
+                        event("phase3", "citation_chain_warn",
+                              f"references({ss_id[:30]}): {ref_err[:100]}")
+                    if cit_err:
+                        event("phase3", "citation_chain_warn",
+                              f"citations({ss_id[:30]}): {cit_err[:100]}")
+                    chain_channel_results[f"chain_ref_{ss_id[:16]}"] = ref_cands
+                    chain_channel_results[f"chain_cit_{ss_id[:16]}"] = cit_cands
+                except Exception as _e:
+                    event("phase3", "citation_chain_warn",
+                          f"chain fetch failed for {ss_id[:30]}: {_e}")
+
+            if chain_channel_results:
+                # Merge chained candidates into the existing pool via pool_and_dedupe
+                # so dedup logic (DOI / arXiv / title hash) applies uniformly.
+                merged_input = dict(channel_results)
+                merged_input.update(chain_channel_results)
+                pooled_before = len(pooled)
+                pooled = recall_pool.pool_and_dedupe(merged_input)
+                added = len(pooled) - pooled_before
+                if added > 0:
+                    event("phase3", "info",
+                          f"Citation chaining added {added} new candidates from "
+                          f"{len(top_for_chaining)} seed papers",
+                          {"seeds": [c.title[:80] for c in top_for_chaining],
+                           "chain_channels": list(chain_channel_results.keys())})
 
         # ── Phase 3 elastic loop (evolve mode only) ──
         # After the first multi-channel pass, ask the reviewer whether the pool
