@@ -669,7 +669,7 @@ def generate_html(data: dict) -> str:
     methodology_html = ""
     if search_channels or total_patents or total_papers:
         channel_rows = ""
-        for ch_name, ch_count in search_channels.items():
+        for ch_name, ch_data in search_channels.items():
             display_name = {
                 "serpapi_patents": "Google Patents",
                 "serpapi_scholar": "Google Scholar",
@@ -677,11 +677,12 @@ def generate_html(data: dict) -> str:
                 "openalex": "OpenAlex",
                 "arxiv": "arXiv",
             }.get(ch_name, ch_name)
+            count = ch_data.get("count", 0) if isinstance(ch_data, dict) else ch_data
             channel_rows += (
                 f'<div style="display:flex;justify-content:space-between;'
                 f'padding:0.2rem 0;font-size:0.82rem">'
                 f'<span>{esc(display_name)}</span>'
-                f'<span style="color:var(--text2)">{ch_count} results</span></div>'
+                f'<span style="color:var(--text2)">{count} results</span></div>'
             )
         methodology_html = (
             f'<div style="margin-top:0.5rem">{channel_rows}</div>'
