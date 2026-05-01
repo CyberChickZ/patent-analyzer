@@ -43,6 +43,8 @@ app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")
 
 # Job store — in-memory cache + GCS persistence
 jobs: dict[str, dict] = {}
+# Track which jobs are actively running on THIS instance
+_active_pipelines: set[str] = set()
 
 _gcs_client = None
 
@@ -300,29 +302,12 @@ async def get_status(job_id: str):
                 return job
         except Exception:
             pass
-        # Zombie detection: if heartbeat is stale for >20 min, the Cloud Run
-        # instance was almost certainly recycled and the pipeline is dead.
-        # Mark as error so the frontend shows the real state.
-        last_hb = job.get("last_heartbeat") or job.get("created_at")
-        if last_hb:
-            try:
-                from datetime import datetime as _dt
-                hb_time = _dt.fromisoformat(last_hb.replace("Z", "+00:00"))
-                age = (datetime.now(timezone.utc) - hb_time).total_seconds()
-                if age > 1200:
-                    job["status"] = "error"
-                    job["error"] = (
-                        f"Pipeline lost — no heartbeat for {int(age)}s. "
-                        "The server instance was likely recycled."
-                    )
-                    _save_job(job)
-                    return job
-                elif age > 900:
-                    response["stale_heartbeat_warning"] = (
-                        f"No heartbeat for {int(age)}s — pipeline may be slow"
-                    )
-            except Exception:
-                pass
+        # Zombie detection: job claims running but no active pipeline on this instance
+        if job_id not in _active_pipelines:
+            job["status"] = "error"
+            job["error"] = "Pipeline terminated — server instance was recycled before completion"
+            _save_job(job)
+            return job
     return response
 
 
@@ -782,6 +767,7 @@ async def run_pipeline(job_id: str):
     from patent_analyzer.query_builder import build_all_queries
     from patent_analyzer.scorer import classify_risk
 
+    _active_pipelines.add(job_id)
     job = jobs[job_id]
     job_dir = Path(job["output_dir"])
     input_path = job["input_path"]
@@ -1998,6 +1984,7 @@ async def run_pipeline(job_id: str):
         job["traceback"] = tb
         _save_job(job)
     finally:
+        _active_pipelines.discard(job_id)
         from app.llm import set_llm_hook as _set_hook
         _set_hook(None)
 
