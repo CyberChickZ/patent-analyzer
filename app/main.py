@@ -300,14 +300,24 @@ async def get_status(job_id: str):
                 return job
         except Exception:
             pass
-        # Stale heartbeat is informational only — never flip status from a GET endpoint
+        # Zombie detection: if heartbeat is stale for >20 min, the Cloud Run
+        # instance was almost certainly recycled and the pipeline is dead.
+        # Mark as error so the frontend shows the real state.
         last_hb = job.get("last_heartbeat") or job.get("created_at")
         if last_hb:
             try:
                 from datetime import datetime as _dt
                 hb_time = _dt.fromisoformat(last_hb.replace("Z", "+00:00"))
                 age = (datetime.now(timezone.utc) - hb_time).total_seconds()
-                if age > 900:
+                if age > 1200:
+                    job["status"] = "error"
+                    job["error"] = (
+                        f"Pipeline lost — no heartbeat for {int(age)}s. "
+                        "The server instance was likely recycled."
+                    )
+                    _save_job(job)
+                    return job
+                elif age > 900:
                     response["stale_heartbeat_warning"] = (
                         f"No heartbeat for {int(age)}s — pipeline may be slow"
                     )
