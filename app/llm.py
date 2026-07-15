@@ -516,6 +516,7 @@ Output strictly this JSON, no preamble:
   "fields_map": ["Field1", "Field2", "..."],
   "source_citation": "APA citation from first-page info, or empty string",
   "cpc_subclass": "G06N",
+  "publication_date": "YYYY-MM-DD if determinable from the document (arXiv date, copyright year, conference date), or empty string",
   "summary": "200-400 word summary, or empty string if Absent"
 }}"""
     if source_pdf_path and Path(source_pdf_path).exists():
@@ -543,9 +544,10 @@ Output strictly this JSON, no preamble:
                 "doc_type":        str(d.get("doc_type", "invention") or "invention"),
                 "category":        str(d.get("category", "None") or "None"),
                 "fields_map":      list(d.get("fields_map", []) or []),
-                "source_citation": str(d.get("source_citation", "") or ""),
-                "cpc_subclass":    str(d.get("cpc_subclass", "") or ""),
-                "summary":         str(d.get("summary", "") or ""),
+                "source_citation":  str(d.get("source_citation", "") or ""),
+                "cpc_subclass":     str(d.get("cpc_subclass", "") or ""),
+                "publication_date": str(d.get("publication_date", "") or ""),
+                "summary":          str(d.get("summary", "") or ""),
             }
         except json.JSONDecodeError:
             pass
@@ -556,9 +558,10 @@ Output strictly this JSON, no preamble:
         "doc_type":       "invention",
         "category":       "None",
         "fields_map":     [],
-        "source_citation": "",
-        "cpc_subclass":   "",
-        "summary":        resp[:2000],
+        "source_citation":  "",
+        "cpc_subclass":     "",
+        "publication_date": "",
+        "summary":          resp[:2000],
     }
 
 
@@ -1447,6 +1450,50 @@ follows from the SOURCE DOCUMENT. Output strict JSON:
         except json.JSONDecodeError:
             pass
     return {"ok": True, "issues": [], "suggestion": "self-check parse failed"}
+
+
+async def generate_combination_analysis(
+    invention_summary: str,
+    top_matches: list[dict],
+    persona: str | None = None,
+) -> str | None:
+    """Ask whether combining top references makes the invention obvious (§103 analysis)."""
+    if len(top_matches) < 2:
+        return None
+    refs = []
+    for i, m in enumerate(top_matches[:5], 1):
+        title = m.get("title", "")
+        teachings = m.get("key_teachings", "") or m.get("snippet", "")
+        if teachings:
+            refs.append(f"Reference {i}: {title}\n  Key teachings: {teachings[:300]}")
+    if len(refs) < 2:
+        return None
+    refs_block = "\n\n".join(refs)
+    system = (
+        persona or
+        "You are a patent analyst assessing whether combining multiple prior art "
+        "references would make an invention obvious to a person of ordinary skill. "
+        "Be specific and concise."
+    )
+    return await call_llm(
+        system,
+        f"""Given this invention and the references below, assess whether a skilled
+practitioner would naturally combine elements from these references to arrive
+at the invention.
+
+INVENTION:
+{invention_summary[:2000]}
+
+REFERENCES:
+{refs_block}
+
+Answer in 2-4 sentences:
+1. Which specific elements from which references could be combined?
+2. Would this combination be natural/obvious to someone in this field, or would it require an inventive leap?
+3. What specific aspect of the invention (if any) would NOT be obvious even after combining all references?
+
+Be concrete — name the specific technical elements, not abstract concepts.""",
+    )
 
 
 async def generate_overall_summary(invention_summary: str, top_matches: list[dict], persona: str | None = None) -> str:
