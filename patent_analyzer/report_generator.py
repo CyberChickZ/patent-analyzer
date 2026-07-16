@@ -128,12 +128,12 @@ def _extract_key_terms(text: str) -> list[str]:
 
 def format_summary(text: str) -> str:
     """Format invention summary with markdown rendering and dynamic keyword highlighting."""
-    terms = _extract_key_terms(text)
+    terms = [t for t in _extract_key_terms(text) if len(t) > 2]
 
     def highlight(t: str) -> str:
         result = md_inline(esc(t))
         for kw in terms:
-            pattern = re.compile(re.escape(esc(kw)), re.IGNORECASE)
+            pattern = re.compile(r'\b' + re.escape(esc(kw)) + r'\b', re.IGNORECASE)
             result = pattern.sub(lambda m: f'<mark>{m.group()}</mark>', result)
         return result
 
@@ -155,7 +155,7 @@ def format_summary(text: str) -> str:
     rendered = render_markdown(text)
     if rendered:
         for kw in terms:
-            pattern = re.compile(re.escape(esc(kw)), re.IGNORECASE)
+            pattern = re.compile(r'\b' + re.escape(esc(kw)) + r'\b', re.IGNORECASE)
             rendered = pattern.sub(lambda m: f'<mark>{m.group()}</mark>', rendered)
         return rendered
 
@@ -946,7 +946,7 @@ a.card-title:hover{{color:var(--accent);text-decoration:underline}}
 
 {f'<div class="sec eval-sec"><div class="sec-t sec-t-lg">Novelty Assessment</div><div class="sec-b">{render_markdown(overall_summary)}</div></div>' if overall_summary else ''}
 
-{f'<div class="sec" style="border-left:3px solid #f59e0b"><div class="sec-t sec-t-lg">Combination Analysis</div><div class="sec-note">Could combining elements from multiple references make this invention obvious?</div><div class="sec-b">{render_markdown(combination_analysis)}</div></div>' if combination_analysis else ''}
+{f'<div class="sec" style="border-left:3px solid #f59e0b"><div class="sec-t sec-t-lg">Combination Analysis</div><div class="sec-note">Assessment of whether combining elements from the references above could reproduce this invention.</div><div class="sec-b">{render_markdown(combination_analysis)}</div></div>' if combination_analysis else ''}
 
 {f'<div class="sec"><div class="sec-t sec-t-lg">Innovation Landscape</div><div class="sec-note">Each innovation axis represents a technical dimension where this manuscript makes a design choice. Status shows whether existing literature covers that choice.</div>{increment_html}</div>' if increment_html else ''}
 
