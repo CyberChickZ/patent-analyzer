@@ -33,7 +33,7 @@ cd backend
 python3 evals/retrieval_eval.py --limit 500 --mode all
 ```
 
-Baseline (2026-08-26, 500 samples, 492-doc corpus):
+Baseline (2026-08-26, 500 samples, 492-doc corpus, local MiniLM):
 
 | method                        | R@1  | R@10 | R@50 | MRR  |
 |-------------------------------|------|------|------|------|
@@ -42,11 +42,25 @@ Baseline (2026-08-26, 500 samples, 492-doc corpus):
 | minilm_claims_chunks          | .328 | .668 | .870 | .440 |
 | hybrid_rrf (bm25 + chunks)    | .388 | .722 | .906 | .502 |
 
-Takeaways: structure-aware chunking (per-claim vectors, max-pool) beats the
-current title+abstract representation on every metric; the 2020-era MiniLM
-encoder is roughly tied with plain BM25, so a modern encoder has clear
-headroom; hybrid RRF fusion is a ~5-9 pt free win and should go into the
-main pipeline.
+Encoder A/B (2026-09-17, 200 samples, 197-doc corpus — smaller arena, so
+compare only within this table):
 
-Planned next: gemini-embedding-001 A/B on the same task; an extraction-stage
-eval using the feature-level breakdown annotations.
+| method                        | R@1  | R@10 | R@50 | MRR  |
+|-------------------------------|------|------|------|------|
+| bm25_keyword                  | .380 | .755 | .945 | .503 |
+| minilm_claims_chunks          | .450 | .780 | .955 | .563 |
+| te005_claims_chunks           | .505 | .880 | .990 | .636 |
+| ge001_claims_chunks           | .520 | .900 | .985 | .641 |
+| hybrid_rrf_ge001              | .490 | .900 | .985 | .631 |
+
+Takeaways: structure-aware chunking (per-claim vectors, max-pool) beats
+title+abstract with every encoder; the 2020-era MiniLM is roughly tied with
+plain BM25 while Vertex encoders are far ahead (gemini-embedding-001 best,
+text-embedding-005 within ~2 pts); BM25 RRF fusion is a ~5-9 pt win under a
+weak encoder but neutral-to-slightly-negative under strong ones — keep it
+for MiniLM, re-evaluate after the pipeline encoder upgrade. Serving note:
+te005 batches 100 texts/request while ge001 is 1/request on Vertex, so
+te005 is the pragmatic choice for the production rerank path.
+
+Planned next: switch the pipeline rerank encoder to Vertex; an
+extraction-stage eval using the feature-level breakdown annotations.
