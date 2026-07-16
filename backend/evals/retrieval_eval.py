@@ -12,15 +12,14 @@ Usage:
 
 import argparse
 import json
-import math
-import re
 import sys
-from collections import Counter
 from pathlib import Path
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from patent_analyzer.hybrid import bm25_scores, rrf_fuse  # noqa: E402
 
 DATA_DIR = Path(__file__).parent.parent / "eval_data" / "fine-patents" / "data" / "packaged"
 
@@ -76,35 +75,69 @@ def doc_chunks(doc: dict, mode: str) -> list[str]:
     raise ValueError(mode)
 
 
-_TOKEN = re.compile(r"[a-z0-9]+")
+CACHE_DIR = Path(__file__).parent.parent / "eval_data" / ".emb_cache"
 
 
-def _tokens(text: str) -> list[str]:
-    return _TOKEN.findall(text.lower())
+def embed_vertex(texts: list[str], model: str, task_type: str) -> np.ndarray:
+    """Embed via Vertex AI with a per-text disk cache (keyed by model+task+sha1).
+
+    gemini-embedding-001 on Vertex only accepts 1 text per request, so cache
+    misses fan out over a thread pool; text-embedding-005 batches up to 100.
+    """
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+
+    from google import genai
+    from google.genai import types as genai_types
+
+    cache = CACHE_DIR / f"{model}__{task_type}"
+    cache.mkdir(parents=True, exist_ok=True)
+
+    def key(t: str) -> Path:
+        return cache / (hashlib.sha1(t.encode()).hexdigest() + ".npy")
+
+    out: dict[int, np.ndarray] = {}
+    missing: list[int] = []
+    for i, t in enumerate(texts):
+        p = key(t)
+        if p.exists():
+            out[i] = np.load(p)
+        else:
+            missing.append(i)
+
+    if missing:
+        client = genai.Client(vertexai=True, project="aime-hello-world", location="us-west1")
+        config = genai_types.EmbedContentConfig(task_type=task_type, output_dimensionality=768)
+        batch = 100 if model == "text-embedding-005" else 1
+        print(f"[{model}] embedding {len(missing)} uncached texts (batch={batch})...")
+
+        def embed_batch(idxs: list[int]):
+            contents = [texts[i][:8000] or " " for i in idxs]
+            resp = client.models.embed_content(model=model, contents=contents, config=config)
+            for i, emb in zip(idxs, resp.embeddings):
+                v = np.array(emb.values, dtype=np.float32)
+                v /= (np.linalg.norm(v) or 1.0)
+                np.save(key(texts[i]), v)
+                out[i] = v
+
+        groups = [missing[i:i + batch] for i in range(0, len(missing), batch)]
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(embed_batch, groups))
+
+    return np.stack([out[i] for i in range(len(texts))])
 
 
-def bm25_rank(query: str, docs: list[str], k1=1.5, b=0.75) -> np.ndarray:
-    """Return score per doc. Plain BM25, no deps."""
-    doc_tokens = [_tokens(d) for d in docs]
-    doc_lens = np.array([len(t) for t in doc_tokens], dtype=float)
-    avgdl = doc_lens.mean() if len(doc_lens) else 1.0
-    df = Counter()
-    for toks in doc_tokens:
-        df.update(set(toks))
-    n = len(docs)
-    tfs = [Counter(toks) for toks in doc_tokens]
-    scores = np.zeros(n)
-    for term in set(_tokens(query)):
-        if term not in df:
-            continue
-        idf = math.log(1 + (n - df[term] + 0.5) / (df[term] + 0.5))
-        tf = np.array([t[term] for t in tfs], dtype=float)
-        scores += idf * (tf * (k1 + 1)) / (tf + k1 * (1 - b + b * doc_lens / avgdl))
-    return scores
+def make_embed_fns(model: str):
+    """Return (embed_docs, embed_queries) for a model name."""
+    if model == "minilm":
+        from patent_analyzer.semantic_search import embed_texts
+        return embed_texts, embed_texts
+    return (lambda t: embed_vertex(t, model, "RETRIEVAL_DOCUMENT"),
+            lambda t: embed_vertex(t, model, "RETRIEVAL_QUERY"))
 
 
-def eval_embedding(samples, corpus, mode: str) -> dict:
-    from patent_analyzer.semantic_search import embed_texts
+def eval_embedding(samples, corpus, mode: str, model: str = "minilm") -> dict:
+    embed_docs, embed_queries = make_embed_fns(model)
 
     pubs = list(corpus.keys())
     all_chunks, owner = [], []
@@ -113,9 +146,9 @@ def eval_embedding(samples, corpus, mode: str) -> dict:
             all_chunks.append(ch)
             owner.append(i)
     owner = np.array(owner)
-    print(f"[{mode}] embedding {len(all_chunks)} chunks for {len(pubs)} docs...")
-    doc_vecs = embed_texts(all_chunks)
-    query_vecs = embed_texts([s["query_claim"] for s in samples])
+    print(f"[{mode}/{model}] embedding {len(all_chunks)} chunks for {len(pubs)} docs...")
+    doc_vecs = embed_docs(all_chunks)
+    query_vecs = embed_queries([s["query_claim"] for s in samples])
 
     ranks = []
     for qi, s in enumerate(samples):
@@ -133,16 +166,16 @@ def eval_bm25(samples, corpus) -> dict:
     docs = [" ".join(doc_chunks(corpus[p], "claims_chunks")) for p in pubs]
     ranks = []
     for s in samples:
-        scores = bm25_rank(s["query_claim"], docs)
+        scores = bm25_scores(s["query_claim"], docs)
         order = np.argsort(scores)[::-1]
         target_idx = pubs.index(s["target"])
         ranks.append(int(np.where(order == target_idx)[0][0]) + 1)
     return summarize(ranks)
 
 
-def eval_hybrid(samples, corpus, k_rrf: int = 60) -> dict:
+def eval_hybrid(samples, corpus, k_rrf: int = 60, model: str = "minilm") -> dict:
     """RRF fusion of BM25 and claims_chunks dense ranks."""
-    from patent_analyzer.semantic_search import embed_texts
+    embed_docs, embed_queries = make_embed_fns(model)
 
     pubs = list(corpus.keys())
     docs_text = [" ".join(doc_chunks(corpus[p], "claims_chunks")) for p in pubs]
@@ -152,22 +185,16 @@ def eval_hybrid(samples, corpus, k_rrf: int = 60) -> dict:
             all_chunks.append(ch)
             owner.append(i)
     owner = np.array(owner)
-    doc_vecs = embed_texts(all_chunks)
-    query_vecs = embed_texts([s["query_claim"] for s in samples])
+    doc_vecs = embed_docs(all_chunks)
+    query_vecs = embed_queries([s["query_claim"] for s in samples])
 
     ranks = []
     for qi, s in enumerate(samples):
         sims = doc_vecs @ query_vecs[qi]
         dense = np.full(len(pubs), -1.0)
         np.maximum.at(dense, owner, sims)
-        sparse = bm25_rank(s["query_claim"], docs_text)
-        rrf = np.zeros(len(pubs))
-        for scores in (dense, sparse):
-            order = np.argsort(scores)[::-1]
-            pos = np.empty(len(pubs), dtype=int)
-            pos[order] = np.arange(len(pubs))
-            rrf += 1.0 / (k_rrf + pos + 1)
-        order = np.argsort(rrf)[::-1]
+        sparse = bm25_scores(s["query_claim"], docs_text)
+        order = np.argsort(rrf_fuse([dense, sparse], k=k_rrf))[::-1]
         target_idx = pubs.index(s["target"])
         ranks.append(int(np.where(order == target_idx)[0][0]) + 1)
     return summarize(ranks)
@@ -192,6 +219,8 @@ def main():
     ap.add_argument("--split", default=None, help="train/validation/test; default all")
     ap.add_argument("--mode", default="all",
                     choices=["all", "bm25", "title_abstract", "claims_chunks", "hybrid"])
+    ap.add_argument("--model", default="minilm",
+                    choices=["minilm", "text-embedding-005", "gemini-embedding-001"])
     args = ap.parse_args()
 
     samples = load_samples(args.limit, args.split)
@@ -201,12 +230,13 @@ def main():
     results = {}
     if args.mode in ("all", "bm25"):
         results["bm25_keyword"] = eval_bm25(samples, corpus)
+    tag = args.model.replace("text-embedding-", "te").replace("gemini-embedding-", "ge")
     if args.mode in ("all", "title_abstract"):
-        results["minilm_title_abstract"] = eval_embedding(samples, corpus, "title_abstract")
+        results[f"{tag}_title_abstract"] = eval_embedding(samples, corpus, "title_abstract", args.model)
     if args.mode in ("all", "claims_chunks"):
-        results["minilm_claims_chunks"] = eval_embedding(samples, corpus, "claims_chunks")
+        results[f"{tag}_claims_chunks"] = eval_embedding(samples, corpus, "claims_chunks", args.model)
     if args.mode in ("all", "hybrid"):
-        results["hybrid_rrf"] = eval_hybrid(samples, corpus)
+        results[f"hybrid_rrf_{tag}"] = eval_hybrid(samples, corpus, model=args.model)
 
     print(f"\n{'method':<28}{'R@1':>7}{'R@5':>7}{'R@10':>7}{'R@50':>7}{'MRR':>8}{'medR':>7}")
     for name, m in results.items():

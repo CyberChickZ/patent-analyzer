@@ -114,6 +114,37 @@ def rerank_by_embedding(target_text: str, documents: list[dict], limit: int = 30
     return results
 
 
+def rerank_hybrid(target_text: str, documents: list[dict], limit: int = 30) -> list[dict]:
+    """
+    Rerank by RRF fusion of BM25 (sparse) and embedding (dense) rankings.
+    Benchmarked on FiNE-Patents: R@10 .722 vs .630 for dense-only
+    (see backend/evals/README.md). Falls back to dense-only on failure.
+    """
+    from .hybrid import bm25_scores, rrf_fuse
+
+    doc_texts = _build_doc_texts(documents)
+    if not doc_texts:
+        return []
+
+    target_vec = embed_texts([target_text])[0]
+    doc_vecs = embed_texts(doc_texts)
+    dense = cosine_similarity(target_vec, doc_vecs)
+    try:
+        sparse = bm25_scores(target_text, doc_texts)
+        fused = rrf_fuse([dense, sparse])
+    except Exception:
+        fused = dense
+
+    ranked_indices = np.argsort(fused)[::-1][:limit]
+    results = []
+    for idx in ranked_indices:
+        doc = documents[idx].copy()
+        doc["semantic_score"] = float(dense[idx])
+        doc["hybrid_score"] = float(fused[idx])
+        results.append(doc)
+    return results
+
+
 def rerank_by_axes(
     axes_queries: list[dict],
     documents: list[dict],
