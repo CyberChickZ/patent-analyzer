@@ -161,7 +161,7 @@ async def claim_search_node(state: GraphState) -> dict:
     job_dir.mkdir(parents=True, exist_ok=True)
     dl_count = 0
     for i, doc in enumerate(ranked[:20]):
-        pdf_url = doc.get("pdf_url") or doc.get("link")
+        pdf_url = recall_pool.resolve_pdf_url(doc)
         if not pdf_url:
             continue
         try:

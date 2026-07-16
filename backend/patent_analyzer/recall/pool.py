@@ -127,6 +127,14 @@ def pool_and_dedupe(channel_results: dict[str, list[Candidate]]) -> list[Candida
     return unique
 
 
+def resolve_pdf_url(doc: dict) -> str:
+    """Best downloadable URL for a legacy doc dict (pdf_link may be a list)."""
+    url = doc.get("pdf_link") or doc.get("url") or ""
+    if isinstance(url, list):
+        url = url[0] if url else ""
+    return url if isinstance(url, str) else ""
+
+
 def candidates_to_legacy_docs(cands: list[Candidate]) -> list[dict]:
     """Convert Candidate list into the dict shape the existing pipeline uses."""
     out = []

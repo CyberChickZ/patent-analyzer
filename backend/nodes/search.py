@@ -228,13 +228,39 @@ async def search_node(state: GraphState) -> dict:
 
     _event("info", f"Ranked: top {len(ranked)} candidates")
 
+    # Enrich ranked papers missing abstracts via OpenAlex title lookup
+    # (SerpAPI scholar results only carry a 1-2 sentence snippet)
+    from patent_analyzer.fetch_abstracts import search_paper as _oa_lookup
+    need_abs = [d for d in ranked
+                if d.get("match_type") != "Patent"
+                and not (d.get("abstract") or "").strip()
+                and d.get("title")][:20]
+    if need_abs:
+        abs_sem = asyncio.Semaphore(4)
+
+        async def _fill_abstract(d):
+            async with abs_sem:
+                try:
+                    info = await asyncio.to_thread(_oa_lookup, d["title"])
+                except Exception:
+                    return
+                if info and info.get("abstract"):
+                    d["abstract"] = info["abstract"]
+                    for k in ("authors", "doi"):
+                        if not d.get(k) and info.get(k):
+                            d[k] = info[k]
+
+        await asyncio.gather(*(_fill_abstract(d) for d in need_abs))
+        filled = sum(1 for d in need_abs if (d.get("abstract") or "").strip())
+        _event("info", f"OpenAlex abstract enrichment: {filled}/{len(need_abs)} filled")
+
     # Download top PDFs
     job_dir = Path(output_dir)
     job_dir.mkdir(parents=True, exist_ok=True)
     MAX_DOWNLOADS = 30
     download_count = 0
     for i, doc in enumerate(ranked[:MAX_DOWNLOADS]):
-        pdf_url = doc.get("pdf_url") or doc.get("link")
+        pdf_url = recall_pool.resolve_pdf_url(doc)
         if not pdf_url:
             continue
         try:
