@@ -80,5 +80,27 @@ max-pool; BM25 RRF fusion applies only on the MiniLM fallback path, per
 the fusion nuance above. BigQuery candidates carry claims_text (8k chars)
 into the rerank so patent claims become chunks.
 
-Planned next: an extraction-stage eval using the feature-level breakdown
-annotations.
+## Extraction eval
+
+Task: split claim 1 into features; ground truth is the examiner's own
+feature breakdown. Greedy 1:1 embedding matching (te005,
+SEMANTIC_SIMILARITY), scored at several thresholds:
+
+```bash
+python3 evals/extraction_eval.py --limit 100 --mode regex
+```
+
+Baseline (2026-09-17, 100 EN samples, 502 examiner features):
+
+| mode  | recall@0.8 | precision@0.8 | F1   |
+|-------|-----------|---------------|------|
+| regex | .815      | .983          | .891 |
+
+Honest surprise: the regex claim splitter — flagged earlier as the weak
+link — is a strong baseline. Precision .983 means what it splits is real;
+the gap is recall (~18% of examiner features get merged into a coarser
+limitation, which would coarsen evidence mapping downstream). An LLM
+splitter has a measurable target to beat now.
+
+Planned next: an LLM-based splitter mode for extraction_eval; wiring the
+feature-level passage annotations into an evidence-mapping eval.
