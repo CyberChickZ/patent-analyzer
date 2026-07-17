@@ -214,8 +214,8 @@ async def search_node(state: GraphState) -> dict:
         _event("info", f"Filtered {filtered} self-citations")
 
     # Semantic rerank
-    from patent_analyzer.semantic_search import rerank_hybrid
-    ranked = rerank_hybrid(summary, all_docs, limit=30)
+    from patent_analyzer.semantic_search import rerank_docs
+    ranked = rerank_docs(summary, all_docs, limit=30)
 
     # Ensure BigQuery patent candidates aren't lost after rerank
     ranked_titles = {d.get("title", "").lower() for d in ranked}

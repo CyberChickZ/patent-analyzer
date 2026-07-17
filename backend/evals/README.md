@@ -62,5 +62,23 @@ for MiniLM, re-evaluate after the pipeline encoder upgrade. Serving note:
 te005 batches 100 texts/request while ge001 is 1/request on Vertex, so
 te005 is the pragmatic choice for the production rerank path.
 
-Planned next: switch the pipeline rerank encoder to Vertex; an
-extraction-stage eval using the feature-level breakdown annotations.
+## Pipeline parity
+
+`--mode pipeline` runs the production `semantic_search.rerank_docs` itself
+(legacy-doc dicts, claims_text blob splitting, Vertex encoder, fallback
+logic) against the same arena, so the number measures what actually serves:
+
+| method                        | R@1  | R@10 | R@50 | MRR  |
+|-------------------------------|------|------|------|------|
+| pipeline_rerank_docs (te005)  | .500 | .895 | .990 | .636 |
+
+(2026-09-17, 200 samples — same arena as the encoder A/B above. The old
+pipeline representation, minilm_claims_chunks, scored .780 R@10 here.)
+
+The pipeline now uses text-embedding-005 + structure-aware chunks +
+max-pool; BM25 RRF fusion applies only on the MiniLM fallback path, per
+the fusion nuance above. BigQuery candidates carry claims_text (8k chars)
+into the rerank so patent claims become chunks.
+
+Planned next: an extraction-stage eval using the feature-level breakdown
+annotations.

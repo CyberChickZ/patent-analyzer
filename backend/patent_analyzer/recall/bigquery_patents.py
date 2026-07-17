@@ -105,7 +105,7 @@ async def search_claims(
         c.raw = {
             "bigquery": {
                 "publication_number": pub_num,
-                "claims_preview": claims[:1000],
+                "claims_text": claims[:8000],
                 "country_code": row.country_code,
                 "filing_date": str(row.filing_date) if row.filing_date else "",
             }

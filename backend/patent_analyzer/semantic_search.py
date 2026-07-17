@@ -34,6 +34,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
@@ -141,6 +142,84 @@ def rerank_hybrid(target_text: str, documents: list[dict], limit: int = 30) -> l
         doc = documents[idx].copy()
         doc["semantic_score"] = float(dense[idx])
         doc["hybrid_score"] = float(fused[idx])
+        results.append(doc)
+    return results
+
+
+_CLAIM_SPLIT = re.compile(r"(?<=[.;])\s*(?=\d{1,2}\s*\.\s+[A-Z])")
+
+
+def doc_to_chunks(doc: dict, max_chunks: int = 12) -> list[str]:
+    """Structure-aware chunks: title+abstract first, then per-claim chunks.
+
+    Per-claim vectors + max-pool beat a single title+abstract vector with
+    every encoder tested (backend/evals/README.md).
+    """
+    title = doc.get("title", "") or ""
+    body = (doc.get("abstract") or "").strip() or (doc.get("snippet") or "").strip()
+    chunks = [f"{title} {body}".strip()]
+
+    claims = (doc.get("claims_text") or "").strip()
+    if claims:
+        parts = [p.strip() for p in _CLAIM_SPLIT.split(claims) if len(p.strip()) > 30]
+        if len(parts) <= 1 and len(claims) > 1200:
+            parts = [claims[i:i + 1000] for i in range(0, len(claims), 800)]
+        chunks.extend(parts)
+    return [c for c in chunks[:max_chunks] if c]
+
+
+def _rank_chunked(query_vec, chunk_vecs, owner, n_docs) -> np.ndarray:
+    sims = chunk_vecs @ query_vec
+    doc_scores = np.full(n_docs, -1.0)
+    np.maximum.at(doc_scores, owner, sims)
+    return doc_scores
+
+
+def rerank_docs(target_text: str, documents: list[dict], limit: int = 30) -> list[dict]:
+    """Production rerank: Vertex encoder + structure-aware chunks + max-pool.
+
+    Falls back to MiniLM + BM25 fusion when Vertex is unreachable — fusion
+    is a ~5-9 pt win under the weak encoder but neutral under the strong one
+    (backend/evals/README.md), so it is only applied on the fallback path.
+    """
+    if not documents:
+        return []
+
+    chunks, owner = [], []
+    for i, doc in enumerate(documents):
+        for ch in doc_to_chunks(doc):
+            chunks.append(ch)
+            owner.append(i)
+    owner = np.array(owner)
+
+    encoder_used = "vertex"
+    fused = None
+    try:
+        from .encoders import VERTEX_MODEL, embed_docs, embed_queries
+        chunk_vecs = embed_docs(chunks)
+        query_vec = embed_queries([target_text])[0]
+        dense = _rank_chunked(query_vec, chunk_vecs, owner, len(documents))
+        encoder_used = VERTEX_MODEL
+    except Exception as exc:
+        print(f"[rerank] Vertex encoder failed ({type(exc).__name__}: {exc}), "
+              f"falling back to MiniLM + BM25 fusion")
+        encoder_used = "minilm+bm25"
+        chunk_vecs = embed_texts(chunks)
+        query_vec = embed_texts([target_text])[0]
+        dense = _rank_chunked(query_vec, chunk_vecs, owner, len(documents))
+        from .hybrid import bm25_scores, rrf_fuse
+        doc_texts = [" ".join(doc_to_chunks(d)) for d in documents]
+        fused = rrf_fuse([dense, bm25_scores(target_text, doc_texts)])
+
+    scores = fused if fused is not None else dense
+    ranked_indices = np.argsort(scores)[::-1][:limit]
+    results = []
+    for idx in ranked_indices:
+        doc = documents[idx].copy()
+        doc["semantic_score"] = float(dense[idx])
+        doc["rerank_encoder"] = encoder_used
+        if fused is not None:
+            doc["hybrid_score"] = float(fused[idx])
         results.append(doc)
     return results
 

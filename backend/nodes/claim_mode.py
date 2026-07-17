@@ -92,7 +92,7 @@ async def claim_search_node(state: GraphState) -> dict:
     from patent_analyzer.recall import semantic_scholar as ch_ss
     from patent_analyzer.recall import serpapi as ch_serpapi
     from patent_analyzer.recall.bigquery_patents import search_by_limitations, search_claims
-    from patent_analyzer.semantic_search import rerank_hybrid
+    from patent_analyzer.semantic_search import rerank_docs
     from patent_analyzer.searcher import download_pdf
     from pathlib import Path
 
@@ -153,7 +153,7 @@ async def claim_search_node(state: GraphState) -> dict:
     all_docs = recall_pool.candidates_to_legacy_docs(pooled)
 
     # Rerank by claim text similarity
-    ranked = rerank_hybrid(summary, all_docs, limit=30)
+    ranked = rerank_docs(summary, all_docs, limit=30)
     _evt_add(events, "info", f"Ranked: top {len(ranked)} candidates")
 
     # Download PDFs

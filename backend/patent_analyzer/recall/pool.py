@@ -151,6 +151,7 @@ def candidates_to_legacy_docs(cands: list[Candidate]) -> list[dict]:
             "authors": c.authors,
             "sources": c.sources,
             "source_score": c.source_score,
+            "claims_text": (c.raw.get("bigquery") or {}).get("claims_text", ""),
         }
         out.append(d)
     return out

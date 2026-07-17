@@ -79,52 +79,10 @@ CACHE_DIR = Path(__file__).parent.parent / "eval_data" / ".emb_cache"
 
 
 def embed_vertex(texts: list[str], model: str, task_type: str) -> np.ndarray:
-    """Embed via Vertex AI with a per-text disk cache (keyed by model+task+sha1).
-
-    gemini-embedding-001 on Vertex only accepts 1 text per request, so cache
-    misses fan out over a thread pool; text-embedding-005 batches up to 100.
-    """
-    import hashlib
-    from concurrent.futures import ThreadPoolExecutor
-
-    from google import genai
-    from google.genai import types as genai_types
-
-    cache = CACHE_DIR / f"{model}__{task_type}"
-    cache.mkdir(parents=True, exist_ok=True)
-
-    def key(t: str) -> Path:
-        return cache / (hashlib.sha1(t.encode()).hexdigest() + ".npy")
-
-    out: dict[int, np.ndarray] = {}
-    missing: list[int] = []
-    for i, t in enumerate(texts):
-        p = key(t)
-        if p.exists():
-            out[i] = np.load(p)
-        else:
-            missing.append(i)
-
-    if missing:
-        client = genai.Client(vertexai=True, project="aime-hello-world", location="us-west1")
-        config = genai_types.EmbedContentConfig(task_type=task_type, output_dimensionality=768)
-        batch = 100 if model == "text-embedding-005" else 1
-        print(f"[{model}] embedding {len(missing)} uncached texts (batch={batch})...")
-
-        def embed_batch(idxs: list[int]):
-            contents = [texts[i][:8000] or " " for i in idxs]
-            resp = client.models.embed_content(model=model, contents=contents, config=config)
-            for i, emb in zip(idxs, resp.embeddings):
-                v = np.array(emb.values, dtype=np.float32)
-                v /= (np.linalg.norm(v) or 1.0)
-                np.save(key(texts[i]), v)
-                out[i] = v
-
-        groups = [missing[i:i + batch] for i in range(0, len(missing), batch)]
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            list(ex.map(embed_batch, groups))
-
-    return np.stack([out[i] for i in range(len(texts))])
+    """Shared with the production rerank path (patent_analyzer.encoders) so
+    the eval measures exactly the code that serves."""
+    from patent_analyzer.encoders import embed_vertex as _shared
+    return _shared(texts, task_type, model, cache_dir=CACHE_DIR)
 
 
 def make_embed_fns(model: str):
@@ -200,6 +158,33 @@ def eval_hybrid(samples, corpus, k_rrf: int = 60, model: str = "minilm") -> dict
     return summarize(ranks)
 
 
+def eval_pipeline(samples, corpus) -> dict:
+    """Parity check: run the production rerank_docs end-to-end on the eval
+    corpus, legacy-doc dicts and all. Measures what actually serves."""
+    import os
+    os.environ.setdefault("EMBED_CACHE_DIR", str(CACHE_DIR / "pipeline"))
+    from patent_analyzer.semantic_search import rerank_docs
+
+    pubs = list(corpus.keys())
+    docs = []
+    for pub in pubs:
+        c = corpus[pub]
+        claims = [cl for cl in (c.get("claims") or []) if isinstance(cl, str)]
+        docs.append({
+            "title": c.get("title") or "",
+            "abstract": c.get("abstract") or "",
+            "pub_num": pub,
+            "claims_text": " ".join(claims),
+        })
+
+    ranks = []
+    for s in samples:
+        ranked = rerank_docs(s["query_claim"], docs, limit=len(docs))
+        order = [d["pub_num"] for d in ranked]
+        ranks.append(order.index(s["target"]) + 1)
+    return summarize(ranks)
+
+
 def summarize(ranks: list[int]) -> dict:
     r = np.array(ranks, dtype=float)
     return {
@@ -218,7 +203,7 @@ def main():
     ap.add_argument("--limit", type=int, default=500)
     ap.add_argument("--split", default=None, help="train/validation/test; default all")
     ap.add_argument("--mode", default="all",
-                    choices=["all", "bm25", "title_abstract", "claims_chunks", "hybrid"])
+                    choices=["all", "bm25", "title_abstract", "claims_chunks", "hybrid", "pipeline"])
     ap.add_argument("--model", default="minilm",
                     choices=["minilm", "text-embedding-005", "gemini-embedding-001"])
     args = ap.parse_args()
@@ -237,6 +222,8 @@ def main():
         results[f"{tag}_claims_chunks"] = eval_embedding(samples, corpus, "claims_chunks", args.model)
     if args.mode in ("all", "hybrid"):
         results[f"hybrid_rrf_{tag}"] = eval_hybrid(samples, corpus, model=args.model)
+    if args.mode == "pipeline":
+        results["pipeline_rerank_docs"] = eval_pipeline(samples, corpus)
 
     print(f"\n{'method':<28}{'R@1':>7}{'R@5':>7}{'R@10':>7}{'R@50':>7}{'MRR':>8}{'medR':>7}")
     for name, m in results.items():
