@@ -28,3 +28,24 @@ def render_doc(patent: dict, with_claims: bool) -> str:
         claims = [c for c in (patent.get("claims") or []) if c]
         parts += ["", "Claims:"] + claims
     return "\n".join(parts).strip() + "\n"
+
+
+_PUB_STRIP = re.compile(r"[\s/\-,.]")
+
+
+def norm_pub(s: str) -> str:
+    """Normalize a publication number across FiNE / BigQuery / SerpAPI spellings.
+
+    'US 2008/025717 A1', 'US-2008025717-A1', 'US20080025717A1' -> 'US20080025717A1'.
+    Year-prefixed US pre-grant numbers are widened to the 11-digit form.
+    """
+    if not s:
+        return ""
+    t = _PUB_STRIP.sub("", s.upper())
+    m = re.match(r"^([A-Z]{2})(\d+)([A-Z]\d?)?$", t)
+    if not m:
+        return t
+    cc, digits, kind = m.group(1), m.group(2), m.group(3) or ""
+    if cc == "US" and len(digits) == 10 and digits[:2] in ("19", "20"):
+        digits = digits[:4] + "0" + digits[4:]
+    return f"{cc}{digits}{kind}"
