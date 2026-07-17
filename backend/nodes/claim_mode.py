@@ -44,11 +44,37 @@ def _parse_claim_limitations(claim_text: str) -> dict:
         # Fallback: treat the whole body as one limitation
         limitations = [body.strip().rstrip('.')]
 
+    limitations = [sub for lim in limitations for sub in _split_sub_features(lim)]
+
     return {
         "preamble": preamble,
         "limitations": limitations,
         "full_text": claim_text.strip(),
     }
+
+
+def _split_sub_features(text: str) -> list[str]:
+    """Second-pass split within a limitation, mirroring how EPO examiners
+    break features: each wherein clause and each dash-list item stands alone
+    (FiNE-Patents extraction eval — recall was the gap, precision had slack)."""
+    parts = re.split(r',?\s+(?=wherein\b)', text)
+    out = []
+    for p in parts:
+        for q in re.split(r'(?:^|(?<=\s))-\s+', p):
+            out.extend(re.split(r',\s+(?=and\s+\w+ing\b)', q))
+    cleaned = [x.strip(' ,;-') for x in out]
+    return [x for x in cleaned if len(x) > 10] or ([text.strip()] if text.strip() else [])
+
+
+def _split_preamble(preamble: str) -> list[str]:
+    """Examiners often count the device/method name and the trailing
+    'the method comprising…' bridge as separate features."""
+    p = re.sub(r'^\s*\d+\s*\.\s*', '', preamble or '').strip()
+    if not p:
+        return []
+    parts = re.split(r',\s+(?=the\s+\w+\s+(?:being|compris|configur|perform))', p)
+    parts = [x.strip(' ,') for x in parts if len(x.strip()) > 3]
+    return [x for x in parts if not re.match(r'^the\s+\w+\s+comprising:?$', x)]
 
 
 async def claim_parse_node(state: GraphState) -> dict:

@@ -47,9 +47,9 @@ def load_samples(limit: int | None):
 
 
 def predict_regex(claim: str) -> list[str]:
-    from nodes.claim_mode import _parse_claim_limitations
+    from nodes.claim_mode import _parse_claim_limitations, _split_preamble
     parsed = _parse_claim_limitations(claim)
-    preds = ([parsed["preamble"]] if parsed.get("preamble") else []) + parsed["limitations"]
+    preds = _split_preamble(parsed.get("preamble", "")) + parsed["limitations"]
     return [p for p in preds if len(p.strip()) > 15]
 
 
