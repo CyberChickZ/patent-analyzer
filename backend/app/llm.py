@@ -1208,30 +1208,45 @@ async def evaluate_single_document_text(
     prior_art_title: str,
     prior_art_type: str,
     persona: str | None = None,
+    doc_mode: str = "abstract",
 ) -> dict:
-    """Abstract-only evaluation. Output shape matches evaluate_single_document."""
+    """Text-only evaluation. Output shape matches evaluate_single_document.
+
+    doc_mode="abstract" (default): short snippet, silence scores 0.
+    doc_mode="full_text": numbered full document; every non-zero score must
+    carry a verbatim evidence_quote so it can be verified against the text.
+    """
 
     use_ssr = _is_ssr(checklist)
     cl_text = _format_criteria_for_eval(checklist)
     system = (persona + " Output JSON only.") if persona else (
         "You are a US patent examiner. Output JSON only.")
+    full = doc_mode == "full_text"
+    doc_label = "full text with numbered paragraphs" if full else "abstract/snippet only"
+    evidence_field = ('"evidence_quote": "verbatim excerpt from the document, or empty", '
+                      if full else "")
 
     if use_ssr:
         scoring_instruction = (
             "For EACH criterion assign score: 2=Present, 1=Partial, 0=Absent.\n"
-            "Abstract is limited — if silent on a criterion, score 0. "
-            "Do NOT infer beyond what the text states.")
+            + ("For score 1 or 2 you MUST copy a verbatim evidence_quote from the "
+               "document (exact wording, 10-40 words). If you cannot quote it, score 0. "
+               if full else
+               "Abstract is limited — if silent on a criterion, score 0. ")
+            + "Do NOT infer beyond what the text states.")
         output_schema = (
             '"checklist_results": {\n'
             '    "<criterion>": {"score": 0|1|2, "analysis": "...", '
+            + evidence_field +
             '"match": true|false},\n    ...all items...\n  }')
     else:
         scoring_instruction = (
-            "For EACH item, match=true only when the abstract explicitly "
-            "discusses that element. When silent, match=false.")
+            f"For EACH item, match=true only when the {doc_label} explicitly "
+            "discusses that element. When silent, match=false."
+            + (" For match=true include a verbatim evidence_quote." if full else ""))
         output_schema = (
             '"checklist_results": {\n'
-            '    "<item>": {"analysis": "...", "match": true|false},\n'
+            '    "<item>": {"analysis": "...", ' + evidence_field + '"match": true|false},\n'
             '    ...all items...\n  }')
 
     prompt = f"""INVENTION: {invention_summary}
@@ -1239,7 +1254,7 @@ async def evaluate_single_document_text(
 CRITERIA ({len(checklist)} items):
 {cl_text}
 
-PRIOR ART "{prior_art_title}" ({prior_art_type}) — abstract/snippet only:
+PRIOR ART "{prior_art_title}" ({prior_art_type}) — {doc_label}:
 <document>
 {prior_art_text}
 </document>
@@ -1260,7 +1275,7 @@ JSON output:
             result = json.loads(m.group())
             result["title"] = prior_art_title
             result["match_type"] = prior_art_type
-            result["source"] = "abstract"
+            result["source"] = "full_text" if full else "abstract"
             if use_ssr:
                 _backfill_match_from_score(result)
             return result
