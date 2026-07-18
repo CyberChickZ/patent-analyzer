@@ -108,3 +108,57 @@ def load_app(app: str) -> dict:
 def examiner_features(app_data: dict) -> list[str]:
     bd = (app_data.get("breakdown") or {}).get("breakdown") or []
     return [f.get("feature", "").strip() for f in bd if len(f.get("feature", "").strip()) > 15]
+
+
+_RANGE = re.compile(r"^\[?0*(\d+)\]?(?:\s*(?:-|to)\s*\[?0*(\d+)\]?)?$")
+
+
+def _expand_numbers(numbers) -> set[int]:
+    out = set()
+    for n in numbers or []:
+        if isinstance(n, int):
+            out.add(n)
+            continue
+        m = _RANGE.match(str(n).strip())
+        if not m:
+            continue
+        a, b = int(m.group(1)), int(m.group(2) or m.group(1))
+        out.update(range(a, b + 1))
+    return out
+
+
+def disclosed_features(app_data: dict, doc_label: str = "D1") -> list[dict]:
+    """Examiner features the cited document discloses, with paragraph indices
+    (1-based, matching cited_patent.description order) when the examiner
+    pointed at paragraphs. Features with no reference to doc_label are
+    excluded — they carry no coverage signal."""
+    bd = (app_data.get("breakdown") or {}).get("breakdown") or []
+    out = []
+    for f in bd:
+        feat = f.get("feature", "").strip()
+        if len(feat) <= 15:
+            continue
+        refs = [r for r in (f.get("prior_art_references") or []) if r.get("document") == doc_label]
+        if not refs:
+            continue
+        paras = set()
+        for r in refs:
+            loc = r.get("location") or {}
+            if loc.get("reference_type") == "paragraph":
+                paras |= _expand_numbers(loc.get("numbers"))
+        out.append({"feature": feat, "paragraphs": sorted(paras)})
+    return out
+
+
+def format_cited(patent: dict) -> str:
+    """Render the cited prior art as numbered paragraphs (same shape FiNE
+    feeds its models), so quote locations can be mapped back to indices."""
+    parts = [f"# Title\n{patent.get('title') or 'N/A'}", f"# Abstract\n{patent.get('abstract') or 'N/A'}", "# Description"]
+    for i, p in enumerate(patent.get("description") or []):
+        p = p or ""
+        if not re.match(r"^\[\d+\]", p):
+            p = f"[{i + 1:04d}] {p}"
+        parts.append(p)
+    parts.append("# Claims")
+    parts += [c for c in (patent.get("claims") or []) if c]
+    return "\n".join(parts)
