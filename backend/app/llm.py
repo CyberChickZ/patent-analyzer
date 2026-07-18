@@ -1185,6 +1185,7 @@ JSON output:
             result = json.loads(m.group())
             result["title"] = prior_art_title
             result["match_type"] = prior_art_type
+            result["keys_unaligned"] = _align_checklist_keys(result, checklist)
             if use_ssr:
                 _backfill_match_from_score(result)
             return result
@@ -1199,6 +1200,37 @@ def _backfill_match_from_score(result: dict):
     for v in result.get("checklist_results", {}).values():
         if isinstance(v, dict) and "score" in v and "match" not in v:
             v["match"] = v["score"] >= 2
+
+
+def _align_checklist_keys(result: dict, checklist: list) -> int:
+    """Re-key checklist_results onto the exact criterion strings the reducer
+    looks up. Models return the numbered label ("3", "3.") or a trimmed /
+    paraphrased criterion; unmatched keys silently score 0 downstream.
+    Returns the number of keys that could not be aligned."""
+    cr = result.get("checklist_results")
+    if not isinstance(cr, dict) or not checklist:
+        return 0
+    crits = [c.get("criterion", "") if isinstance(c, dict) else str(c) for c in checklist]
+    norm = {re.sub(r"\W+", " ", c.lower()).strip(): c for c in crits}
+    aligned, unmatched = {}, 0
+    for k, v in cr.items():
+        key = str(k).strip()
+        m = re.match(r"^(\d+)\.?$", key)
+        if m and 1 <= int(m.group(1)) <= len(crits):
+            aligned[crits[int(m.group(1)) - 1]] = v
+            continue
+        if key in crits:
+            aligned[key] = v
+            continue
+        nk = re.sub(r"\W+", " ", key.lower()).strip()
+        hit = norm.get(nk) or next((c for n, c in norm.items() if nk[:40] and (nk[:40] in n or n[:40] in nk)), None)
+        if hit:
+            aligned[hit] = v
+        else:
+            aligned[key] = v
+            unmatched += 1
+    result["checklist_results"] = aligned
+    return unmatched
 
 
 async def evaluate_single_document_text(
@@ -1276,6 +1308,7 @@ JSON output:
             result["title"] = prior_art_title
             result["match_type"] = prior_art_type
             result["source"] = "full_text" if full else "abstract"
+            result["keys_unaligned"] = _align_checklist_keys(result, checklist)
             if use_ssr:
                 _backfill_match_from_score(result)
             return result
