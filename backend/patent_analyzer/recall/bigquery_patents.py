@@ -159,3 +159,64 @@ async def search_by_limitations(
             deduped.append(c)
 
     return deduped, "; ".join(errors) if errors else None
+
+
+async def fetch_by_pub_nums(pub_nums: list[str]) -> dict[str, dict]:
+    """Full text for known publication numbers from patents-public-data.
+
+    Accepts any spelling ('US9075557B2', 'US-9075557-B2'); keys of the
+    returned dict are the normalized no-separator form. Point lookup on
+    publication_number is cheap (clustered column), unlike LIKE scans.
+    """
+    import asyncio
+    import re
+    from google.cloud import bigquery
+
+    norm = {re.sub(r"[\s\-/,.]", "", p.upper()): p for p in pub_nums if p}
+    if not norm:
+        return {}
+
+    def _bq_form(p: str) -> str:
+        m = re.match(r"^([A-Z]{2})(\d+)([A-Z]\d?)?$", p)
+        if not m:
+            return p
+        cc, digits, kind = m.group(1), m.group(2), m.group(3) or ""
+        # BigQuery spells US pre-grant numbers year+6 digits (US-2012287933-A1),
+        # USPTO/FiNE spell them year+7 with a leading zero (US20120287933A1)
+        if cc == "US" and len(digits) == 11 and digits[4] == "0":
+            digits = digits[:4] + digits[5:]
+        return f"{cc}-{digits}-{kind}".rstrip("-")
+
+    def _canon(p: str) -> str:
+        p = re.sub(r"[\s\-]", "", p.upper())
+        m = re.match(r"^US(\d{10})([A-Z]\d?)?$", p)
+        if m and m.group(1)[:2] in ("19", "20"):
+            return f"US{m.group(1)[:4]}0{m.group(1)[4:]}{m.group(2) or ''}"
+        return p
+
+    wanted = [_bq_form(p) for p in norm]
+    sql = """
+    SELECT publication_number,
+           title_localized[SAFE_OFFSET(0)].text AS title,
+           abstract_localized[SAFE_OFFSET(0)].text AS abstract,
+           claims_localized[SAFE_OFFSET(0)].text AS claims_text,
+           description_localized[SAFE_OFFSET(0)].text AS description_text,
+           priority_date, publication_date, family_id
+    FROM `patents-public-data.patents.publications`
+    WHERE publication_number IN UNNEST(@pubs)
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ArrayQueryParameter("pubs", "STRING", wanted)])
+    client = bigquery.Client(project=GC_PROJECT)
+    rows = await asyncio.to_thread(lambda: list(client.query(sql, job_config=job_config).result()))
+    out = {}
+    for r in rows:
+        key = _canon(r.publication_number)
+        out[key] = {
+            "publication_number": key,
+            "title": r.title or "", "abstract": r.abstract or "",
+            "claims_text": r.claims_text or "", "description_text": r.description_text or "",
+            "priority_date": str(r.priority_date or ""), "publication_date": str(r.publication_date or ""),
+            "family_id": r.family_id or "",
+        }
+    return out
