@@ -58,9 +58,16 @@ async def search_node(state: GraphState) -> dict:
 
     recall_query_short = _short_query()
 
-    # SerpAPI throttling
+    # SerpAPI throttling + per-job budget (free tier is 250 searches/month)
     serpapi_lock = asyncio.Semaphore(1)
     SERPAPI_COOLDOWN = 1.5
+    serpapi_budget = {"left": int(os.environ.get("SERPAPI_MAX_CALLS_PER_JOB", "4"))}
+
+    def _serpapi_take() -> bool:
+        if serpapi_budget["left"] <= 0:
+            return False
+        serpapi_budget["left"] -= 1
+        return True
 
     async def _serpapi_throttled_patent(q: str):
         async with serpapi_lock:
@@ -74,20 +81,53 @@ async def search_node(state: GraphState) -> dict:
             await asyncio.sleep(SERPAPI_COOLDOWN)
             return res
 
-    async def run_serpapi_patents():
+    patent_queries = [q for g in queries.get("groups", [])
+                      for q in (g.get("patent_queries") or [])[:2]]
+    gp_failed: list[str] = []
+    gp_done = asyncio.Event()
+
+    async def run_google_patents():
+        """Direct Google Patents XHR (free). Queries it cannot serve (blocked
+        or errored) are handed to the SerpAPI channel via gp_failed."""
+        from patent_analyzer.recall import google_patents as ch_gp
         out, errs = [], []
-        for group in queries.get("groups", []):
-            for q in (group.get("patent_queries") or [])[:2]:
-                cands, err = await _serpapi_throttled_patent(q)
-                if err:
-                    errs.append({"query": q, "error": err})
+        try:
+            for q in patent_queries:
+                if ch_gp.is_blocked():
+                    errs.append({"query": q, "error": "google_patents: blocked"})
+                    gp_failed.append(q)
+                    continue
+                cands, err = await ch_gp.search(q, num=20)
+                if err or not cands:
+                    errs.append({"query": q, "error": err or "no results"})
+                    gp_failed.append(q)
                 out.extend(cands)
+        finally:
+            gp_done.set()
+        return out, errs
+
+    async def run_serpapi_patents():
+        """SerpAPI patents, budgeted; spends calls only on queries the direct
+        channel could not serve."""
+        await gp_done.wait()
+        out, errs = [], []
+        for q in gp_failed:
+            if not _serpapi_take():
+                errs.append({"query": q, "error": "serpapi budget exhausted"})
+                return out, errs
+            cands, err = await _serpapi_throttled_patent(q)
+            if err:
+                errs.append({"query": q, "error": err})
+            out.extend(cands)
         return out, errs
 
     async def run_serpapi_scholar():
         out, errs = [], []
         for group in queries.get("groups", []):
             for q in (group.get("paper_queries") or [])[:2]:
+                if not _serpapi_take():
+                    errs.append({"query": q, "error": "serpapi budget exhausted"})
+                    return out, errs
                 cands, err = await _serpapi_throttled_scholar(q)
                 if err:
                     errs.append({"query": q, "error": err})
@@ -122,8 +162,9 @@ async def search_node(state: GraphState) -> dict:
             _event("channel_crashed", f"bigquery_patents CRASH: {exc}")
             return [], [{"query": "crash", "error": f"{type(exc).__name__}: {exc}"}]
 
-    # Launch all channels in parallel (6 channels)
+    # Launch all channels in parallel (7 channels)
     channel_specs = [
+        ("google_patents", run_google_patents),
         ("serpapi_patents", run_serpapi_patents),
         ("serpapi_scholar", run_serpapi_scholar),
         ("semantic_scholar", run_semantic_scholar),
