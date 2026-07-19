@@ -104,3 +104,28 @@ splitter has a measurable target to beat now.
 
 Planned next: an LLM-based splitter mode for extraction_eval; wiring the
 feature-level passage annotations into an evidence-mapping eval.
+
+## Coverage eval (product question 2, evaluator ceiling)
+
+`evals/coverage_eval.py`: give the evaluator the examiner-cited prior art
+D1 (oracle retrieval) and ask whether it covers the features the examiner
+marked as disclosed — with a verbatim quote that `quote_verify` can locate
+in D1. `para_hit` = share of verified quotes that land in the paragraph
+the examiner cited.
+
+2026-09-17, 20 apps / 98 examiner-disclosed features, Gemini 2.5 Pro:
+
+| checklist / doc_mode | cov_raw | cov_verified | para_hit | key_match |
+|----------------------|--------:|-------------:|---------:|----------:|
+| oracle / full_text   | .837    | **.673**     | .465     | .949 |
+| oracle / abstract    | .908    | (no quotes)  | –        | 1.000 |
+| regex  / full_text   | .806    | **.684**     | .429     | 1.000 |
+| regex  / abstract    | .735    | (no quotes)  | –        | .955 |
+
+Reading: without a quote requirement the model claims 91% coverage; once
+every positive must carry a quote that exists in the document, 67% survive.
+The 16-24 pt gap is the fabrication rate the old pipeline reported as
+"coverage". Verified quotes land in the examiner's paragraph 43-47% of the
+time — the rest are real quotes from elsewhere in D1, which is fine for
+coverage but not for pinpoint citation. `key_match` < 1 was the
+numbered-key bug fixed by `_align_checklist_keys`.
