@@ -1,8 +1,14 @@
-"""Google Patents direct channel — no SerpAPI, no browser.
+"""Google Patents direct channel — no SerpAPI, no browser. Opportunistic.
 
 patents.google.com serves its own search through an XHR endpoint that
 returns JSON, and each patent page is static HTML with numbered
 description paragraphs. Both are fetched with plain HTTP.
+
+Measured 2026-09-17: ~10 requests in a few minutes from one IP triggered
+Google's "Sorry" soft-block on both endpoints. So: 2 concurrent, >=1s gap,
+and a 15-minute circuit breaker once a block is seen. Full text should be
+fetched from BigQuery (bigquery_patents.fetch_by_pub_nums); the page
+scraper is a fallback only.
 """
 
 from __future__ import annotations
@@ -20,11 +26,49 @@ _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 _XHR = "https://patents.google.com/xhr/query"
 _PAGE = "https://patents.google.com/patent/{pub}/en"
-_sem = asyncio.Semaphore(3)
+_sem = asyncio.Semaphore(2)
+_MIN_GAP = 1.0
+_last_call = 0.0
+_BLOCK_COOLDOWN = 15 * 60
+_blocked_until = 0.0
 
 
 def _clean(s: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", " ", s or "")).replace("\xa0", " ").strip()
+
+
+async def _get(url: str, timeout: float = 30) -> httpx.Response | None:
+    """Polite GET: 2 concurrent, >=1s apart, retry 429/5xx with backoff."""
+    global _last_call, _blocked_until
+    now = asyncio.get_event_loop().time()
+    if now < _blocked_until:
+        return None
+    async with _sem:
+        for attempt in range(3):
+            wait = _MIN_GAP - (asyncio.get_event_loop().time() - _last_call)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            _last_call = asyncio.get_event_loop().time()
+            try:
+                async with httpx.AsyncClient(headers={"User-Agent": _UA}, timeout=timeout,
+                                             follow_redirects=True) as client:
+                    r = await client.get(url)
+            except httpx.HTTPError:
+                r = None
+            if r is not None and r.status_code == 200:
+                return r
+            if r is not None and r.status_code not in (429, 500, 502, 503):
+                return r
+            if r is not None and "<title>Sorry" in r.text[:400]:
+                # Google abuse page: this IP is soft-blocked; back off for a while
+                _blocked_until = asyncio.get_event_loop().time() + _BLOCK_COOLDOWN
+                return None
+            await asyncio.sleep(2.0 * (attempt + 1))
+    return r
+
+
+def is_blocked() -> bool:
+    return asyncio.get_event_loop().time() < _blocked_until
 
 
 async def search(query: str, num: int = 20, page: int = 0,
@@ -38,12 +82,9 @@ async def search(query: str, num: int = 20, page: int = 0,
         inner += f"&before={before}"
     # the site encodes the inner query string exactly once; ':' must survive
     url = f"{_XHR}?url={urllib.parse.quote(inner, safe='')}&exp="
-    async with _sem:
-        try:
-            async with httpx.AsyncClient(headers={"User-Agent": _UA}, timeout=20) as client:
-                r = await client.get(url)
-        except httpx.HTTPError as exc:
-            return [], f"google_patents: {type(exc).__name__}: {exc}"
+    r = await _get(url, timeout=20)
+    if r is None:
+        return [], "google_patents: blocked or unreachable"
     if r.status_code != 200:
         return [], f"google_patents: HTTP {r.status_code}"
     try:
@@ -72,3 +113,40 @@ async def search(query: str, num: int = 20, page: int = 0,
                                         "assignee": _clean(p.get("assignee", ""))}},
             ))
     return out, None
+
+
+_ABSTRACT = re.compile(r'<section itemprop="abstract".*?<div[^>]*class="abstract"[^>]*>(.*?)</div>', re.S)
+_PARA = re.compile(r'<div id="p-\d+" num="(\d+)" class="description-paragraph">(.*?)</div>', re.S)
+_TITLE = re.compile(r'<meta name="DC.title" content="([^"]*)"')
+_PDF = re.compile(r'<meta name="citation_pdf_url" content="([^"]+)"')
+_PRIORITY = re.compile(r'<time itemprop="priorityDate" datetime="([^"]+)"')
+
+
+async def fetch_patent(pub_num: str) -> dict | None:
+    """Full text of one patent from its static page: title, abstract,
+    claims (list), description paragraphs (list, with the office's own
+    [nnnn] numbering), pdf_url, priority_date."""
+    pub = re.sub(r"[\s\-]", "", pub_num or "")
+    if not pub:
+        return None
+    r = await _get(_PAGE.format(pub=pub))
+    if r is None or r.status_code != 200:
+        return None
+    h = r.text
+    claims = []
+    for block in re.findall(r'<div id="CLM-\d+"[^>]*>.*?(?=<div id="CLM-\d+"|</section>)', h, re.S):
+        txt = _clean(block)
+        if txt:
+            claims.append(txt)
+    paras = [f"[{n}] {_clean(t)}" for n, t in _PARA.findall(h) if _clean(t)]
+    m_abs = _ABSTRACT.search(h)
+    m_t, m_pdf, m_pri = _TITLE.search(h), _PDF.search(h), _PRIORITY.search(h)
+    return {
+        "publication_number": pub,
+        "title": html.unescape(m_t.group(1)).strip() if m_t else "",
+        "abstract": _clean(m_abs.group(1)) if m_abs else "",
+        "claims": claims,
+        "description": paras,
+        "pdf_url": m_pdf.group(1) if m_pdf else "",
+        "priority_date": m_pri.group(1) if m_pri else "",
+    }
