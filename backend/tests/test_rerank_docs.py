@@ -90,3 +90,18 @@ def test_fallback_to_minilm_with_fusion(monkeypatch):
 
 def test_empty_documents():
     assert rerank_docs("anything", []) == []
+
+
+def test_batches_respect_token_budget():
+    from patent_analyzer.encoders import _batch_by_budget, _REQUEST_CHAR_BUDGET
+    texts = ["x" * 8000] * 30
+    groups = _batch_by_budget(list(range(30)), texts, max_items=100)
+    assert all(sum(min(len(texts[i]), 8000) for i in g) <= _REQUEST_CHAR_BUDGET for g in groups)
+    assert sorted(i for g in groups for i in g) == list(range(30))
+    assert len(groups) == 5
+
+
+def test_batches_respect_max_items():
+    from patent_analyzer.encoders import _batch_by_budget
+    groups = _batch_by_budget(list(range(250)), ["a"] * 250, max_items=100)
+    assert [len(g) for g in groups] == [100, 100, 50]
