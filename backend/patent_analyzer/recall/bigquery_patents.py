@@ -259,3 +259,57 @@ async def fetch_by_pub_nums(pub_nums: list[str], with_claims: bool = True) -> di
             "family_id": r.family_id or "",
         }
     return out
+
+
+async def search_abstracts(
+    query_terms: list[str],
+    limit: int = 30,
+    before: str | None = None,
+    country_codes: list[str] | None = None,
+    max_gib: float = 5.0,
+) -> tuple[list[Candidate], str | None]:
+    """Keyword recall over amie_patents.abstracts (title+abstract, 2000+)
+    through its SEARCH index: only matching rows are scanned, so a query
+    costs MBs rather than the 327 GiB the old LIKE scan cost.
+
+    query_terms: OR-ed within, i.e. any term hits. Pass phrases in quotes.
+    before: 'YYYYMMDD' priority-date cutoff (leakage control in evals).
+    """
+    import asyncio
+    from google.cloud import bigquery
+
+    terms = [t.strip() for t in query_terms if t and len(t.strip()) > 2][:8]
+    if not terms:
+        return [], "no search terms"
+    search_expr = " OR ".join(f"`{t}`" if " " in t else t for t in terms)
+    filters = ["SEARCH((title, abstract), @q)"]
+    params = [bigquery.ScalarQueryParameter("q", "STRING", search_expr),
+              bigquery.ScalarQueryParameter("lim", "INT64", limit)]
+    if before:
+        filters.append("priority_date < @before")
+        params.append(bigquery.ScalarQueryParameter("before", "INT64", int(before)))
+    if country_codes:
+        filters.append("country_code IN UNNEST(@cc)")
+        params.append(bigquery.ArrayQueryParameter("cc", "STRING", country_codes))
+    sql = f"""
+    SELECT publication_number, country_code, family_id, priority_date, title, abstract
+    FROM `{GC_PROJECT}.amie_patents.abstracts`
+    WHERE {' AND '.join(filters)}
+    LIMIT @lim"""
+    try:
+        client = bigquery.Client(project=GC_PROJECT)
+        rows = await asyncio.to_thread(guarded_query, client, sql, params, max_gib)
+    except Exception as e:
+        return [], f"BigQuery error: {type(e).__name__}: {e}"
+    out = []
+    for r in rows:
+        pub = r.publication_number.replace("-", "")
+        out.append(Candidate(
+            title=r.title or pub, snippet=(r.abstract or "")[:500], abstract=r.abstract or "",
+            match_type="Patent", pub_num=pub, source_score=1.0, sources=["bigquery_patents"],
+            year=str(r.priority_date or "")[:4],
+            url=f"https://patents.google.com/patent/{pub}/en",
+            raw={"bigquery": {"publication_number": pub, "family_id": r.family_id,
+                              "country_code": r.country_code, "priority_date": str(r.priority_date or "")}},
+        ))
+    return out, None
