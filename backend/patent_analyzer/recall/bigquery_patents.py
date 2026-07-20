@@ -9,6 +9,34 @@ from patent_analyzer.recall.pool import Candidate
 
 
 GC_PROJECT = os.getenv("GC_PROJECT", "aime-hello-world")
+BQ_MAX_GIB = float(os.getenv("BQ_MAX_GIB_PER_QUERY", "20"))
+
+
+class BQBudgetExceeded(RuntimeError):
+    pass
+
+
+def guarded_query(client, sql: str, params=None, max_gib: float | None = None):
+    """Dry-run first; refuse anything above max_gib and hard-cap billing.
+
+    patents-public-data.patents.publications is not clustered: a point lookup
+    that touches claims/description scans 300-1400 GiB (measured 2026-09-17,
+    4.4 TiB billed in one evening). Every query in this module goes through
+    here so a single call can never burn the monthly free tier again.
+    """
+    from google.cloud import bigquery
+    cap = max_gib if max_gib is not None else BQ_MAX_GIB
+    params = params or []
+    dry = client.query(sql, job_config=bigquery.QueryJobConfig(
+        dry_run=True, use_query_cache=False, query_parameters=params))
+    gib = dry.total_bytes_processed / 2 ** 30
+    if gib > cap:
+        raise BQBudgetExceeded(f"query would scan {gib:.1f} GiB > cap {cap} GiB")
+    job = client.query(sql, job_config=bigquery.QueryJobConfig(
+        query_parameters=params, maximum_bytes_billed=int(cap * 2 ** 30) + 2 ** 20))
+    rows = list(job.result())
+    print(f"[BQ] scanned {gib:.2f} GiB, {len(rows)} rows")
+    return rows
 
 
 async def search_claims(
@@ -60,9 +88,7 @@ async def search_claims(
 
     try:
         client = bigquery.Client(project=GC_PROJECT)
-        result = await asyncio.to_thread(
-            lambda: list(client.query(sql).result())
-        )
+        result = await asyncio.to_thread(guarded_query, client, sql)
         if not result and len(keywords) > 2:
             sql_fallback = f"""
             SELECT
@@ -80,9 +106,7 @@ async def search_claims(
               AND {_build_like(keywords[:2])}
             LIMIT {limit}
             """
-            result = await asyncio.to_thread(
-                lambda: list(client.query(sql_fallback).result())
-            )
+            result = await asyncio.to_thread(guarded_query, client, sql_fallback)
     except Exception as e:
         return [], f"BigQuery error: {type(e).__name__}: {e}"
 
@@ -208,7 +232,7 @@ async def fetch_by_pub_nums(pub_nums: list[str]) -> dict[str, dict]:
     job_config = bigquery.QueryJobConfig(
         query_parameters=[bigquery.ArrayQueryParameter("pubs", "STRING", wanted)])
     client = bigquery.Client(project=GC_PROJECT)
-    rows = await asyncio.to_thread(lambda: list(client.query(sql, job_config=job_config).result()))
+    rows = await asyncio.to_thread(guarded_query, client, sql, job_config.query_parameters)
     out = {}
     for r in rows:
         key = _canon(r.publication_number)
