@@ -68,11 +68,29 @@ def embed_vertex(texts: list[str], task_type: str, model: str | None = None,
                 np.save(key(texts[i]), v)
                 out[i] = v
 
-        groups = [missing[i:i + batch] for i in range(0, len(missing), batch)]
+        groups = _batch_by_budget(missing, texts, batch)
         with ThreadPoolExecutor(max_workers=8) as ex:
             list(ex.map(embed_batch, groups))
 
     return np.stack([out[i] for i in range(len(texts))])
+
+
+# Vertex rejects requests above 20k tokens total; ~4 chars/token with headroom.
+_REQUEST_CHAR_BUDGET = 60_000
+
+
+def _batch_by_budget(idxs: list[int], texts: list[str], max_items: int) -> list[list[int]]:
+    groups, cur, used = [], [], 0
+    for i in idxs:
+        n = min(len(texts[i]), 8000)
+        if cur and (len(cur) >= max_items or used + n > _REQUEST_CHAR_BUDGET):
+            groups.append(cur)
+            cur, used = [], 0
+        cur.append(i)
+        used += n
+    if cur:
+        groups.append(cur)
+    return groups
 
 
 def embed_docs(texts: list[str], model: str | None = None) -> np.ndarray:
