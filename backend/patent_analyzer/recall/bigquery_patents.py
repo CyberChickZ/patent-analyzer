@@ -185,12 +185,17 @@ async def search_by_limitations(
     return deduped, "; ".join(errors) if errors else None
 
 
-async def fetch_by_pub_nums(pub_nums: list[str]) -> dict[str, dict]:
-    """Full text for known publication numbers from patents-public-data.
+async def fetch_by_pub_nums(pub_nums: list[str], with_claims: bool = True) -> dict[str, dict]:
+    """Full text for known publication numbers from our own bucketed copy.
+
+    amie_patents.pubs / amie_patents.claims are hash-partitioned on the
+    publication number (4000 buckets) and clustered, so a lookup scans
+    ~50 MiB instead of the 300-1400 GiB a point lookup costs on the public
+    table (measured 2026-09-17). Buckets are computed by a zero-byte query
+    so client and table agree on FARM_FINGERPRINT.
 
     Accepts any spelling ('US9075557B2', 'US-9075557-B2'); keys of the
-    returned dict are the normalized no-separator form. Point lookup on
-    publication_number is cheap (clustered column), unlike LIKE scans.
+    returned dict are the canonical no-separator form.
     """
     import asyncio
     import re
@@ -219,27 +224,37 @@ async def fetch_by_pub_nums(pub_nums: list[str]) -> dict[str, dict]:
         return p
 
     wanted = [_bq_form(p) for p in norm]
-    sql = """
-    SELECT publication_number,
-           title_localized[SAFE_OFFSET(0)].text AS title,
-           abstract_localized[SAFE_OFFSET(0)].text AS abstract,
-           claims_localized[SAFE_OFFSET(0)].text AS claims_text,
-           description_localized[SAFE_OFFSET(0)].text AS description_text,
-           priority_date, publication_date, family_id
-    FROM `patents-public-data.patents.publications`
-    WHERE publication_number IN UNNEST(@pubs)
-    """
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[bigquery.ArrayQueryParameter("pubs", "STRING", wanted)])
     client = bigquery.Client(project=GC_PROJECT)
-    rows = await asyncio.to_thread(guarded_query, client, sql, job_config.query_parameters)
+    pubs_param = bigquery.ArrayQueryParameter("pubs", "STRING", wanted)
+
+    def _run():
+        b = client.query(
+            "SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(p)), 4000) FROM UNNEST(@pubs) p) AS b",
+            job_config=bigquery.QueryJobConfig(query_parameters=[pubs_param]))
+        buckets = list(b.result())[0].b
+        params = [pubs_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
+        meta = guarded_query(client, f"""
+            SELECT publication_number, family_id, country_code, priority_date, publication_date,
+                   title, abstract, cpc_codes
+            FROM `{GC_PROJECT}.amie_patents.pubs`
+            WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params, max_gib=2)
+        claims = {}
+        if with_claims:
+            for r in guarded_query(client, f"""
+                SELECT publication_number, claims_text FROM `{GC_PROJECT}.amie_patents.claims`
+                WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params, max_gib=2):
+                claims[r.publication_number] = r.claims_text or ""
+        return meta, claims
+
+    meta, claims = await asyncio.to_thread(_run)
     out = {}
-    for r in rows:
+    for r in meta:
         key = _canon(r.publication_number)
         out[key] = {
             "publication_number": key,
             "title": r.title or "", "abstract": r.abstract or "",
-            "claims_text": r.claims_text or "", "description_text": r.description_text or "",
+            "claims_text": claims.get(r.publication_number, ""),
+            "cpc_codes": list(r.cpc_codes or []), "country_code": r.country_code or "",
             "priority_date": str(r.priority_date or ""), "publication_date": str(r.publication_date or ""),
             "family_id": r.family_id or "",
         }
