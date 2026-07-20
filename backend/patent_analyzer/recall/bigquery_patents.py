@@ -44,7 +44,9 @@ def capped_query(client, sql: str, params=None, max_gib: float = 10.0):
     (reports the full column size), so skip it and rely on the hard billing
     cap — a job that exceeds maximum_bytes_billed fails and is not billed.
     Measured 2026-09-18 on amie_patents.abstracts: OR-of-terms 0.11 GiB,
-    phrase OR 1.8 GiB, phrase AND 86 GiB."""
+    phrase OR 1.8 GiB, phrase AND 86 GiB. The cap itself is checked against
+    the pre-execution estimate, so it must sit above the (inflated) estimate
+    (~90 GiB for common tokens) — worst case ~$0.6 if the index is bypassed."""
     from google.cloud import bigquery
     job = client.query(sql, job_config=bigquery.QueryJobConfig(
         query_parameters=params or [], maximum_bytes_billed=int(max_gib * 2 ** 30)))
@@ -280,7 +282,7 @@ async def search_abstracts(
     limit: int = 30,
     before: str | None = None,
     country_codes: list[str] | None = None,
-    max_gib: float = 10.0,
+    max_gib: float = 100.0,
 ) -> tuple[list[Candidate], str | None]:
     """Keyword recall over amie_patents.abstracts (title+abstract, 2000+)
     through its SEARCH index: only matching rows are scanned, so a query
