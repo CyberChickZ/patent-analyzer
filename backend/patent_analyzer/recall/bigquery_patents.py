@@ -329,3 +329,53 @@ async def search_abstracts(
                               "country_code": r.country_code, "priority_date": str(r.priority_date or "")}},
         ))
     return out, None
+
+
+async def fetch_citations(pub_nums: list[str]) -> dict[str, dict]:
+    """Citation lists for known publications from amie_patents.citations
+    (bucketed like pubs). Each entry: {family_id, priority_date,
+    cits: [{cited, type, category, npl_text}]}.
+    category: 'SEA' = search report / examiner, 'APP' = applicant (IDS),
+    'PRS' = ?, 'UNKNOWN'; multi-valued as 'APP,APP'. type: EP-style
+    relevance 'X' / 'Y' / 'A' (mostly empty for US). Verified 2026-09-18 on
+    bucket 7: category APP 52.6k / SEA 17.5k / PRS 14.2k.
+    Keys are canonical no-separator numbers."""
+    import asyncio
+    import re
+    from google.cloud import bigquery
+
+    norm = {re.sub(r"[\s\-/,.]", "", p.upper()): p for p in pub_nums if p}
+    if not norm:
+        return {}
+
+    def _bq_form(p: str) -> str:
+        m = re.match(r"^([A-Z]{2})(\d+)([A-Z]\d?)?$", p)
+        if not m:
+            return p
+        cc, digits, kind = m.group(1), m.group(2), m.group(3) or ""
+        if cc == "US" and len(digits) == 11 and digits[4] == "0":
+            digits = digits[:4] + digits[5:]
+        return f"{cc}-{digits}-{kind}".rstrip("-")
+
+    wanted = [_bq_form(p) for p in norm]
+    client = bigquery.Client(project=GC_PROJECT)
+    pubs_param = bigquery.ArrayQueryParameter("pubs", "STRING", wanted)
+
+    def _run():
+        b = client.query("SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(p)), 4000) FROM UNNEST(@pubs) p) AS b",
+                         job_config=bigquery.QueryJobConfig(query_parameters=[pubs_param]))
+        buckets = list(b.result())[0].b
+        params = [pubs_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
+        return guarded_query(client, f"""
+            SELECT publication_number, family_id, priority_date, cits
+            FROM `{GC_PROJECT}.amie_patents.citations`
+            WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params, max_gib=2)
+
+    rows = await asyncio.to_thread(_run)
+    out = {}
+    for r in rows:
+        key = re.sub(r"[\s\-]", "", r.publication_number.upper())
+        out[key] = {"family_id": r.family_id, "priority_date": str(r.priority_date or ""),
+                    "cits": [{"cited": (x.get("cited") or "").replace("-", ""), "type": x.get("type") or "",
+                              "category": x.get("category") or "", "npl_text": x.get("npl_text") or ""} for x in r.cits]}
+    return out
