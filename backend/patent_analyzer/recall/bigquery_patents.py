@@ -39,6 +39,20 @@ def guarded_query(client, sql: str, params=None, max_gib: float | None = None):
     return rows
 
 
+def capped_query(client, sql: str, params=None, max_gib: float = 10.0):
+    """For SEARCH-indexed queries: the dry-run estimate ignores index pruning
+    (reports the full column size), so skip it and rely on the hard billing
+    cap — a job that exceeds maximum_bytes_billed fails and is not billed.
+    Measured 2026-09-18 on amie_patents.abstracts: OR-of-terms 0.11 GiB,
+    phrase OR 1.8 GiB, phrase AND 86 GiB."""
+    from google.cloud import bigquery
+    job = client.query(sql, job_config=bigquery.QueryJobConfig(
+        query_parameters=params or [], maximum_bytes_billed=int(max_gib * 2 ** 30)))
+    rows = list(job.result())
+    print(f"[BQ] billed {job.total_bytes_billed / 2 ** 30:.2f} GiB, {len(rows)} rows")
+    return rows
+
+
 async def search_claims(
     query_text: str,
     limit: int = 30,
@@ -266,7 +280,7 @@ async def search_abstracts(
     limit: int = 30,
     before: str | None = None,
     country_codes: list[str] | None = None,
-    max_gib: float = 5.0,
+    max_gib: float = 10.0,
 ) -> tuple[list[Candidate], str | None]:
     """Keyword recall over amie_patents.abstracts (title+abstract, 2000+)
     through its SEARCH index: only matching rows are scanned, so a query
@@ -298,7 +312,7 @@ async def search_abstracts(
     LIMIT @lim"""
     try:
         client = bigquery.Client(project=GC_PROJECT)
-        rows = await asyncio.to_thread(guarded_query, client, sql, params, max_gib)
+        rows = await asyncio.to_thread(capped_query, client, sql, params, max_gib)
     except Exception as e:
         return [], f"BigQuery error: {type(e).__name__}: {e}"
     out = []
