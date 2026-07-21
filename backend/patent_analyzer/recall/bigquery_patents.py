@@ -379,3 +379,32 @@ async def fetch_citations(pub_nums: list[str]) -> dict[str, dict]:
                     "cits": [{"cited": (x.get("cited") or "").replace("-", ""), "type": x.get("type") or "",
                               "category": x.get("category") or "", "npl_text": x.get("npl_text") or ""} for x in r.cits]}
     return out
+
+
+async def fetch_families(family_ids: list[str]) -> dict[str, list[dict]]:
+    """family_id -> [{publication_number, country_code, priority_date,
+    publication_date}] from amie_patents.families (bucketed on family_id)."""
+    import asyncio
+    from google.cloud import bigquery
+
+    fams = sorted({f for f in family_ids if f})
+    if not fams:
+        return {}
+    client = bigquery.Client(project=GC_PROJECT)
+    fam_param = bigquery.ArrayQueryParameter("fams", "STRING", fams)
+
+    def _run():
+        b = client.query("SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(f)), 4000) FROM UNNEST(@fams) f) AS b",
+                         job_config=bigquery.QueryJobConfig(query_parameters=[fam_param]))
+        buckets = list(b.result())[0].b
+        params = [fam_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
+        return guarded_query(client, f"""
+            SELECT family_id, members FROM `{GC_PROJECT}.amie_patents.families`
+            WHERE bucket IN UNNEST(@buckets) AND family_id IN UNNEST(@fams)""", params, max_gib=2)
+
+    rows = await asyncio.to_thread(_run)
+    return {r.family_id: [{"publication_number": m.get("publication_number", "").replace("-", ""),
+                           "country_code": m.get("country_code", ""),
+                           "priority_date": str(m.get("priority_date") or ""),
+                           "publication_date": str(m.get("publication_date") or "")} for m in r.members]
+            for r in rows}
