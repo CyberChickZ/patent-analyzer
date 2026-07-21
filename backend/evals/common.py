@@ -127,27 +127,64 @@ def _expand_numbers(numbers) -> set[int]:
     return out
 
 
-def disclosed_features(app_data: dict, doc_label: str = "D1") -> list[dict]:
-    """Examiner features the cited document discloses, with paragraph indices
-    (1-based, matching cited_patent.description order) when the examiner
-    pointed at paragraphs. Features with no reference to doc_label are
-    excluded — they carry no coverage signal."""
+def cited_doc_label(app_data: dict) -> str | None:
+    """Label (D1/D2/...) of the prior-art document that is cited_patent.
+
+    Matched by normalized publication number against prior_art_documents;
+    falls back to the only patent-type document when identifiers disagree.
+    """
+    bd = app_data.get("breakdown") or {}
+    docs = bd.get("prior_art_documents") or []
+    pub = norm_pub((app_data.get("cited_patent") or {}).get("publication_number") or "")
+    if pub:
+        for d in docs:
+            if d.get("identifier") and norm_pub(d["identifier"]) == pub:
+                return d.get("label")
+    patents = [d for d in docs if d.get("type") == "patent"]
+    if len(patents) == 1:
+        return patents[0].get("label")
+    return None
+
+
+_GOLD_KINDS = ("paragraph", "claim", "abstract")
+
+
+def _gold_passages(refs: list[dict]) -> set[tuple[str, int | None]]:
+    out = set()
+    for r in refs:
+        loc = r.get("location") or {}
+        kind = loc.get("reference_type")
+        if kind == "abstract":
+            out.add(("abstract", None))
+        elif kind in ("paragraph", "claim"):
+            out |= {(kind, n) for n in _expand_numbers(loc.get("numbers"))}
+    return out
+
+
+def breakdown_features(app_data: dict, doc_label: str | None = None) -> list[dict]:
+    """Every examiner feature (FiNE alignment universe) with the gold passage
+    set (kind, number) the examiner cited in the cited document. Passages
+    follow FiNE's locate_cited_passages: only paragraph / claim / abstract
+    references count; figure/page/component/section/other are dropped, so a
+    feature cited only by figure has an empty set."""
     bd = (app_data.get("breakdown") or {}).get("breakdown") or []
+    label = doc_label or cited_doc_label(app_data)
     out = []
     for f in bd:
-        feat = f.get("feature", "").strip()
-        if len(feat) <= 15:
-            continue
-        refs = [r for r in (f.get("prior_art_references") or []) if r.get("document") == doc_label]
-        if not refs:
-            continue
-        paras = set()
-        for r in refs:
-            loc = r.get("location") or {}
-            if loc.get("reference_type") == "paragraph":
-                paras |= _expand_numbers(loc.get("numbers"))
-        out.append({"feature": feat, "paragraphs": sorted(paras)})
+        refs = [r for r in (f.get("prior_art_references") or []) if r.get("document") == label]
+        passages = _gold_passages(refs)
+        out.append({"feature": f.get("feature", "").strip(), "passages": passages,
+                    "paragraphs": sorted(n for k, n in passages if k == "paragraph")})
     return out
+
+
+def disclosed_features(app_data: dict, doc_label: str | None = None) -> list[dict]:
+    """Examiner features the cited document discloses (gold for coverage):
+    features with at least one paragraph/claim/abstract reference to the
+    cited document. `passages` is the FiNE gold set of (kind, number);
+    `paragraphs` keeps the 1-based paragraph indices for the legacy metric."""
+    return [f for f in breakdown_features(app_data, doc_label)
+            if len(f["feature"]) > 15 and f["passages"]]
 
 
 def format_cited(patent: dict) -> str:
