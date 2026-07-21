@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "evals"))
 
-from common import norm_pub, render_doc
+from common import breakdown_features, disclosed_features, norm_pub, render_doc
 
 
 def test_norm_pub_fine_spelling():
@@ -45,3 +45,47 @@ def test_render_doc_with_claims_appends_claims():
     txt = render_doc(doc, with_claims=True)
     assert "Abstract" not in txt
     assert txt.rstrip().endswith("Claims:\n1. A thing.")
+
+
+def _app(label_docs, features, pub="US20080025717A1"):
+    return {"cited_patent": {"publication_number": pub},
+            "breakdown": {"prior_art_documents": label_docs, "breakdown": features}}
+
+
+def _ref(doc, kind, numbers=None):
+    return {"document": doc, "location": {"reference_type": kind, "numbers": numbers}}
+
+
+def test_disclosed_features_uses_label_matching_cited_patent():
+    app = _app(
+        [{"label": "D1", "type": "paper", "identifier": "10.1000/xyz"},
+         {"label": "D2", "type": "patent", "identifier": "US 2008/025717 A1"}],
+        [{"feature": "a widget with a rotating shaft", "prior_art_references": [_ref("D2", "paragraph", ["[0012]"])]},
+         {"feature": "a housing made of aluminium alloy", "prior_art_references": [_ref("D1", "paragraph", [3])]}])
+    gold = disclosed_features(app)
+    assert [g["feature"] for g in gold] == ["a widget with a rotating shaft"]
+    assert gold[0]["passages"] == {("paragraph", 12)}
+    assert gold[0]["paragraphs"] == [12]
+
+
+def test_disclosed_features_drops_figure_only_references():
+    app = _app(
+        [{"label": "D1", "type": "patent", "identifier": "US20080025717A1"}],
+        [{"feature": "a sensor mounted on the bracket", "prior_art_references": [_ref("D1", "figure", [2])]},
+         {"feature": "a controller coupled to the sensor",
+          "prior_art_references": [_ref("D1", "component", ["10"]), _ref("D1", "paragraph", ["0005-0006"])]}])
+    gold = disclosed_features(app)
+    assert [g["feature"] for g in gold] == ["a controller coupled to the sensor"]
+    assert gold[0]["passages"] == {("paragraph", 5), ("paragraph", 6)}
+    universe = breakdown_features(app)
+    assert len(universe) == 2 and universe[0]["passages"] == set()
+
+
+def test_disclosed_features_parses_claim_and_abstract_references():
+    app = _app(
+        [{"label": "D1", "type": "patent", "identifier": None}],
+        [{"feature": "a valve controlled by the processor",
+          "prior_art_references": [_ref("D1", "claim", [1, "3"]), _ref("D1", "abstract")]}])
+    gold = disclosed_features(app)
+    assert gold[0]["passages"] == {("claim", 1), ("claim", 3), ("abstract", None)}
+    assert gold[0]["paragraphs"] == []
