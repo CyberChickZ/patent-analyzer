@@ -253,12 +253,14 @@ async def fetch_by_pub_nums(pub_nums: list[str], with_claims: bool = True) -> di
             SELECT publication_number, family_id, country_code, priority_date, publication_date,
                    title, abstract, cpc_codes
             FROM `{GC_PROJECT}.amie_patents.pubs`
-            WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params, max_gib=2)
+            WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params,
+            max_gib=2 + 0.03 * len(wanted))
         claims = {}
         if with_claims:
             for r in guarded_query(client, f"""
                 SELECT publication_number, claims_text FROM `{GC_PROJECT}.amie_patents.claims`
-                WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params, max_gib=2):
+                WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params,
+                max_gib=2 + 0.03 * len(wanted)):
                 claims[r.publication_number] = r.claims_text or ""
         return meta, claims
 
@@ -369,7 +371,8 @@ async def fetch_citations(pub_nums: list[str]) -> dict[str, dict]:
         return guarded_query(client, f"""
             SELECT publication_number, family_id, priority_date, cits
             FROM `{GC_PROJECT}.amie_patents.citations`
-            WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params, max_gib=2)
+            WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params,
+            max_gib=2 + 0.01 * len(wanted))  # ~7 MiB per touched partition
 
     rows = await asyncio.to_thread(_run)
     out = {}
@@ -400,7 +403,8 @@ async def fetch_families(family_ids: list[str]) -> dict[str, list[dict]]:
         params = [fam_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
         return guarded_query(client, f"""
             SELECT family_id, members FROM `{GC_PROJECT}.amie_patents.families`
-            WHERE bucket IN UNNEST(@buckets) AND family_id IN UNNEST(@fams)""", params, max_gib=2)
+            WHERE bucket IN UNNEST(@buckets) AND family_id IN UNNEST(@fams)""", params,
+            max_gib=2 + 0.01 * len(fams))
 
     rows = await asyncio.to_thread(_run)
     return {r.family_id: [{"publication_number": m.get("publication_number", "").replace("-", ""),
