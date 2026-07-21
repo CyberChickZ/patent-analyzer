@@ -328,6 +328,8 @@ async def search_node(state: GraphState) -> dict:
             "total_unique": len(all_docs),
             "active_channels": len([v for v in channel_results.values() if v]),
             "downloaded": download_count,
+            "pool": [{"pub_num": d.get("pub_num", ""), "sources": d.get("sources", []),
+                      "match_type": d.get("match_type", "")} for d in all_docs],
         },
         "events": events,
         "phase_results": {"phase3": {
