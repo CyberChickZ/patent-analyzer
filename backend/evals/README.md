@@ -129,3 +129,42 @@ The 16-24 pt gap is the fabrication rate the old pipeline reported as
 time — the rest are real quotes from elsewhere in D1, which is fine for
 coverage but not for pinpoint citation. `key_match` < 1 was the
 numbered-key bug fixed by `_align_checklist_keys`.
+
+### FiNE Table 2 protocol (`--protocol fine`, 2026-09-17)
+
+Same evaluator, scored the way FiNE-Patents scores passage retrieval
+(`evaluate.py::compute_retrieval_metrics`): each predicted feature is
+mapped to the examiner feature with the highest edit similarity
+(many-to-one, no threshold); each verified quote is located to a passage
+`(kind, number)` in the cited patent (paragraph / claim / abstract); per
+examiner feature with gold passages, tp/fp/fn over passage ids give
+P/R/F1, averaged within the sample and then over samples. Claim-level =
+union of predicted vs union of gold passages. Gold now follows FiNE's
+`locate_cited_passages`: paragraph/claim/abstract references only, on the
+prior-art label whose identifier matches `cited_patent.publication_number`
+(figure/page/component-only features carry no gold passage).
+
+Sample: fixture `stage` ids restricted to FiNE test split with a rejected
+version (`--sample test`, 58 apps, 227 examiner features with gold
+passages). `--baseline rougeL|embed` reproduce FiNE's non-LLM baselines
+(top-5, tau 0.4 / 0.5; embed uses text-embedding-005 instead of
+Qwen3-Embedding-8B) without any Gemini call.
+
+| variant (58 apps)        | feat P | feat R | feat F1 | claim P | claim R | claim F1 |
+|--------------------------|-------:|-------:|--------:|--------:|--------:|---------:|
+| baseline rougeL          | .057 | .134 | .069 | .124 | .258 | .148 |
+| baseline embed (te005)   | .071 | .212 | .096 | .113 | .326 | .155 |
+| regex  / full_text (LLM) | .158 | .104 | .113 | .278 | .185 | .195 |
+| oracle / full_text (LLM) | .184 | .111 | .129 | .323 | .148 | .190 |
+| FiNE Table 2 Rouge-L (N=932)      | .046 | .119 | .057 | .113 | .255 | .136 |
+| FiNE Table 2 Qwen3-8B-Emb (N=932) | .083 | .227 | .106 | .137 | .357 | .174 |
+| FiNE Table 2 Hier. Qwen3.5-397B   | .170 | .391 | .209 | .207 | .568 | .274 |
+
+Our re-implementation of the two baselines lands within ~1 pt of the
+paper on this 58-app subset, so the protocol port is sound. The evaluator
+sits between the embedding baseline and FiNE's LLM rows on feature F1:
+precision is on par with their LLMs (.16-.18 vs .13-.17) but recall is a
+third of theirs (.10-.11 vs .27-.39) because we emit exactly one verified
+quote per feature while FiNE models return several passages per feature.
+Not directly comparable: subset (58 vs 932), Gemini 2.5 Pro vs Qwen,
+single-quote output, and the regex splitter vs `re.split("[;\n]")`.
