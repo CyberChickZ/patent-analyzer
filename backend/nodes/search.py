@@ -152,20 +152,17 @@ async def search_node(state: GraphState) -> dict:
         import traceback
         try:
             from patent_analyzer.recall.bigquery_patents import search_abstracts
-            out, errs = [], []
-            groups = queries.get("groups", []) or [{"patent_queries": [recall_query_short]}]
-            for group in groups[:4]:
-                terms = []
-                for q in (group.get("patent_queries") or [])[:2]:
-                    terms += re.findall(r'"([^"]{3,60})"', q) or [w for w in q.split() if len(w) > 3][:4]
-                terms = list(dict.fromkeys(t.strip().rstrip("*") for t in terms if t.strip()))[:8]
-                if not terms:
-                    continue
-                cands, err = await search_abstracts(terms, limit=40)
-                if err:
-                    errs.append({"query": " | ".join(terms), "error": err})
-                out.extend(cands)
-            return out, errs
+            # one ranked call per job (each call reads 20-90 GiB); terms = the
+            # anchor phrases across groups, longest first as a rarity proxy
+            terms = []
+            for group in queries.get("groups", []):
+                for q in (group.get("patent_queries") or [])[:1]:
+                    terms += re.findall(r'"([^"]{3,60})"', q)
+            terms = sorted(dict.fromkeys(t.strip().rstrip("*") for t in terms if t.strip()), key=len, reverse=True)[:10]
+            if not terms:
+                terms = [w for w in recall_query_short.split() if len(w) > 4][:8]
+            cands, err = await search_abstracts(terms, limit=40, before=state.get("date_cutoff"))
+            return cands, ([{"query": " | ".join(terms), "error": err}] if err else [])
         except Exception as exc:
             tb = traceback.format_exc()
             print(f"[BQ CRASH] {exc}\n{tb}")

@@ -284,36 +284,51 @@ async def search_abstracts(
     limit: int = 30,
     before: str | None = None,
     country_codes: list[str] | None = None,
-    max_gib: float = 100.0,
+    max_gib: float = 30.0,
 ) -> tuple[list[Candidate], str | None]:
-    """Keyword recall over amie_patents.abstracts (title+abstract, 2000+)
-    through its SEARCH index: only matching rows are scanned, so a query
-    costs MBs rather than the 327 GiB the old LIKE scan cost.
+    """Ranked keyword recall over amie_patents.abstracts (title+abstract, 2000+).
 
-    query_terms: OR-ed within, i.e. any term hits. Pass phrases in quotes.
-    before: 'YYYYMMDD' priority-date cutoff (leakage control in evals).
+    SEARCH() is only a filter and its index prunes at block level, so any
+    query with ORDER BY reads 20-90 GiB (measured 2026-09-18; common tokens
+    sit in every block). This function therefore (a) ranks matched rows by
+    number of query terms present so results are usable, (b) prunes by
+    priority-year partition when `before` is given, (c) is meant to be
+    called ONCE per job. It is a paid channel (~$0.1-0.5/call), kept for
+    evals; a local BM25 index is the free replacement.
     """
     import asyncio
+    import re
     from google.cloud import bigquery
 
-    terms = [t.strip() for t in query_terms if t and len(t.strip()) > 2][:8]
-    if not terms:
+    words = []
+    for t in query_terms:
+        for w in re.findall(r"[a-z][a-z0-9\-]{3,}", (t or "").lower()):
+            if w not in words:
+                words.append(w)
+    words = words[:10]
+    if not words:
         return [], "no search terms"
-    search_expr = " OR ".join(f"`{t}`" if " " in t else t for t in terms)
+    search_expr = " OR ".join(words)
+    score = " + ".join(f"IF(REGEXP_CONTAINS(t, r'\\b{re.escape(w)}'), 1, 0)" for w in words)
     filters = ["SEARCH((title, abstract), @q)"]
     params = [bigquery.ScalarQueryParameter("q", "STRING", search_expr),
               bigquery.ScalarQueryParameter("lim", "INT64", limit)]
     if before:
+        filters.append("prio_year <= @py")
         filters.append("priority_date < @before")
+        params.append(bigquery.ScalarQueryParameter("py", "INT64", int(str(before)[:4])))
         params.append(bigquery.ScalarQueryParameter("before", "INT64", int(before)))
     if country_codes:
         filters.append("country_code IN UNNEST(@cc)")
         params.append(bigquery.ArrayQueryParameter("cc", "STRING", country_codes))
     sql = f"""
-    SELECT publication_number, country_code, family_id, priority_date, title, abstract
-    FROM `{GC_PROJECT}.amie_patents.abstracts`
-    WHERE {' AND '.join(filters)}
-    LIMIT @lim"""
+    WITH m AS (
+      SELECT publication_number, country_code, family_id, priority_date, title, abstract,
+             LOWER(CONCAT(title, ' ', abstract)) AS t
+      FROM `{GC_PROJECT}.amie_patents.abstracts`
+      WHERE {' AND '.join(filters)})
+    SELECT publication_number, country_code, family_id, priority_date, title, abstract, ({score}) AS score
+    FROM m ORDER BY score DESC LIMIT @lim"""
     try:
         client = bigquery.Client(project=GC_PROJECT)
         rows = await asyncio.to_thread(capped_query, client, sql, params, max_gib)
@@ -324,91 +339,11 @@ async def search_abstracts(
         pub = r.publication_number.replace("-", "")
         out.append(Candidate(
             title=r.title or pub, snippet=(r.abstract or "")[:500], abstract=r.abstract or "",
-            match_type="Patent", pub_num=pub, source_score=1.0, sources=["bigquery_patents"],
+            match_type="Patent", pub_num=pub, source_score=float(r.score), sources=["bigquery_patents"],
             year=str(r.priority_date or "")[:4],
             url=f"https://patents.google.com/patent/{pub}/en",
             raw={"bigquery": {"publication_number": pub, "family_id": r.family_id,
-                              "country_code": r.country_code, "priority_date": str(r.priority_date or "")}},
+                              "country_code": r.country_code, "priority_date": str(r.priority_date or ""),
+                              "term_hits": int(r.score)}},
         ))
     return out, None
-
-
-async def fetch_citations(pub_nums: list[str]) -> dict[str, dict]:
-    """Citation lists for known publications from amie_patents.citations
-    (bucketed like pubs). Each entry: {family_id, priority_date,
-    cits: [{cited, type, category, npl_text}]}.
-    category: 'SEA' = search report / examiner, 'APP' = applicant (IDS),
-    'PRS' = ?, 'UNKNOWN'; multi-valued as 'APP,APP'. type: EP-style
-    relevance 'X' / 'Y' / 'A' (mostly empty for US). Verified 2026-09-18 on
-    bucket 7: category APP 52.6k / SEA 17.5k / PRS 14.2k.
-    Keys are canonical no-separator numbers."""
-    import asyncio
-    import re
-    from google.cloud import bigquery
-
-    norm = {re.sub(r"[\s\-/,.]", "", p.upper()): p for p in pub_nums if p}
-    if not norm:
-        return {}
-
-    def _bq_form(p: str) -> str:
-        m = re.match(r"^([A-Z]{2})(\d+)([A-Z]\d?)?$", p)
-        if not m:
-            return p
-        cc, digits, kind = m.group(1), m.group(2), m.group(3) or ""
-        if cc == "US" and len(digits) == 11 and digits[4] == "0":
-            digits = digits[:4] + digits[5:]
-        return f"{cc}-{digits}-{kind}".rstrip("-")
-
-    wanted = [_bq_form(p) for p in norm]
-    client = bigquery.Client(project=GC_PROJECT)
-    pubs_param = bigquery.ArrayQueryParameter("pubs", "STRING", wanted)
-
-    def _run():
-        b = client.query("SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(p)), 4000) FROM UNNEST(@pubs) p) AS b",
-                         job_config=bigquery.QueryJobConfig(query_parameters=[pubs_param]))
-        buckets = list(b.result())[0].b
-        params = [pubs_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
-        return guarded_query(client, f"""
-            SELECT publication_number, family_id, priority_date, cits
-            FROM `{GC_PROJECT}.amie_patents.citations`
-            WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params,
-            max_gib=2 + 0.01 * len(wanted))  # ~7 MiB per touched partition
-
-    rows = await asyncio.to_thread(_run)
-    out = {}
-    for r in rows:
-        key = re.sub(r"[\s\-]", "", r.publication_number.upper())
-        out[key] = {"family_id": r.family_id, "priority_date": str(r.priority_date or ""),
-                    "cits": [{"cited": (x.get("cited") or "").replace("-", ""), "type": x.get("type") or "",
-                              "category": x.get("category") or "", "npl_text": x.get("npl_text") or ""} for x in r.cits]}
-    return out
-
-
-async def fetch_families(family_ids: list[str]) -> dict[str, list[dict]]:
-    """family_id -> [{publication_number, country_code, priority_date,
-    publication_date}] from amie_patents.families (bucketed on family_id)."""
-    import asyncio
-    from google.cloud import bigquery
-
-    fams = sorted({f for f in family_ids if f})
-    if not fams:
-        return {}
-    client = bigquery.Client(project=GC_PROJECT)
-    fam_param = bigquery.ArrayQueryParameter("fams", "STRING", fams)
-
-    def _run():
-        b = client.query("SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(f)), 4000) FROM UNNEST(@fams) f) AS b",
-                         job_config=bigquery.QueryJobConfig(query_parameters=[fam_param]))
-        buckets = list(b.result())[0].b
-        params = [fam_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
-        return guarded_query(client, f"""
-            SELECT family_id, members FROM `{GC_PROJECT}.amie_patents.families`
-            WHERE bucket IN UNNEST(@buckets) AND family_id IN UNNEST(@fams)""", params,
-            max_gib=2 + 0.01 * len(fams))
-
-    rows = await asyncio.to_thread(_run)
-    return {r.family_id: [{"publication_number": m.get("publication_number", "").replace("-", ""),
-                           "country_code": m.get("country_code", ""),
-                           "priority_date": str(m.get("priority_date") or ""),
-                           "publication_date": str(m.get("publication_date") or "")} for m in r.members]
-            for r in rows}
