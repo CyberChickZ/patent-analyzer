@@ -192,7 +192,11 @@ async def search_node(state: GraphState) -> dict:
             continue
         cands, errs = result
         channel_results[name] = cands
-        _event("channel_done", f"{name}: {len(cands)} raw candidates")
+        _event("channel_done", f"{name}: {len(cands)} raw candidates",
+               {"channel": name, "n": len(cands), "errors": errs[:5]})
+        for e in errs:
+            if any(k in str(e.get("error", "")) for k in ("blocked", "429", "budget", "Sorry")):
+                _event("channel_limited", f"{name}: {str(e.get('error', ''))[:120]}")
 
     # Pool & dedupe
     pooled = recall_pool.pool_and_dedupe(channel_results)
