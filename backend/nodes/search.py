@@ -147,15 +147,25 @@ async def search_node(state: GraphState) -> dict:
         return cands, ([{"query": recall_query_short, "error": err}] if err else [])
 
     async def run_bigquery_patents():
+        """SEARCH-indexed recall over our own abstracts table, one call per
+        query group using its quoted terms (the old LIKE scan cost 327 GiB)."""
         import traceback
         try:
-            from patent_analyzer.recall.bigquery_patents import search_claims
-            bq_query = summary[:400] if summary else recall_query_short
-            print(f"[BQ] query={bq_query[:100]}")
-            _event("info", f"BigQuery query: {bq_query[:100]}...")
-            cands, err = await search_claims(bq_query, limit=30)
-            print(f"[BQ] result: {len(cands)} cands, err={err}")
-            return cands, ([{"query": bq_query[:200], "error": err}] if err else [])
+            from patent_analyzer.recall.bigquery_patents import search_abstracts
+            out, errs = [], []
+            groups = queries.get("groups", []) or [{"patent_queries": [recall_query_short]}]
+            for group in groups[:4]:
+                terms = []
+                for q in (group.get("patent_queries") or [])[:2]:
+                    terms += re.findall(r'"([^"]{3,60})"', q) or [w for w in q.split() if len(w) > 3][:4]
+                terms = list(dict.fromkeys(t.strip().rstrip("*") for t in terms if t.strip()))[:8]
+                if not terms:
+                    continue
+                cands, err = await search_abstracts(terms, limit=40)
+                if err:
+                    errs.append({"query": " | ".join(terms), "error": err})
+                out.extend(cands)
+            return out, errs
         except Exception as exc:
             tb = traceback.format_exc()
             print(f"[BQ CRASH] {exc}\n{tb}")
