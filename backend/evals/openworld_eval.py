@@ -26,9 +26,56 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-PAP2PAT = Path("/tmp/pap2pat/Pap2Pat/data")
-RUN_DIR = Path(__file__).parent.parent / "eval_data" / "runs" / "e4"
+import os
+
+PAP2PAT = Path(os.environ.get("PAP2PAT_DIR", "/tmp/pap2pat/Pap2Pat/data"))
+RUN_DIR = Path(os.environ.get("E4_RUN_DIR", str(Path(__file__).parent.parent / "eval_data" / "runs" / "e4")))
 GOLD_PATH = RUN_DIR / "gold.json"
+
+
+def gcs_bundle_pull(uri: str):
+    """Download bundle.tar.gz (gold.json + papers/<pair_id>/paper.json +
+    metadata.json) from GCS into RUN_DIR / PAP2PAT for a Cloud Run Job."""
+    import tarfile
+    from google.cloud import storage
+    bucket, _, key = uri[5:].partition("/")
+    local = Path("/tmp/e4_bundle.tar.gz")
+    storage.Client().bucket(bucket).blob(key).download_to_filename(local)
+    with tarfile.open(local) as tf:
+        tf.extractall("/tmp/e4_bundle")
+    global PAP2PAT
+    PAP2PAT = Path("/tmp/e4_bundle/papers")
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    src = Path("/tmp/e4_bundle/gold.json")
+    if src.exists() and not GOLD_PATH.exists():
+        GOLD_PATH.write_text(src.read_text())
+
+
+def gcs_bundle_push(uri: str):
+    """Build the bundle from local Pap2Pat data + cached gold and upload."""
+    import tarfile
+    from google.cloud import storage
+    gold = json.loads(GOLD_PATH.read_text())
+    local = Path("/tmp/e4_bundle_out.tar.gz")
+    with tarfile.open(local, "w:gz") as tf:
+        tf.add(GOLD_PATH, arcname="gold.json")
+        tf.add(PAP2PAT / "metadata.json", arcname="papers/metadata.json")
+        for g in gold.values():
+            tf.add(PAP2PAT / g["pair_id"] / "paper.json", arcname=f"papers/{g['pair_id']}/paper.json")
+    bucket, _, key = uri[5:].partition("/")
+    storage.Client().bucket(bucket).blob(key).upload_from_filename(local)
+    print(f"bundle uploaded: {uri} ({local.stat().st_size // 1024} KB)")
+
+
+def gcs_results_push(uri_prefix: str):
+    from google.cloud import storage
+    bucket, _, prefix = uri_prefix[5:].partition("/")
+    b = storage.Client().bucket(bucket)
+    n = 0
+    for f in RUN_DIR.glob("*.json"):
+        b.blob(f"{prefix.rstrip('/')}/{f.name}").upload_from_filename(f)
+        n += 1
+    print(f"uploaded {n} result files to {uri_prefix}")
 
 
 def _canon(p: str) -> str:
@@ -172,7 +219,9 @@ async def run_pipeline_one(key: str, g: dict) -> dict:
                           "sources": d.get("sources", []), "title": d.get("title", "")[:80]}
                          for d in p3.get("ranked_candidates", [])]
         rec["pool"] = (p3.get("search_stats") or {}).get("pool", [])
-        rec["events"] = [e.get("message", "") for e in p3.get("events", []) if e.get("kind") in ("channel_done", "channel_crashed")]
+        rec["events"] = [e.get("message", "") for e in p3.get("events", [])
+                         if e.get("kind") in ("channel_done", "channel_crashed", "channel_limited")]
+        rec["channel_stats"] = [e.get("payload") for e in p3.get("events", []) if e.get("kind") == "channel_done"]
     out_path.write_text(json.dumps(rec, ensure_ascii=False, indent=1))
     return rec
 
@@ -230,8 +279,16 @@ async def main():
     ap.add_argument("--stage", default="gold", choices=["gold", "pipeline"])
     ap.add_argument("--limit", type=int, default=10, help="pipeline: how many gold-bearing queries to run")
     ap.add_argument("--concurrency", type=int, default=2)
+    ap.add_argument("--bundle", default=os.environ.get("E4_BUNDLE", ""), help="gs:// bundle to pull (Cloud Run Job)")
+    ap.add_argument("--push-bundle", default="", help="gs:// path to build+upload the bundle to")
+    ap.add_argument("--upload", default=os.environ.get("E4_UPLOAD", ""), help="gs:// prefix to upload results to")
     args = ap.parse_args()
     RUN_DIR.mkdir(parents=True, exist_ok=True)
+    if args.bundle:
+        gcs_bundle_pull(args.bundle)
+    if args.push_bundle:
+        gcs_bundle_push(args.push_bundle)
+        return
 
     pairs = sample_pairs(args.n)
     if GOLD_PATH.exists():
@@ -263,6 +320,8 @@ async def main():
     (RUN_DIR / "pipeline_result.json").write_text(json.dumps(res, indent=1))
     print(json.dumps({k: v for k, v in res.items() if k != "per_query"}, indent=1))
     print(llm_cache.summary())
+    if args.upload:
+        gcs_results_push(args.upload)
 
 
 if __name__ == "__main__":
