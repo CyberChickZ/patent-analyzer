@@ -16,10 +16,13 @@ Protocols:
             threshold), every verified quote is located to a passage
             (kind, number) and feature-level / claim-level passage P/R/F1
             are computed exactly as evaluate.py::compute_retrieval_metrics.
+Baselines (no Gemini): --baseline rougeL | embed reproduce FiNE's
+RougeSimilarity / EmbeddingSimilarity (top-5, tau 0.4 / 0.5).
 
 Usage:
     python3 evals/coverage_eval.py --limit 20 --checklist oracle --doc_mode full_text
     python3 evals/coverage_eval.py --protocol fine --checklist both --limit 100
+    python3 evals/coverage_eval.py --baseline rougeL --limit 100
 """
 
 import argparse
@@ -39,6 +42,8 @@ from common import breakdown_features, disclosed_features, format_cited, load_ap
 
 RUN_DIR = Path(__file__).parent.parent / "eval_data" / "runs" / "s4"
 _PARA = re.compile(r"\[(\d{4})\]")
+BASELINE_TAU = {"rougeL": 0.4, "embed": 0.5}
+BASELINE_TOPK = 5
 
 
 def select_apps(limit: int, sample: str = "test") -> list[str]:
@@ -243,6 +248,36 @@ def llm_predictions(result: dict, app_data: dict) -> list[tuple[str, set]]:
     return preds
 
 
+def fine_split_features(claim: str) -> list[str]:
+    """FiNE baselines' feature segmentation (baselines.py)."""
+    return [f.strip() for f in re.split(r"[;\n]", claim) if len(f) > 20]
+
+
+def baseline_predictions(app_data: dict, kind: str) -> list[tuple[str, set]]:
+    """FiNE RougeSimilarity / EmbeddingSimilarity: score every feature against
+    every passage, keep top-5 passages, mark those >= tau as disclosed."""
+    claim1 = (app_data["rejected_patent"].get("claims") or [""])[0] or ""
+    features = fine_split_features(claim1)
+    refs = cited_passages(app_data["cited_patent"])
+    passages = [t for _, _, t in refs]
+    if not features or not passages:
+        return [(f, set()) for f in features]
+    if kind == "rougeL":
+        from rouge_score import rouge_scorer
+        rs = rouge_scorer.RougeScorer(["rougeL"])
+        scores = np.array([[rs.score(prediction=p, target=f)["rougeL"].recall for p in passages]
+                           for f in features])
+    else:
+        from extraction_eval import embed
+        scores = embed(features) @ embed(passages).T
+    tau = BASELINE_TAU[kind]
+    preds = []
+    for i, f in enumerate(features):
+        top = np.argsort(-scores[i], kind="stable")[:BASELINE_TOPK]
+        preds.append((f, {(refs[j][0], refs[j][1]) for j in top if scores[i, j] >= tau}))
+    return preds
+
+
 def aggregate_fine(rows: list[dict]) -> dict:
     feat = [r["feature"] for r in rows if r["feature"] is not None]
     claim = [r["claim"] for r in rows if r["claim"] is not None]
@@ -270,6 +305,7 @@ async def main():
     ap.add_argument("--checklist", default="oracle", choices=["oracle", "regex", "both"])
     ap.add_argument("--doc_mode", default="full_text", choices=["full_text", "abstract", "both"])
     ap.add_argument("--protocol", default="legacy", choices=["legacy", "fine"])
+    ap.add_argument("--baseline", default=None, choices=["rougeL", "embed"])
     ap.add_argument("--sample", default="test", choices=["test", "stage"])
     ap.add_argument("--concurrency", type=int, default=3)
     ap.add_argument("--summary", default=None, help="append aggregate rows to this json")
@@ -278,7 +314,13 @@ async def main():
     apps = select_apps(args.limit, args.sample)
     summary = {}
 
-    if True:
+    if args.baseline:
+        rows = [fine_score(baseline_predictions(load_app(a), args.baseline), load_app(a)) for a in apps]
+        agg = aggregate_fine(rows)
+        _print_fine_header()
+        _print_fine_row(f"baseline/{args.baseline}", agg)
+        summary[f"baseline/{args.baseline}"] = agg
+    else:
         import llm_cache
         llm_cache.install()
         kinds = ["oracle", "regex"] if args.checklist == "both" else [args.checklist]
