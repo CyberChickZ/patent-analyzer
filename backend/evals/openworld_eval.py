@@ -142,10 +142,94 @@ def print_sanity(gold: dict):
     print("random baseline R@100 ≈ 100 / 94.6M ≈ 0.000001 (family-level ~0.000001)")
 
 
+async def run_pipeline_one(key: str, g: dict) -> dict:
+    """IDCA -> SSR -> search_node on the rendered paper; cached per query."""
+    from graph.ssr_subgraph import build_ssr_subgraph
+    from nodes.idca import idca_node
+    from nodes.search import search_node
+
+    out_path = RUN_DIR / f"{key}_search.json"
+    if out_path.exists():
+        return json.loads(out_path.read_text())
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
+        f.write(render_paper(g["pair_id"]))
+        tmp = f.name
+    p1 = await idca_node({"input_local_path": tmp})
+    rec = {"key": key, "status_determination": p1.get("status_determination"), "input_mode": p1.get("input_mode"),
+           "summary": p1.get("summary", ""), "delegation": {}, "ranked": [], "pool": [], "events": []}
+    if p1.get("status_determination") == "Present":
+        p2 = await build_ssr_subgraph().ainvoke({
+            "summary": p1["summary"], "fields_map": p1.get("fields_map", []),
+            "cpc_subclass": p1.get("cpc_subclass", ""), "personas": p1.get("personas", {})})
+        rec["delegation"] = p2.get("delegation", {})
+        p3 = await search_node({
+            "summary": p1["summary"], "source_title": p1.get("source_title", ""),
+            "source_arxiv_id": p1.get("source_arxiv_id", ""), "source_doi": p1.get("source_doi", ""),
+            "delegation": rec["delegation"], "checklist": p2.get("checklist", []),
+            "date_cutoff": g.get("priority_date") or None,
+            "output_dir": str(RUN_DIR / "pdf" / key)})
+        rec["ranked"] = [{"pub_num": d.get("pub_num", ""), "match_type": d.get("match_type", ""),
+                          "sources": d.get("sources", []), "title": d.get("title", "")[:80]}
+                         for d in p3.get("ranked_candidates", [])]
+        rec["pool"] = (p3.get("search_stats") or {}).get("pool", [])
+        rec["events"] = [e.get("message", "") for e in p3.get("events", []) if e.get("kind") in ("channel_done", "channel_crashed")]
+    out_path.write_text(json.dumps(rec, ensure_ascii=False, indent=1))
+    return rec
+
+
+async def score_pipeline(gold: dict, recs: dict) -> dict:
+    """Family-level recall over the ranked list and the pool; channel attribution."""
+    from patent_analyzer.recall.bigquery_patents import fetch_by_pub_nums
+
+    cand_pubs = sorted({_canon(d["pub_num"]) for r in recs.values() for d in r["pool"]
+                        if d.get("match_type") == "Patent" and d.get("pub_num")})
+    cand_meta = await fetch_by_pub_nums(cand_pubs, with_claims=False) if cand_pubs else {}
+    fam_of = {k: v["family_id"] for k, v in cand_meta.items()}
+
+    per_q, chan_unique, chan_hits = [], {}, {}
+    for key, g in gold.items():
+        gf = set(g["gold_families"])
+        if not gf:
+            continue
+        r = recs.get(key)
+        if not r:
+            continue
+        def fams(docs):
+            return [fam_of.get(_canon(d["pub_num"]), "") for d in docs]
+        ranked_f = fams(r["ranked"])
+        pool_f = fams(r["pool"])
+        hit_at = lambda lst, k: len(gf & {f for f in lst[:k] if f})
+        pool_hit = gf & {f for f in pool_f if f}
+        for d, f in zip(r["pool"], pool_f):
+            if f in gf:
+                for src in d.get("sources", []):
+                    chan_hits[src] = chan_hits.get(src, 0) + 1
+                if len(d.get("sources", [])) == 1:
+                    chan_unique[d["sources"][0]] = chan_unique.get(d["sources"][0], 0) + 1
+        per_q.append({"key": key, "n_gold_fam": len(gf), "pool": len(r["pool"]), "ranked": len(r["ranked"]),
+                      "pool_hit": len(pool_hit), "r10": hit_at(ranked_f, 10), "r30": hit_at(ranked_f, 30),
+                      "r100_pool": len(pool_hit)})
+    n = len(per_q)
+    tot = sum(q["n_gold_fam"] for q in per_q) or 1
+    return {"queries": n, "gold_families": tot,
+            "family_recall@10": round(sum(q["r10"] for q in per_q) / tot, 4),
+            "family_recall@30": round(sum(q["r30"] for q in per_q) / tot, 4),
+            "family_recall_pool": round(sum(q["pool_hit"] for q in per_q) / tot, 4),
+            "queries_with_any_hit_ranked": sum(1 for q in per_q if q["r30"]),
+            "queries_with_any_hit_pool": sum(1 for q in per_q if q["pool_hit"]),
+            "reach_vs_ranking": {"never_retrieved": tot - sum(q["pool_hit"] for q in per_q),
+                                 "in_pool_not_top30": sum(q["pool_hit"] - q["r30"] for q in per_q),
+                                 "in_top30": sum(q["r30"] for q in per_q)},
+            "channel_hits": chan_hits, "channel_unique_hits": chan_unique,
+            "avg_pool": round(sum(q["pool"] for q in per_q) / max(n, 1), 1), "per_query": per_q}
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=50)
-    ap.add_argument("--stage", default="gold", choices=["gold"])
+    ap.add_argument("--stage", default="gold", choices=["gold", "pipeline"])
+    ap.add_argument("--limit", type=int, default=10, help="pipeline: how many gold-bearing queries to run")
+    ap.add_argument("--concurrency", type=int, default=2)
     args = ap.parse_args()
     RUN_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -156,9 +240,29 @@ async def main():
         gold = await build_gold(pairs)
         GOLD_PATH.write_text(json.dumps(gold, indent=1))
     print_sanity(gold)
-    for k, g in list(gold.items())[:5]:
-        print(f"  {k}: fam={g['family_id']} prio={g['priority_date']} members={g['n_members']} "
-              f"SEA={len(g['sea_cited'])} gold={len(g['gold'])} dropped={g['dropped']}")
+    if args.stage == "gold":
+        for k, g in list(gold.items())[:5]:
+            print(f"  {k}: fam={g['family_id']} prio={g['priority_date']} members={g['n_members']} "
+                  f"SEA={len(g['sea_cited'])} gold={len(g['gold'])} dropped={g['dropped']}")
+        return
+
+    import llm_cache
+    llm_cache.install()
+    todo = [(k, g) for k, g in gold.items() if g["gold_families"]][:args.limit]
+    sem = asyncio.Semaphore(args.concurrency)
+
+    async def one(k, g):
+        async with sem:
+            try:
+                return k, await run_pipeline_one(k, g)
+            except Exception as exc:
+                print(f"[{k}] FAILED {type(exc).__name__}: {exc}")
+                return k, None
+    recs = {k: r for k, r in await asyncio.gather(*(one(k, g) for k, g in todo)) if r}
+    res = await score_pipeline(gold, recs)
+    (RUN_DIR / "pipeline_result.json").write_text(json.dumps(res, indent=1))
+    print(json.dumps({k: v for k, v in res.items() if k != "per_query"}, indent=1))
+    print(llm_cache.summary())
 
 
 if __name__ == "__main__":
