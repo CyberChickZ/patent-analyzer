@@ -272,6 +272,91 @@ def llm_predictions(result: dict, app_data: dict) -> list[tuple[str, set]]:
     return preds
 
 
+VERIFIERS = ("locate", "dual", "both")
+
+
+def _item_quotes(item: dict) -> list[str]:
+    qs = item.get("evidence_quotes")
+    if not isinstance(qs, list):
+        qs = [item["evidence_quote"]] if item.get("evidence_quote") else []
+    return [str(q).strip() for q in qs if str(q or "").strip()]
+
+
+def _raw_positive(item: dict) -> bool:
+    sc = item.get("score")
+    if sc is None:
+        sc = 2 if item.get("match") else 0
+    return sc > 0 or bool(item.get("quote_unverified"))
+
+
+def annotate_quotes(result: dict, app_data: dict) -> dict:
+    """Run both verifiers on every quote of every raw-positive item once and
+    store per-quote checks in the item (`quote_checks`): locate_quote at 0.9
+    (found, sim) and the dual span/bigram test (ok, span, bigram), plus the
+    passage each verifier would locate the quote to. Idempotent."""
+    from patent_analyzer.quote_verify import locate_quote
+    from quote_dual import DocIndex, locate_dual, verify_quote_dual
+
+    patent = app_data["cited_patent"]
+    doc = format_cited(patent)
+    idx = DocIndex(doc)
+    refs = cited_passages(patent)
+    cr = result["checklist_results"]
+    for c in result["checklist"]:
+        item = cr.get(c["criterion"])
+        if not isinstance(item, dict) or not _raw_positive(item):
+            continue
+        quotes = _item_quotes(item)
+        checks = item.get("quote_checks")
+        if isinstance(checks, list) and len(checks) == len(quotes):
+            continue
+        checks = []
+        for q in quotes:
+            found, sim = locate_quote(q, doc)
+            ok, sr, br = verify_quote_dual(q, idx)
+            loc_strict = quote_location(q, patent)
+            loc_dual = loc_strict or (locate_dual(q, refs) if ok else None)
+            checks.append({"quote": q, "locate": found, "locate_sim": sim,
+                           "dual": ok, "span": sr, "bigram": br,
+                           "loc_strict": list(loc_strict) if loc_strict else None,
+                           "loc_dual": list(loc_dual) if loc_dual else None})
+        item["quote_checks"] = checks
+    return result
+
+
+def quote_predictions(result: dict, app_data: dict, verifier: str = "locate"
+                      ) -> tuple[list[tuple[str, set]], dict]:
+    """Per checklist item: passages of the quotes that pass `verifier`
+    (locate = locate_quote >= .9; dual = span/bigram; both = AND). Location
+    is the strict quote_location for locate/both; dual falls back to
+    locate_dual. Returns (preds, quote stats)."""
+    annotate_quotes(result, app_data)
+    cr = result["checklist_results"]
+    stats = {"items": 0, "positive": 0, "quotes": 0, "passed": 0, "located": 0, "items_with_passage": 0}
+    preds = []
+    for c in result["checklist"]:
+        stats["items"] += 1
+        item = cr.get(c["criterion"]) or {}
+        passages = set()
+        if isinstance(item, dict) and _raw_positive(item):
+            stats["positive"] += 1
+            for ch in item.get("quote_checks") or []:
+                stats["quotes"] += 1
+                passed = {"locate": ch["locate"], "dual": ch["dual"],
+                          "both": ch["locate"] and ch["dual"]}[verifier]
+                if not passed:
+                    continue
+                stats["passed"] += 1
+                loc = ch["loc_dual"] if verifier == "dual" else ch["loc_strict"]
+                if loc:
+                    stats["located"] += 1
+                    passages.add(tuple(loc))
+        if passages:
+            stats["items_with_passage"] += 1
+        preds.append((c["criterion"], passages))
+    return preds, stats
+
+
 def fine_split_features(claim: str) -> list[str]:
     """FiNE baselines' feature segmentation (baselines.py)."""
     return [f.strip() for f in re.split(r"[;\n]", claim) if len(f) > 20]
