@@ -83,7 +83,7 @@ async def evaluate_multi_quote(invention_summary: str, checklist: list, prior_ar
         m = re.search(r"\{.*\}", resp, re.DOTALL)
         if not m:
             return {"title": prior_art_title, "checklist_results": {}, "source": "multi_noparse"}
-        result = json.loads(m.group())
+        result = json.loads(m.group(), strict=False)
     except Exception as e:
         return {"title": prior_art_title, "match_type": prior_art_type, "error": str(e),
                 "checklist_results": {}, "source": "multi_failed"}
