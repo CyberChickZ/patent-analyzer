@@ -145,6 +145,30 @@ async def run_one(app: str, checklist_kind: str, doc_mode: str) -> dict:
     return result
 
 
+async def run_one_multi(app: str, checklist_kind: str) -> dict:
+    """Multi-quote variant (evals/eval_prompts.evaluate_multi_quote): up to 5
+    verbatim quotes per criterion, no in-place downgrade — verification is
+    done per quote at scoring time by quote_predictions()."""
+    from eval_prompts import evaluate_multi_quote
+
+    out_path = RUN_DIR / f"{app}_{checklist_kind}_full_text_multi.json"
+    if out_path.exists():
+        return json.loads(out_path.read_text())
+
+    data = load_app(app)
+    checklist = build_checklist(data, checklist_kind)
+    claim1 = (data["rejected_patent"].get("claims") or [""])[0]
+    doc = format_cited(data["cited_patent"])
+    res = await evaluate_multi_quote(
+        claim1, checklist, doc, data["cited_patent"].get("title") or "", "Patent")
+    result = {"app": app, "checklist_kind": checklist_kind, "doc_mode": "full_text", "quotes": "multi",
+              "checklist": checklist, "checklist_results": res.get("checklist_results", {}),
+              "source": res.get("source"), "error": res.get("error")}
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(result, ensure_ascii=False, indent=1))
+    return result
+
+
 def score(result: dict, app_data: dict) -> dict:
     """Feature-level coverage against examiner-disclosed features."""
     from extraction_eval import embed, greedy_match
