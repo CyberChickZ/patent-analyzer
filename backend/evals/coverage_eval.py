@@ -19,9 +19,16 @@ Protocols:
 Baselines (no Gemini): --baseline rougeL | embed reproduce FiNE's
 RougeSimilarity / EmbeddingSimilarity (top-5, tau 0.4 / 0.5).
 
+Quote modes (fine protocol): --quotes single (production prompt, one
+evidence_quote) or --quotes multi (evals/eval_prompts, up to 5 quotes per
+criterion); each quote is verified by locate_quote (>= .9), the dual
+span/bigram test (evals/quote_dual) or both, and located to a passage.
+
 Usage:
     python3 evals/coverage_eval.py --limit 20 --checklist oracle --doc_mode full_text
     python3 evals/coverage_eval.py --protocol fine --checklist both --limit 100
+    python3 evals/coverage_eval.py --protocol fine --checklist both --verifier dual --limit 100
+    python3 evals/coverage_eval.py --protocol fine --quotes multi --checklist both --limit 100
     python3 evals/coverage_eval.py --baseline rougeL --limit 100
 """
 
@@ -396,16 +403,36 @@ def aggregate_fine(rows: list[dict]) -> dict:
             "feature": mean3(feat), "claim": mean3(claim)}
 
 
-def _print_fine_header():
+def _print_fine_header(quotes: bool = False):
     print(f"{'variant':<22}{'n':>4}{'feats':>6}{'feat_P':>8}{'feat_R':>8}{'feat_F1':>8}"
-          f"{'claim_P':>9}{'claim_R':>9}{'claim_F1':>9}{'pred_psg':>9}")
+          f"{'claim_P':>9}{'claim_R':>9}{'claim_F1':>9}{'pred_psg':>9}"
+          + (f"{'q/item':>8}{'survive':>12}{'located':>9}" if quotes else ""))
 
 
 def _print_fine_row(name: str, agg: dict):
     fp, fr, ff = agg["feature"]
     cp, cr, cf = agg["claim"]
-    print(f"{name:<22}{agg['n']:>4}{agg['n_feat']:>6}{fp:>8.3f}{fr:>8.3f}{ff:>8.3f}"
-          f"{cp:>9.3f}{cr:>9.3f}{cf:>9.3f}{agg['n_pred_passages']:>9}")
+    line = (f"{name:<22}{agg['n']:>4}{agg['n_feat']:>6}{fp:>8.3f}{fr:>8.3f}{ff:>8.3f}"
+            f"{cp:>9.3f}{cr:>9.3f}{cf:>9.3f}{agg['n_pred_passages']:>9}")
+    q = agg.get("quotes")
+    if q:
+        line += (f"{q['quotes'] / max(q['positive'], 1):>8.2f}"
+                 f"{q['passed']:>6}/{q['quotes']:<5}{q['located']:>9}")
+    print(line)
+
+
+def score_fine_quotes(results: list[dict], verifier: str) -> dict:
+    """aggregate_fine over quote_predictions(verifier) + summed quote stats."""
+    rows, qstats = [], {}
+    for r in results:
+        data = load_app(r["app"])
+        preds, st = quote_predictions(r, data, verifier)
+        rows.append(fine_score(preds, data))
+        for k, v in st.items():
+            qstats[k] = qstats.get(k, 0) + v
+    agg = aggregate_fine(rows)
+    agg["quotes"] = qstats
+    return agg
 
 
 async def main():
@@ -416,6 +443,11 @@ async def main():
     ap.add_argument("--protocol", default="legacy", choices=["legacy", "fine"])
     ap.add_argument("--baseline", default=None, choices=["rougeL", "embed"])
     ap.add_argument("--sample", default="test", choices=["test", "stage"])
+    ap.add_argument("--quotes", default="single", choices=["single", "multi"],
+                    help="multi: evals/eval_prompts multi-quote prompt, scored under --protocol fine "
+                         "with every verifier in VERIFIERS (locate / dual / both)")
+    ap.add_argument("--verifier", default=None, choices=list(VERIFIERS),
+                    help="fine protocol, single quotes: re-score existing runs with this verifier (0 calls)")
     ap.add_argument("--concurrency", type=int, default=3)
     ap.add_argument("--summary", default=None, help="append aggregate rows to this json")
     args = ap.parse_args()
@@ -439,19 +471,38 @@ async def main():
         async def one(app, kind, mode):
             async with sem:
                 try:
+                    if mode == "multi":
+                        return await run_one_multi(app, kind)
                     return await run_one(app, kind, mode)
                 except Exception as exc:
                     print(f"[{app}/{kind}/{mode}] FAILED {type(exc).__name__}: {exc}")
                     return None
 
-        if args.protocol == "fine":
-            _print_fine_header()
+        if args.quotes == "multi":
+            _print_fine_header(quotes=True)
+            for kind in kinds:
+                results = [r for r in await asyncio.gather(*(one(a, kind, "multi") for a in apps)) if r]
+                results = [r for r in results if r.get("checklist_results")]
+                for verifier in VERIFIERS:
+                    name = f"{kind}/multi/{verifier}"
+                    agg = score_fine_quotes(results, verifier)
+                    _print_fine_row(name, agg)
+                    summary[name] = agg
+            print("\n" + llm_cache.summary())
+        elif args.protocol == "fine":
+            _print_fine_header(quotes=args.verifier is not None)
         else:
             print(f"{'variant':<22}{'n':>4}{'gold':>6}{'cov_raw':>9}{'cov_verified':>14}{'para_hit':>10}{'key_match':>11}")
-        for kind in kinds:
+        for kind in (kinds if args.quotes == "single" else []):
             for mode in modes:
                 results = [r for r in await asyncio.gather(*(one(a, kind, mode) for a in apps)) if r]
                 name = f"{kind}/{mode}"
+                if args.protocol == "fine" and args.verifier:
+                    name = f"{kind}/{mode}/single/{args.verifier}"
+                    agg = score_fine_quotes(results, args.verifier)
+                    _print_fine_row(name, agg)
+                    summary[name] = agg
+                    continue
                 if args.protocol == "fine":
                     rows = [fine_score(llm_predictions(r, load_app(r["app"])), load_app(r["app"])) for r in results]
                     agg = aggregate_fine(rows)
@@ -468,7 +519,8 @@ async def main():
                       f"{agg['covered'] / g:>9.3f}{agg['covered_verified'] / g:>14.3f}"
                       f"{(agg['para_hit'] / agg['para_eval']) if agg['para_eval'] else 0:>10.3f}"
                       f"{agg['key_match'] / (agg['n_crit'] or 1):>11.3f}")
-        print("\n" + llm_cache.summary())
+        if args.quotes == "single":
+            print("\n" + llm_cache.summary())
 
     if args.summary:
         p = Path(args.summary)
