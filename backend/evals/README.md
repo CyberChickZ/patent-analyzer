@@ -168,3 +168,46 @@ third of theirs (.10-.11 vs .27-.39) because we emit exactly one verified
 quote per feature while FiNE models return several passages per feature.
 Not directly comparable: subset (58 vs 932), Gemini 2.5 Pro vs Qwen,
 single-quote output, and the regex splitter vs `re.split("[;\n]")`.
+
+### Multi-quote + dual-threshold grounding (`--quotes multi`, 2026-09-17)
+
+The recall gap above is structural: one quote per criterion can only ever
+hit one passage, while the examiner cites 2.3 passages per feature on
+average (121/227 features cite >= 2). `evals/eval_prompts.py` is an
+eval-only copy of the full_text prompt that asks for `evidence_quotes`
+(1-5 verbatim 10-40 word excerpts, one per disclosing passage); nodes/ and
+app/ are untouched. Every quote is checked by two verifiers:
+`quote_verify.locate_quote` (char-level difflib >= .9, the production
+check) and `evals/quote_dual.verify_quote_dual` (span_ratio >= .70 of the
+quote's content words inside one sliding window AND bigram_ratio >= .30
+of its adjacent token pairs found in the document). Passing quotes are
+located to a passage (`quote_location`; the dual arm falls back to
+`locate_dual`, the best passage that itself passes the dual test) and the
+union per criterion feeds `fine_score` unchanged. `--verifier dual|both`
+re-scores the single-quote runs with the same machinery at zero cost.
+
+| variant (58 apps / 227 feats)     | feat P | feat R | feat F1 | claim P | claim R | claim F1 | q/item | survive | pred psg |
+|-----------------------------------|-------:|-------:|--------:|--------:|--------:|---------:|-------:|--------:|---------:|
+| oracle single + locate (E2)       | .184 | .111 | .129 | .323 | .148 | .190 | 1.00 | 147/173 | 138 |
+| oracle single + dual              | .210 | .128 | .149 | .309 | .168 | .205 | 1.00 | 172/173 | 160 |
+| oracle multi  + locate            | .169 | .289 | .190 | .265 | .386 | .282 | 3.60 | 569/638 | 438 |
+| oracle multi  + dual              | .178 | .331 | **.206** | .264 | .421 | .293 | 3.60 | 636/638 | 479 |
+| oracle multi  + dual AND locate   | .169 | .289 | .190 | .265 | .386 | .282 | 3.60 | 569/638 | 438 |
+| regex  single + locate (E2)       | .158 | .104 | .113 | .278 | .185 | .195 | 1.00 | 214/251 | 191 |
+| regex  single + dual              | .207 | .150 | .158 | .308 | .233 | .234 | 1.00 | 250/251 | 222 |
+| regex  multi  + locate            | .156 | .255 | .177 | .210 | .337 | .232 | 3.22 | 693/772 | 503 |
+| regex  multi  + dual              | .159 | .282 | **.185** | .212 | .360 | .240 | 3.22 | 769/772 | 549 |
+| regex  multi  + dual AND locate   | .156 | .255 | .177 | .210 | .337 | .232 | 3.22 | 693/772 | 503 |
+| FiNE Table 2 Single-step Qwen3.5  | .148 | .389 | .192 | .202 | .576 | .271 |      |         |          |
+| FiNE Table 2 Hier. Qwen3.5-397B   | .170 | .391 | .209 | .207 | .568 | .274 |      |         |          |
+
+Reading: multi-quote roughly triples recall (.11 -> .29-.33) at 1-2 pt of
+precision, moving oracle feature-F1 from .129 to .206 and regex from .113
+to .185, i.e. into the FiNE LLM band (.192-.209). The dual verifier is not
+what moves the number: it passes 99.7% of quotes (636/638) and adds
+~4 pt of recall over locate_quote by keeping ellipsis-spliced quotes
+("...") that difflib scores at .6-.9 but that sit in one passage (52 of
+the 67 rescued quotes are found by the exact 60-char prefix match). AND
+of both verifiers equals locate alone, since dual is a superset. The two
+quotes dual rejects are genuine cross-paragraph splices. 116 Gemini calls
+(58 x 2), ~2.3M tok in.
