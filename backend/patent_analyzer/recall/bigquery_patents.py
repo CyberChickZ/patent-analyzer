@@ -387,7 +387,8 @@ async def fetch_citations(pub_nums: list[str]) -> dict[str, dict]:
         return guarded_query(client, f"""
             SELECT publication_number, family_id, priority_date, cits
             FROM `{GC_PROJECT}.amie_patents.citations`
-            WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params, max_gib=2)
+            WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params,
+            max_gib=2 + 0.01 * len(wanted))
 
     rows = await asyncio.to_thread(_run)
     out = {}
@@ -418,7 +419,8 @@ async def fetch_families(family_ids: list[str]) -> dict[str, list[dict]]:
         params = [fam_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
         return guarded_query(client, f"""
             SELECT family_id, members FROM `{GC_PROJECT}.amie_patents.families`
-            WHERE bucket IN UNNEST(@buckets) AND family_id IN UNNEST(@fams)""", params, max_gib=2)
+            WHERE bucket IN UNNEST(@buckets) AND family_id IN UNNEST(@fams)""", params,
+            max_gib=2 + 0.01 * len(fams))
 
     rows = await asyncio.to_thread(_run)
     return {r.family_id: [{"publication_number": m.get("publication_number", "").replace("-", ""),
