@@ -118,3 +118,10 @@ def test_css_counts_absent_in_denominator_ewss_does_not():
 def test_binary_match_fallback():
     css, _, _ = compute_css_ewss({"a": {"match": True}, "b": {"match": False}})
     assert css == 0.5
+
+
+def test_bigquery_module_exports_all_lookups():
+    from patent_analyzer.recall import bigquery_patents as bq
+    for name in ("fetch_by_pub_nums", "fetch_citations", "fetch_families", "search_abstracts",
+                 "guarded_query", "capped_query"):
+        assert callable(getattr(bq, name)), name
