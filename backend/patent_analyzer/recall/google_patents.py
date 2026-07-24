@@ -18,8 +18,12 @@ import html
 import re
 import urllib.parse
 
+import hashlib
+
 import httpx
 
+from ..cache import kv
+from ..runtime_state import Breaker
 from .pool import Candidate
 
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -30,7 +34,9 @@ _sem = asyncio.Semaphore(2)
 _MIN_GAP = 1.0
 _last_call = 0.0
 _BLOCK_COOLDOWN = 15 * 60
-_blocked_until = 0.0
+_breaker = Breaker("google_patents", cooldown_s=_BLOCK_COOLDOWN)
+_CACHE_DAYS = 30
+last_total: dict[str, int] = {}   # query -> total_num_results from the last live call
 
 
 def _clean(s: str) -> str:
@@ -39,9 +45,8 @@ def _clean(s: str) -> str:
 
 async def _get(url: str, timeout: float = 30) -> httpx.Response | None:
     """Polite GET: 2 concurrent, >=1s apart, retry 429/5xx with backoff."""
-    global _last_call, _blocked_until
-    now = asyncio.get_event_loop().time()
-    if now < _blocked_until:
+    global _last_call
+    if _breaker.is_open():
         return None
     async with _sem:
         for attempt in range(3):
@@ -60,15 +65,20 @@ async def _get(url: str, timeout: float = 30) -> httpx.Response | None:
             if r is not None and r.status_code not in (429, 500, 502, 503):
                 return r
             if r is not None and "<title>Sorry" in r.text[:400]:
-                # Google abuse page: this IP is soft-blocked; back off for a while
-                _blocked_until = asyncio.get_event_loop().time() + _BLOCK_COOLDOWN
+                # Google abuse page: this IP is soft-blocked; trip the shared breaker
+                _breaker.trip(f"Sorry page on {url[:80]}")
                 return None
             await asyncio.sleep(2.0 * (attempt + 1))
     return r
 
 
 def is_blocked() -> bool:
-    return asyncio.get_event_loop().time() < _blocked_until
+    return _breaker.is_open()
+
+
+def _cache_key(query: str, num: int, page: int, before: str | None) -> str:
+    norm = " ".join(query.lower().split())
+    return hashlib.sha1(f"gp|{norm}|{num}|{page}|{before or ''}".encode()).hexdigest()
 
 
 async def search(query: str, num: int = 20, page: int = 0,
@@ -77,6 +87,11 @@ async def search(query: str, num: int = 20, page: int = 0,
     understood by Google Patents (e.g. 'priority:20150101')."""
     if not query.strip():
         return [], "empty query"
+    ck = _cache_key(query, num, page, before)
+    hit = kv().get("search", ck, max_age_days=_CACHE_DAYS)
+    if hit is not None:
+        last_total[query] = int(hit.get("total", 0))
+        return [Candidate(**c) for c in hit["cands"]], None
     inner = f"q={'+'.join(query.split())}&num={min(num, 100)}&page={page}"
     if before:
         inner += f"&before={before}"
@@ -88,9 +103,12 @@ async def search(query: str, num: int = 20, page: int = 0,
     if r.status_code != 200:
         return [], f"google_patents: HTTP {r.status_code}"
     try:
-        clusters = r.json()["results"].get("cluster") or []
+        results = r.json()["results"]
+        clusters = results.get("cluster") or []
     except (ValueError, KeyError):
         return [], "google_patents: unexpected response shape"
+    total = int(results.get("total_num_results") or 0)
+    last_total[query] = total
     out: list[Candidate] = []
     for cl in clusters:
         for item in cl.get("result") or []:
@@ -110,8 +128,9 @@ async def search(query: str, num: int = 20, page: int = 0,
                 source_score=1.0,
                 raw={"google_patents": {"priority_date": p.get("priority_date"),
                                         "publication_date": p.get("publication_date"),
-                                        "assignee": _clean(p.get("assignee", ""))}},
+                                        "assignee": _clean(p.get("assignee", "")), "total": total}},
             ))
+    kv().put("search", ck, {"cands": [c.__dict__ for c in out], "total": total})
     return out, None
 
 
