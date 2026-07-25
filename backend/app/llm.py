@@ -1684,3 +1684,40 @@ TOP MATCHES (sorted by overlap):
 {matches}
 """,
     )
+
+
+async def facet_elements(elements: list[dict], summary: str) -> dict[str, dict]:
+    """One call: for each element give search facets in Google Patents
+    vocabulary. Returns {element_id: {thing[], place[], apparatus[]}}.
+    Rules follow practitioner query craft: short stems, no generic head
+    nouns, synonyms across engineering/industrial/research vocabularies."""
+    if not elements:
+        return {}
+    listing = "\n".join(f'{e["id"]}: {e["text"]}' for e in elements)
+    system = "You write patent search facets. Output JSON only."
+    prompt = f"""For EACH element below, give three facets of search terms:
+  thing     — what the element IS (the core noun/mechanism), 2-4 short stems or phrases
+  place     — where/in what context it operates (domain, host system, signal), 1-3 stems
+  apparatus — the concrete structural/implementation term, 1-3 stems
+RULES: use DIFFERENT vocabulary across terms (older term, generic term, industrial term, research term).
+NEVER use words so general they appear in every patent: device, member, element, portion, means, unit, system, method, apparatus, module, component, assembly.
+DROP THE HEAD NOUN: write "sound damp" not "sound damping device". Lowercase. No quotes inside terms.
+
+INVENTION CONTEXT: {summary[:1500]}
+
+ELEMENTS:
+{listing}
+
+JSON output: {{"facets": {{"<element id>": {{"thing": [...], "place": [...], "apparatus": [...]}}, ...}}}}"""
+    try:
+        resp = await call_llm(system, prompt, thinking_budget=2048)
+        m = re.search(r'\{.*\}', resp, re.DOTALL)
+        data = json.loads(m.group()) if m else {}
+        out = {}
+        for e in elements:
+            f = (data.get("facets") or {}).get(e["id"]) or {}
+            out[e["id"]] = {k: [str(t).strip().lower() for t in (f.get(k) or []) if str(t).strip()][:4]
+                            for k in ("thing", "place", "apparatus")}
+        return out
+    except Exception:
+        return {e["id"]: {"thing": [], "place": [], "apparatus": []} for e in elements}
