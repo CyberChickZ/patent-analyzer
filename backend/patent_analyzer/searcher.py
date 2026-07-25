@@ -120,6 +120,7 @@ def serpapi_search(
             result: dict[str, Any] = {
                 "title": item.get("title", ""),
                 "snippet": item.get("snippet", ""),
+                "total": total,
             }
 
             if engine == "google_patents":
