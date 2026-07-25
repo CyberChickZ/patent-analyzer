@@ -70,3 +70,9 @@ class MonthlyQuota:
 
     def release(self, n: int = 1):
         kv().incr(_NS, self._key(), by=-n)
+
+    def exhaust(self):
+        """Mark the whole month as spent (provider said 401/429)."""
+        gap = self.cap - self.used()
+        if gap > 0:
+            kv().incr(_NS, self._key(), by=gap)

@@ -88,7 +88,7 @@ async def _search(engine: str, query: str, max_pages: int, num: int, match_type:
             continue
         matches, err = await asyncio.to_thread(_sync_search, engine, query, key, None, max_pages, num)
         if err and _exhausted(err):
-            q.take(FREE_TIER_PER_KEY)  # mark the key spent for this month
+            q.exhaust()
             last_err = f"serpapi key {_fp(key)}: {err}"
             continue
         if err:
