@@ -48,6 +48,9 @@ def _norm_title(t: str) -> str:
 def _identity_keys(c: Candidate) -> list[str]:
     """Stable keys to dedupe candidates across channels. First match wins."""
     keys = []
+    fam = ((c.raw or {}).get("bigquery") or {}).get("family_id") or ((c.raw or {}).get("google_patents") or {}).get("family_id")
+    if fam and c.match_type == "Patent":
+        keys.append(f"family:{fam}")
     if c.doi:
         keys.append(f"doi:{c.doi.lower()}")
     if c.arxiv_id:
