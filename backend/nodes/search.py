@@ -61,13 +61,19 @@ async def search_node(state: GraphState) -> dict:
     # SerpAPI throttling + per-job budget (free tier is 250 searches/month)
     serpapi_lock = asyncio.Semaphore(1)
     SERPAPI_COOLDOWN = 1.5
-    serpapi_budget = {"left": int(os.environ.get("SERPAPI_MAX_CALLS_PER_JOB", "4"))}
+    serpapi_budget = {"left": int(os.environ.get("SERPAPI_MAX_CALLS_PER_JOB", "8"))}
 
     def _serpapi_take() -> bool:
         if serpapi_budget["left"] <= 0:
             return False
         serpapi_budget["left"] -= 1
         return True
+
+    def _serpapi_quota_status():
+        try:
+            return ch_serpapi.quota_status()
+        except Exception:
+            return []
 
     async def _serpapi_throttled_patent(q: str):
         async with serpapi_lock:
@@ -183,6 +189,19 @@ async def search_node(state: GraphState) -> dict:
         *(spec[1]() for spec in channel_specs),
         return_exceptions=True,
     )
+
+    # 8th channel: the agentic loop (per-element boolean search + BQ expansion),
+    # run after the broad channels so it can spend whatever SerpAPI budget is left
+    loop_stats: dict = {}
+    try:
+        from patent_analyzer.agentic.loop import run_loop
+        loop_cands, loop_stats = await run_loop(
+            state, lambda: serpapi_budget["left"], _serpapi_take,
+            lambda kind, msg, payload=None: _event(kind, msg, payload))
+        gathered.append((loop_cands, []))
+        channel_specs.append(("agentic_loop", None))
+    except Exception as exc:
+        _event("channel_crashed", f"agentic_loop: {type(exc).__name__}: {exc}")
 
     channel_results: dict[str, list] = {}
     for (name, _), result in zip(channel_specs, gathered):
@@ -341,6 +360,10 @@ async def search_node(state: GraphState) -> dict:
             "downloaded": download_count,
             "pool": [{"pub_num": d.get("pub_num", ""), "sources": d.get("sources", []),
                       "match_type": d.get("match_type", "")} for d in all_docs],
+            "loop_rounds": loop_stats.get("rounds", []),
+            "loop_elements": loop_stats.get("elements", []),
+            "coverage_by_element": loop_stats.get("coverage_by_element", {}),
+            "serpapi_quota": _serpapi_quota_status(),
         },
         "events": events,
         "phase_results": {"phase3": {
