@@ -8,12 +8,21 @@ snap_quote(quote, doc_text) -> (found, loc)
     2. fuzzy: quote_verify.locate_quote at 0.9 -> best difflib window
     3. dual:  quote_dual span/bigram thresholds -> densest token window
     none pass -> (False, None): the quote was written, not copied.
+
+classify_errors(pred_elements, gold_elements, doc_text)
+    greedy 1:1 embedding match at tau=0.7 (te005, extraction_eval.greedy_match);
+    omission        gold element with no matched prediction
+    fabrication     prediction whose quote does not snap, or an unmatched
+                    prediction whose best cosine against the document < 0.5
+    misclassification matched prediction whose kind / level differs from gold
 """
 
 import re
 import sys
 from difflib import SequenceMatcher
 from pathlib import Path
+
+import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
@@ -23,6 +32,8 @@ from quote_dual import DocIndex, content_tokens, verify_quote_dual
 
 HEAD_CHARS = 60
 FUZZY_TAU = 0.9
+MATCH_TAU = 0.7
+DOC_COS_TAU = 0.5
 _TOK = re.compile(r"[a-z0-9]+")
 
 
@@ -120,3 +131,91 @@ def snap_quote(quote: str, doc_text: str) -> tuple[bool, dict | None]:
     if ok:
         return True, {"char": _dual_span(quote, doc_text), "method": "dual", "sim": round(min(sr, br), 4)}
     return False, None
+
+
+def _default_embed(texts: list[str]) -> np.ndarray:
+    from extraction_eval import embed
+    return embed(texts)
+
+
+def _doc_chunks(doc_text: str, max_chars: int = 600) -> list[str]:
+    out = []
+    for para in re.split(r"\n\s*\n|\n(?=\[\d{4}\])|\n(?=\[S[\d.]+\.P\d+\])", doc_text or ""):
+        para = " ".join(para.split())
+        while len(para) > max_chars:
+            cut = para.rfind(". ", 0, max_chars)
+            cut = cut + 1 if cut > max_chars // 3 else max_chars
+            out.append(para[:cut].strip())
+            para = para[cut:].strip()
+        if len(para) > 20:
+            out.append(para)
+    return out
+
+
+def _text(e) -> str:
+    return (e.get("text") or e.get("criterion") or e.get("feature") or "") if isinstance(e, dict) else str(e)
+
+
+def classify_errors(pred_elements: list, gold_elements: list, doc_text: str,
+                    tau: float = MATCH_TAU, embed_fn=None, require_quote: bool = True) -> dict:
+    """pred_elements: [{id, text, evidence_quote?, kind?, level?}] (or str);
+    gold_elements: [{text, kind?, level?}] (or str). require_quote=False skips
+    the snap test for predictors that carry no quotes (legacy SSR checklist)."""
+    from extraction_eval import greedy_match
+
+    embed_fn = embed_fn or _default_embed
+    preds = [p if isinstance(p, dict) else {"text": str(p)} for p in pred_elements]
+    golds = [g if isinstance(g, dict) else {"text": str(g)} for g in gold_elements]
+    for i, p in enumerate(preds):
+        p.setdefault("id", f"p{i}")
+    unsupported = set()
+    if require_quote:
+        for p in preds:
+            found, _ = snap_quote(p.get("evidence_quote") or "", doc_text)
+            if not found:
+                unsupported.add(p["id"])
+
+    matched, matched_g, matched_p = [], set(), set()
+    if preds and golds:
+        sim = embed_fn([_text(g) for g in golds]) @ embed_fn([_text(p) for p in preds]).T
+        for gi, pj, s in greedy_match(sim):
+            if s >= tau:
+                matched.append((gi, pj, float(round(s, 4))))
+                matched_g.add(gi)
+                matched_p.add(pj)
+
+    omission = [gi for gi in range(len(golds)) if gi not in matched_g]
+    fabrication = [p["id"] for p in preds if p["id"] in unsupported]
+    orphans = [j for j, p in enumerate(preds) if j not in matched_p and p["id"] not in unsupported]
+    if orphans:
+        chunks = _doc_chunks(doc_text)
+        if chunks:
+            cs = embed_fn([_text(preds[j]) for j in orphans]) @ embed_fn(chunks).T
+            for row, j in zip(cs, orphans):
+                if float(row.max()) < DOC_COS_TAU:
+                    fabrication.append(preds[j]["id"])
+        else:
+            fabrication.extend(preds[j]["id"] for j in orphans)
+
+    misclassification = []
+    for gi, pj, _ in matched:
+        g, p = golds[gi], preds[pj]
+        for attr in ("kind", "level"):
+            if g.get(attr) and p.get(attr) and g[attr] != p[attr]:
+                misclassification.append({"pred": p["id"], "gold": gi, "attr": attr,
+                                          "pred_value": p[attr], "gold_value": g[attr]})
+                break
+    return {
+        "omission": omission, "fabrication": fabrication,
+        "misclassification": misclassification, "matched": matched,
+        "unsupported": sorted(unsupported),
+        "n_gold": len(golds), "n_pred": len(preds),
+        "quote_survival": (1 - len(unsupported) / len(preds)) if preds and require_quote else None,
+    }
+
+
+def error_rates(err: dict) -> dict:
+    ng, np_ = max(err["n_gold"], 1), max(err["n_pred"], 1)
+    return {"omission": len(err["omission"]) / ng,
+            "fabrication": len(err["fabrication"]) / np_,
+            "misclassification": len(err["misclassification"]) / max(len(err["matched"]), 1)}
