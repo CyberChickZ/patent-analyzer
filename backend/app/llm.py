@@ -1721,3 +1721,114 @@ JSON output: {{"facets": {{"<element id>": {{"thing": [...], "place": [...], "ap
         return out
     except Exception:
         return {e["id"]: {"thing": [], "place": [], "apparatus": []} for e in elements}
+
+
+# ════════════════════════════════════════════════════════════
+# Extraction (line A): candidate inventions -> claim-language elements
+# ════════════════════════════════════════════════════════════
+
+EXTRACTION_LEVELS = ("core", "component", "application")
+EXTRACTION_KINDS = ("structure", "step", "condition", "parameter")
+_EXTRACTION_DOC_CAP = 150_000
+_FACET_BANNED = frozenset("device member element portion means unit system method apparatus module component assembly".split())
+
+_DOC_KIND_GUIDANCE = {
+    "paper": ("Look for the invention in the Method / Approach / System / Implementation sections, "
+              "not in the Introduction or Related Work: what the authors built, not what they cite."),
+    "manuscript": ("Related-work sections have been removed. Look for the invention in the Method / "
+                   "Results / Discussion sections: what the authors built themselves."),
+    "disclosure": ("The Core Idea and Novelty fields state what the inventor considers new; "
+                   "the How It Works field gives the mechanism. Use them in that order."),
+    "patent_draft": ("Each independent claim (or claim-like paragraph) is one candidate; keep its scope. "
+                     "Dependent claims are not candidates."),
+}
+
+
+def _extraction_json(resp: str) -> dict | None:
+    for attempt in (resp, resp[resp.find("{"):resp.rfind("}") + 1] if "{" in resp else ""):
+        if not attempt:
+            continue
+        try:
+            d = json.loads(attempt)
+            return d if isinstance(d, dict) else None
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _clean_facets(f) -> dict:
+    out = {}
+    for k in ("thing", "place", "apparatus"):
+        terms = []
+        for t in (f or {}).get(k) or []:
+            words = [w for w in str(t).strip().lower().split() if w]
+            while words and words[-1] in _FACET_BANNED:
+                words.pop()
+            if words and not all(w in _FACET_BANNED for w in words):
+                terms.append(" ".join(words))
+        out[k] = terms[:4]
+    return out
+
+
+async def extract_candidates(doc_text: str, summary: str, doc_kind: str = "paper") -> dict:
+    """A1 — ONE LLM CALL: list 1-4 candidate inventions from the full document.
+
+    Returns {"candidate_inventions": [{id, concept, level, cpc_pred}],
+             "no_invention_reason": None | str}
+    """
+    guidance = _DOC_KIND_GUIDANCE.get(doc_kind, _DOC_KIND_GUIDANCE["paper"])
+    system = ("You are a patent attorney identifying what in a technical document could be "
+              "claimed. Output JSON only.")
+    prompt = f"""════ TASK ════
+From the DOCUMENT below (use the SUMMARY only as orientation), list 1-4 candidate
+inventions — things that could each be the subject of an independent patent claim.
+Order them core first, then component, then application.
+
+level:
+  core        — the main contribution as a whole; the subject of the broadest independent claim
+  component   — a sub-mechanism / module / step that could stand on its own as an independent claim
+  application — a use / deployment of the core in a specific setting
+
+For each candidate:
+  concept   — ONE sentence, at most 35 words: what it is, what drives it, and the feature
+              that distinguishes it from ordinary practice
+  cpc_pred  — up to 3 CPC group codes (e.g. "G06T7/00")
+
+Document kind: {doc_kind}. {guidance}
+
+If the document contains no claimable invention (survey, review, pure theory, opinion,
+dataset description, commentary), output an empty list and state no_invention_reason.
+
+Output strictly this JSON, no preamble:
+{{"candidate_inventions": [{{"id": "inv1", "concept": "...", "level": "core", "cpc_pred": ["G06T7/00"]}}],
+ "no_invention_reason": null}}
+
+════ SUMMARY ════
+{(summary or "")[:4000]}
+
+════ DOCUMENT ════
+```
+{(doc_text or "")[:_EXTRACTION_DOC_CAP]}
+```"""
+    resp = await call_llm(system, prompt, thinking_budget=4096)
+    data = _extraction_json(resp) or {}
+    out = []
+    for i, c in enumerate((data.get("candidate_inventions") or [])[:4]):
+        if not isinstance(c, dict):
+            continue
+        concept = " ".join(str(c.get("concept") or "").split())
+        if not concept:
+            continue
+        level = str(c.get("level") or "").strip().lower()
+        if level not in EXTRACTION_LEVELS:
+            level = "core" if not out else "component"
+        cpc = [str(x).strip() for x in (c.get("cpc_pred") or []) if str(x).strip()][:3]
+        out.append({"id": f"inv{len(out) + 1}", "concept": concept, "level": level, "cpc_pred": cpc})
+    out.sort(key=lambda c: EXTRACTION_LEVELS.index(c["level"]))
+    for i, c in enumerate(out, 1):
+        c["id"] = f"inv{i}"
+    reason = data.get("no_invention_reason")
+    reason = str(reason).strip() if reason else None
+    if not out and not reason:
+        reason = "model returned no candidate inventions" if data else "A1 response could not be parsed"
+    return {"candidate_inventions": out, "no_invention_reason": reason if not out else None}
