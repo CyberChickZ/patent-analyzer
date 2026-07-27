@@ -3,6 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from patent_analyzer.adapters.disclosure import doc_from_fields
 from patent_analyzer.adapters.manuscript import strip_related_work
 from patent_analyzer.adapters.paper import (
     doc_from_sections, doc_from_text, iter_paragraphs, locate_marker, render_doc,
@@ -99,3 +100,17 @@ def test_strip_related_work():
     assert out["dropped_sections"] == ["2 Related Work", "3.1 Background and Related Work"]
     assert doc["abstract"]  # original untouched
     assert len(doc["sections"]) == 4
+
+
+def test_doc_from_fields():
+    doc = doc_from_fields(problem="Widgets drift.", core_idea="A learned offset network.",
+                          how_it_works="Predict translation.\n\nTrain with L1.", novelty="First learned offset.",
+                          optional_variants=["Use L2 loss", "Add rotation"])
+    assert doc["kind"] == "disclosure"
+    assert [s["title"] for s in doc["sections"]] == ["Problem", "Core Idea", "How It Works", "Novelty", "Optional Variants"]
+    assert doc["sections"][2]["paragraphs"] == ["Predict translation.", "Train with L1."]
+    assert doc["dependent_hints"] == ["Use L2 loss", "Add rotation"]
+    assert doc["concept_seed"] == "A learned offset network."
+    text = render_doc(doc)
+    assert "[S3.P2] Train with L1." in text
+    assert doc_from_fields(core_idea="x")["sections"][0]["title"] == "Core Idea"
