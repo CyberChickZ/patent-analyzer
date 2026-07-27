@@ -3,6 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from patent_analyzer.adapters.manuscript import strip_related_work
 from patent_analyzer.adapters.paper import (
     doc_from_sections, doc_from_text, iter_paragraphs, locate_marker, render_doc,
 )
@@ -85,3 +86,16 @@ def test_doc_from_sections_roundtrip():
     assert doc["sections"][0]["paragraphs"] == ["a", "b"]
     assert doc["sections"][0]["subsections"][0]["subsections"] == []
     assert "[S1.1.P1] c" in render_doc(doc)
+
+
+def test_strip_related_work():
+    doc = doc_from_text(PAPER)
+    doc["sections"][2]["subsections"].append(
+        {"title": "3.1 Background and Related Work", "paragraphs": ["x"], "subsections": []})
+    out = strip_related_work(doc)
+    assert [s["title"] for s in out["sections"]] == ["1 Introduction", "3 Method", "RESULTS"]
+    assert out["sections"][1]["subsections"] == []
+    assert out["abstract"] == "" and out["kind"] == "manuscript"
+    assert out["dropped_sections"] == ["2 Related Work", "3.1 Background and Related Work"]
+    assert doc["abstract"]  # original untouched
+    assert len(doc["sections"]) == 4
