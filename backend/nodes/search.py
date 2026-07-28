@@ -175,8 +175,24 @@ async def search_node(state: GraphState) -> dict:
             _event("channel_crashed", f"bigquery_patents CRASH: {exc}")
             return [], [{"query": "crash", "error": f"{type(exc).__name__}: {exc}"}]
 
+    # 8th channel first: the agentic loop (per-element boolean search + BQ
+    # expansion) gets SerpAPI budget priority over the broad legacy channels
+    loop_stats: dict = {}
+    loop_cands: list = []
+    try:
+        from patent_analyzer.agentic.loop import run_loop
+        loop_cands, loop_stats = await run_loop(
+            state, lambda: serpapi_budget["left"], _serpapi_take,
+            lambda kind, msg, payload=None: _event(kind, msg, payload))
+    except Exception as exc:
+        _event("channel_crashed", f"agentic_loop: {type(exc).__name__}: {exc}")
+
+    async def run_agentic_loop():
+        return loop_cands, []
+
     # Launch all channels in parallel (7 channels)
     channel_specs = [
+        ("agentic_loop", run_agentic_loop),
         ("google_patents", run_google_patents),
         ("serpapi_patents", run_serpapi_patents),
         ("serpapi_scholar", run_serpapi_scholar),
@@ -189,19 +205,6 @@ async def search_node(state: GraphState) -> dict:
         *(spec[1]() for spec in channel_specs),
         return_exceptions=True,
     )
-
-    # 8th channel: the agentic loop (per-element boolean search + BQ expansion),
-    # run after the broad channels so it can spend whatever SerpAPI budget is left
-    loop_stats: dict = {}
-    try:
-        from patent_analyzer.agentic.loop import run_loop
-        loop_cands, loop_stats = await run_loop(
-            state, lambda: serpapi_budget["left"], _serpapi_take,
-            lambda kind, msg, payload=None: _event(kind, msg, payload))
-        gathered.append((loop_cands, []))
-        channel_specs.append(("agentic_loop", None))
-    except Exception as exc:
-        _event("channel_crashed", f"agentic_loop: {type(exc).__name__}: {exc}")
 
     channel_results: dict[str, list] = {}
     for (name, _), result in zip(channel_specs, gathered):

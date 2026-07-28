@@ -23,6 +23,7 @@ from .query_gen import boolean_query, next_mode
 from .validator import validate
 
 MAX_ROUNDS = int(os.environ.get("LOOP_MAX_ROUNDS", "3"))
+MAX_ELEMENTS = int(os.environ.get("LOOP_MAX_ELEMENTS", "12"))
 SEEDS_PER_ELEMENT = 10
 GP_CALLS_PER_JOB = int(os.environ.get("LOOP_GP_MAX_CALLS", "30"))
 
@@ -64,7 +65,7 @@ async def _search(query: str, before: str | None, budget: Budget) -> tuple[list[
 
 async def run_loop(state: dict, serpapi_left, serpapi_take, event, embed=None) -> tuple[list[Candidate], dict]:
     """Returns (candidates for the pool, loop_stats)."""
-    elements = elements_from_state(state)
+    elements = elements_from_state(state)[:MAX_ELEMENTS]
     if not elements:
         return [], {"rounds": [], "reason": "no elements"}
     elements = await attach_facets(elements, state.get("summary", ""))
