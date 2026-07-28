@@ -1832,3 +1832,121 @@ Output strictly this JSON, no preamble:
     if not out and not reason:
         reason = "model returned no candidate inventions" if data else "A1 response could not be parsed"
     return {"candidate_inventions": out, "no_invention_reason": reason if not out else None}
+
+
+async def extract_elements(doc_text: str, candidates: list[dict], prefill: dict[str, list[str]] | None = None,
+                           feedback: dict | None = None) -> dict:
+    """A2 — ONE LLM CALL (all candidates together): independent_claim_draft
+    {method, system} + elements[{id, text, evidence_quote, facets, kind}] per candidate.
+
+    prefill: {candidate_id: [limitation texts]} — element texts fixed (claim mode);
+    the model only adds evidence_quote / facets / kind and may not rewrite them.
+    Returns {"candidate_inventions": [<candidate + claim draft + elements + dependent_hints>]}
+    """
+    if not candidates:
+        return {"candidate_inventions": []}
+    prefill = prefill or {}
+    system = ("You are a patent attorney drafting independent claims from a technical document. "
+              "Output JSON only.")
+    cand_lines = "\n".join(f'- {c["id"]} [{c.get("level", "core")}]: {c.get("concept", "")}' for c in candidates)
+    prefill_block = ""
+    if prefill:
+        listing = "\n".join(f'{cid}:\n' + "\n".join(f"  {cid}.e{i}: {t}" for i, t in enumerate(texts))
+                            for cid, texts in prefill.items())
+        prefill_block = f"""
+
+════ PREFILLED ELEMENTS (FIXED) ════
+The element texts below are the applicant's own claim limitations. Output them EXACTLY
+as given — same order, same count, same wording — adding only evidence_quote, facets
+and kind for each. Do not rewrite, merge, or split them.
+{listing}
+"""
+    prompt = f"""════ TASK ════
+For EACH candidate invention below, draft the independent claims and break the method
+claim into elements.
+
+CANDIDATES
+{cand_lines}
+{prefill_block}
+For each candidate output:
+  independent_claim_draft:
+    method — "A method of ..., comprising: ...; ...; and ..."  (one limitation per clause)
+    system — "A system comprising: ...; ...; and ..."
+  elements — the limitations of the METHOD claim, in order, one limitation per element:
+    id             — "<candidate id>.e0" for the preamble, then .e1, .e2, ...
+    text           — the limitation in claim language: one action or one structure plus its
+                     qualifier. Concatenating the element texts must reproduce the method claim.
+    evidence_quote — 10-40 words COPIED verbatim from the DOCUMENT that support this limitation
+    facets         — search vocabulary {{"thing": [...], "place": [...], "apparatus": [...]}},
+                     1-3 short lowercase stems each (thing = what it is; place = where / in
+                     what host it operates; apparatus = the concrete implementation term)
+    kind           — "structure" | "step" | "condition" | "parameter"
+  dependent_hints — 0-4 short refinements that could become dependent claims
+
+RULES
+- COPY the quote verbatim from the document. DO NOT paraphrase. DO NOT stitch words from
+  different sentences. If nothing in the document supports a limitation, leave
+  evidence_quote empty rather than inventing one.
+- One limitation per element. Do not merge two actions into one element; do not split one
+  action into two.
+- Use the document's own terms in element text; no "novel", "improved", "efficient".
+- In facets never use device/member/element/portion/means/unit/system/method/apparatus/
+  module/component; drop the head noun ("sound damp" not "sound damping device").
+- The preamble element (e0) names the subject ("A method of X") and carries no limitation.
+{_feedback_block(feedback)}
+Output strictly this JSON, no preamble:
+{{"candidate_inventions": [
+  {{"id": "inv1",
+    "independent_claim_draft": {{"method": "...", "system": "..."}},
+    "elements": [
+      {{"id": "inv1.e0", "text": "A method of ...", "evidence_quote": "...",
+        "facets": {{"thing": ["..."], "place": ["..."], "apparatus": ["..."]}}, "kind": "structure"}}
+    ],
+    "dependent_hints": ["..."]}}
+]}}
+
+════ DOCUMENT ════
+```
+{(doc_text or "")[:_EXTRACTION_DOC_CAP]}
+```"""
+    resp = await call_llm(system, prompt, max_tokens=16384, thinking_budget=4096)
+    data = _extraction_json(resp)
+    if data is None:
+        return {"candidate_inventions": [], "error": "A2 response could not be parsed"}
+    by_id = {}
+    for c in data.get("candidate_inventions") or []:
+        if isinstance(c, dict) and c.get("id"):
+            by_id[str(c["id"]).strip()] = c
+
+    out = []
+    for cand in candidates:
+        cid = cand["id"]
+        raw = by_id.get(cid) or {}
+        draft = raw.get("independent_claim_draft") or {}
+        elements = []
+        raw_elements = [e for e in (raw.get("elements") or []) if isinstance(e, dict)]
+        fixed = prefill.get(cid)
+        if fixed:
+            raw_elements = raw_elements[:len(fixed)] + [{}] * max(0, len(fixed) - len(raw_elements))
+        for i, e in enumerate(raw_elements):
+            text = fixed[i] if fixed else " ".join(str(e.get("text") or "").split())
+            if not text:
+                continue
+            kind = str(e.get("kind") or "").strip().lower()
+            elements.append({
+                "id": f"{cid}.e{len(elements)}",
+                "text": text,
+                "evidence_quote": " ".join(str(e.get("evidence_quote") or "").split()),
+                "facets": _clean_facets(e.get("facets")),
+                "kind": kind if kind in EXTRACTION_KINDS else "step",
+            })
+        out.append({
+            **cand,
+            "independent_claim_draft": {
+                "method": " ".join(str(draft.get("method") or "").split()),
+                "system": " ".join(str(draft.get("system") or "").split()),
+            },
+            "elements": elements,
+            "dependent_hints": [str(h).strip() for h in (raw.get("dependent_hints") or []) if str(h).strip()][:4],
+        })
+    return {"candidate_inventions": out}
