@@ -19,6 +19,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Annotated, TypedDict
 
+from langgraph.graph import END, StateGraph
 
 MAX_RETRY = 1
 _CLAIM_START = re.compile(r"^\s*1\s*\.\s")
@@ -139,3 +140,85 @@ async def candidates_node(state: ExtractionState) -> dict:
                            "llm_calls": 1}
         patch["events"].append(_event("no_invention", f"No candidate invention: {reason}"))
     return patch
+
+
+def route_after_candidates(state: ExtractionState) -> str:
+    return "elements" if state.get("candidates") else END
+
+
+async def elements_node(state: ExtractionState) -> dict:
+    """A2: claim drafts + elements for all candidates (one LLM call)."""
+    from app.llm import extract_elements
+
+    raw = await extract_elements(state["full_text"], state.get("candidates") or [],
+                                 prefill=state.get("claim_prefill") or None, feedback=state.get("feedback"))
+    n = sum(len(c.get("elements") or []) for c in raw.get("candidate_inventions") or [])
+    events = [_event("info", f"Extracted {n} elements" + (f" ({raw['error']})" if raw.get("error") else ""))]
+    if state.get("feedback"):
+        events.append(_event("retry_applied", "Regenerated elements with self-check feedback"))
+    return {"raw_extraction": raw, "llm_calls": state.get("llm_calls", 0) + 1, "events": events}
+
+
+def _claim_ratio(elements: list[dict], method_claim: str) -> float | None:
+    from patent_analyzer.quote_verify import normalize
+    if not elements or not method_claim:
+        return None
+    joined = normalize(" ".join(e["text"] for e in elements))
+    return round(SequenceMatcher(None, joined, normalize(method_claim), autojunk=False).ratio(), 4)
+
+
+def verify_extraction(raw: dict, text: str, doc_kind: str, no_invention_reason=None) -> tuple[dict, list[dict], dict]:
+    """A3 (pure): snap every quote, mark unsupported, measure element/claim
+    agreement. Returns (extraction, checklist, errors)."""
+    from evals.extraction_errors import snap_quote
+    from patent_analyzer.adapters.paper import locate_marker
+
+    has_markers = "[S" in text and re.search(r"\[S[\d.]+\.P\d+\]", text) is not None
+    cands = []
+    n_el = n_unsup = 0
+    ratios = []
+    for c in raw.get("candidate_inventions") or []:
+        elements = []
+        for e in c.get("elements") or []:
+            e = dict(e)
+            found, loc = snap_quote(e.get("evidence_quote") or "", text)
+            if found:
+                span = loc.get("char") if loc else None
+                pos = locate_marker(text, span[0]) if (has_markers and span) else {"section": None, "para": None}
+                e["evidence_loc"] = {"section": pos["section"], "para": pos["para"], "char": span,
+                                     "method": loc.get("method"), "sim": loc.get("sim")}
+                e["unsupported"] = False
+            else:
+                e["evidence_loc"] = None
+                e["unsupported"] = True
+                n_unsup += 1
+            n_el += 1
+            elements.append(e)
+        ratio = _claim_ratio(elements, (c.get("independent_claim_draft") or {}).get("method", ""))
+        if ratio is not None:
+            ratios.append(ratio)
+        cands.append({**c, "elements": elements, "claim_ratio": ratio})
+
+    extraction = {"doc_kind": doc_kind, "candidate_inventions": cands, "no_invention_reason": no_invention_reason}
+    core = next((c for c in cands if c.get("level") == "core"), cands[0] if cands else None)
+    checklist = []
+    if core:
+        kept = [e for e in core["elements"] if not e["unsupported"]]
+        checklist = [{"id": e["id"], "criterion": e["text"], "weight": 1.0 / len(kept)} for e in kept]
+    errors = {"n_elements": n_el, "n_unsupported": n_unsup,
+              "quote_survival": round(1 - n_unsup / n_el, 4) if n_el else None,
+              "claim_ratio_min": min(ratios) if ratios else None,
+              "per_candidate": {c["id"]: {"n": len(c["elements"]),
+                                          "unsupported": sum(e["unsupported"] for e in c["elements"]),
+                                          "claim_ratio": c["claim_ratio"]} for c in cands}}
+    return extraction, checklist, errors
+
+
+async def verify_node(state: ExtractionState) -> dict:
+    extraction, checklist, errors = verify_extraction(
+        state.get("raw_extraction") or {}, state["full_text"], state.get("doc_kind", "paper"),
+        state.get("no_invention_reason"))
+    errors["llm_calls"] = state.get("llm_calls", 0)
+    msg = (f"{errors['n_elements']} elements, {errors['n_unsupported']} unsupported quotes, "
+           f"checklist={len(checklist)}, claim_ratio_min={errors['claim_ratio_min']}")
+    return {"extraction": extraction, "checklist": checklist, "errors": errors, "events": [_event("verified", msg)]}
