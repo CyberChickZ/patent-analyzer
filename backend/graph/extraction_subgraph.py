@@ -194,7 +194,8 @@ def verify_extraction(raw: dict, text: str, doc_kind: str, no_invention_reason=N
                 n_unsup += 1
             n_el += 1
             elements.append(e)
-        ratio = _claim_ratio(elements, (c.get("independent_claim_draft") or {}).get("method", ""))
+        form = c.get("primary_form") or "method"
+        ratio = _claim_ratio(elements, (c.get("independent_claim_draft") or {}).get(form, ""))
         if ratio is not None:
             ratios.append(ratio)
         cands.append({**c, "elements": elements, "claim_ratio": ratio})

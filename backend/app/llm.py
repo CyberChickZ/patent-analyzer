@@ -1837,7 +1837,8 @@ Output strictly this JSON, no preamble:
 async def extract_elements(doc_text: str, candidates: list[dict], prefill: dict[str, list[str]] | None = None,
                            feedback: dict | None = None) -> dict:
     """A2 — ONE LLM CALL (all candidates together): independent_claim_draft
-    {method, system} + elements[{id, text, evidence_quote, facets, kind}] per candidate.
+    {method, system} + primary_form + elements[{id, text, evidence_quote, facets, kind}]
+    per candidate; elements are the limitations of the primary-form claim.
 
     prefill: {candidate_id: [limitation texts]} — element texts fixed (claim mode);
     the model only adds evidence_quote / facets / kind and may not rewrite them.
@@ -1871,11 +1872,17 @@ CANDIDATES
 For each candidate output:
   independent_claim_draft:
     method — "A method of ..., comprising: ...; ...; and ..."  (one limitation per clause)
-    system — "A system comprising: ...; ...; and ..."
-  elements — the limitations of the METHOD claim, in order, one limitation per element:
+    system — "A <apparatus/system/device> comprising: ...; ...; and ..."
+    Both claims must recite EVERY component and EVERY step the document presents as part
+    of the invention (typically 4-10 limitations), not a two-clause sketch.
+  primary_form — "system" when the contribution is an apparatus / device / composition /
+    structure (the document describes parts and how they are arranged), "method" when it is a
+    process. This is the claim the elements are cut from.
+  elements — the limitations of the PRIMARY claim, in order, one limitation per element:
     id             — "<candidate id>.e0" for the preamble, then .e1, .e2, ...
-    text           — the limitation in claim language: one action or one structure plus its
-                     qualifier. Concatenating the element texts must reproduce the method claim.
+    text           — the limitation in claim language: one structure (with its configured-to
+                     qualifier) or one action. Concatenating the element texts must reproduce
+                     the primary claim.
     evidence_quote — 10-40 words COPIED verbatim from the DOCUMENT that support this limitation
     facets         — search vocabulary {{"thing": [...], "place": [...], "apparatus": [...]}},
                      1-3 short lowercase stems each (thing = what it is; place = where / in
@@ -1892,12 +1899,14 @@ RULES
 - Use the document's own terms in element text; no "novel", "improved", "efficient".
 - In facets never use device/member/element/portion/means/unit/system/method/apparatus/
   module/component; drop the head noun ("sound damp" not "sound damping device").
-- The preamble element (e0) names the subject ("A method of X") and carries no limitation.
+- The preamble element (e0) names the subject ("A method of X" / "An apparatus for X") and
+  carries no limitation.
 {_feedback_block(feedback)}
 Output strictly this JSON, no preamble:
 {{"candidate_inventions": [
   {{"id": "inv1",
     "independent_claim_draft": {{"method": "...", "system": "..."}},
+    "primary_form": "system",
     "elements": [
       {{"id": "inv1.e0", "text": "A method of ...", "evidence_quote": "...",
         "facets": {{"thing": ["..."], "place": ["..."], "apparatus": ["..."]}}, "kind": "structure"}}
@@ -1940,12 +1949,14 @@ Output strictly this JSON, no preamble:
                 "facets": _clean_facets(e.get("facets")),
                 "kind": kind if kind in EXTRACTION_KINDS else "step",
             })
+        form = str(raw.get("primary_form") or "").strip().lower()
         out.append({
             **cand,
             "independent_claim_draft": {
                 "method": " ".join(str(draft.get("method") or "").split()),
                 "system": " ".join(str(draft.get("system") or "").split()),
             },
+            "primary_form": form if form in ("method", "system") else "method",
             "elements": elements,
             "dependent_hints": [str(h).strip() for h in (raw.get("dependent_hints") or []) if str(h).strip()][:4],
         })

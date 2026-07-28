@@ -77,7 +77,7 @@ def test_extract_elements_shapes_output(monkeypatch):
               "facets": {}, "kind": "weird"},
              {"text": ""},
          ],
-         "dependent_hints": ["use L2", "", "rotation", "a", "b", "c"]},
+         "primary_form": "SYSTEM", "dependent_hints": ["use L2", "", "rotation", "a", "b", "c"]},
         {"id": "inv9", "elements": []},
     ]}, seen)
     out = asyncio.run(llm.extract_elements("DOC TEXT", CANDS))
@@ -89,10 +89,12 @@ def test_extract_elements_shapes_output(monkeypatch):
     assert inv1["elements"][1]["kind"] == "step"
     assert inv1["elements"][1]["text"] == "predicting an offset with a network"
     assert inv1["dependent_hints"] == ["use L2", "rotation", "a", "b"]
+    assert inv1["primary_form"] == "system" and inv2["primary_form"] == "method"
     assert inv2["elements"] == [] and inv2["independent_claim_draft"] == {"method": "", "system": ""}
     assert seen["thinking_budget"] == 4096 and seen["max_tokens"] == 16384
     assert "COPY the quote verbatim from the document. DO NOT paraphrase." in seen["user"]
     assert "One limitation per element." in seen["user"]
+    assert "primary_form" in seen["user"]
     assert "never use device/member/element/portion/means/unit" in seen["user"]
     assert "PREFILLED" not in seen["user"]
 
