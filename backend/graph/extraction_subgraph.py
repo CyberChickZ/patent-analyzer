@@ -222,3 +222,54 @@ async def verify_node(state: ExtractionState) -> dict:
     msg = (f"{errors['n_elements']} elements, {errors['n_unsupported']} unsupported quotes, "
            f"checklist={len(checklist)}, claim_ratio_min={errors['claim_ratio_min']}")
     return {"extraction": extraction, "checklist": checklist, "errors": errors, "events": [_event("verified", msg)]}
+
+
+async def self_check_node(state: ExtractionState) -> dict:
+    """A5: is the claim draft faithful to the document? Fail -> retry A2 once."""
+    from app.llm import self_check
+
+    cands = (state.get("extraction") or {}).get("candidate_inventions") or []
+    retry_count = state.get("retry_count", 0)
+    drafts = "\n\n".join(
+        f'{c["id"]} ({c.get("level")}): {c.get("concept", "")}\n'
+        f'METHOD CLAIM: {(c.get("independent_claim_draft") or {}).get("method", "")}\n'
+        f'SYSTEM CLAIM: {(c.get("independent_claim_draft") or {}).get("system", "")}'
+        for c in cands)
+    n_el = sum(len(c.get("elements") or []) for c in cands)
+    if not n_el:
+        check = {"ok": False, "issues": ["no elements were extracted"], "suggestion": "output the JSON schema exactly"}
+        calls = 0
+    else:
+        check = await self_check("independent claim drafting", state["full_text"], drafts)
+        calls = 1
+    ok = bool(check.get("ok", True))
+    if ok:
+        return {"self_check_ok": True, "llm_calls": state.get("llm_calls", 0) + calls,
+                "events": [_event("self_check_pass", "Claim drafts passed self-check")]}
+    issues = check.get("issues") or []
+    return {"self_check_ok": False, "retry_count": retry_count + 1,
+            "llm_calls": state.get("llm_calls", 0) + calls,
+            "feedback": {"issues": issues, "suggestion": check.get("suggestion", ""),
+                         "previous_response": drafts[:4000]},
+            "events": [_event("self_check_fail", f"Issues: {', '.join(map(str, issues))[:200]}")]}
+
+
+def should_retry_elements(state: ExtractionState) -> str:
+    if state.get("self_check_ok") or state.get("retry_count", 0) > MAX_RETRY:
+        return END
+    return "elements"
+
+
+def build_extraction_subgraph():
+    g = StateGraph(ExtractionState)
+    g.add_node("candidates", candidates_node)
+    g.add_node("elements", elements_node)
+    g.add_node("verify", verify_node)
+    g.add_node("self_check", self_check_node)
+
+    g.set_entry_point("candidates")
+    g.add_conditional_edges("candidates", route_after_candidates, {"elements": "elements", END: END})
+    g.add_edge("elements", "verify")
+    g.add_edge("verify", "self_check")
+    g.add_conditional_edges("self_check", should_retry_elements, {"elements": "elements", END: END})
+    return g.compile()
