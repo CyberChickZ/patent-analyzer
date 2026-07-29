@@ -1125,13 +1125,13 @@ async def evaluate_single_document(
             "  1 = Partial — related concept exists but differs in specifics\n"
             "  0 = Absent — not found in the prior art\n"
             "Use the scale descriptions provided with each criterion as guidance.\n"
-            "For score 1 or 2, you MUST include evidence_quote: a verbatim excerpt "
-            "from the prior art that supports the score.\n"
+            "For score 1 or 2, you MUST include evidence_quotes: 1 to 5 verbatim excerpts "
+            "(10-40 words each, one per passage) from the prior art that support the score.\n"
             "Pay attention to figures, tables, and diagrams — visual evidence counts.")
         output_schema = (
             '"checklist_results": {\n'
             '    "<criterion>": {"score": 0|1|2, "analysis": "why this score", '
-            '"evidence_quote": "verbatim excerpt from prior art or empty string", '
+            '"evidence_quotes": ["verbatim excerpt from prior art", "..."], '
             '"match": true|false},\n'
             '    ...all items...\n'
             '  }')
@@ -1255,14 +1255,16 @@ async def evaluate_single_document_text(
         "You are a US patent examiner. Output JSON only.")
     full = doc_mode == "full_text"
     doc_label = "full text with numbered paragraphs" if full else "abstract/snippet only"
-    evidence_field = ('"evidence_quote": "verbatim excerpt from the document, or empty", '
+    evidence_field = ('"evidence_quotes": ["verbatim excerpt", "..."], '
                       if full else "")
 
     if use_ssr:
         scoring_instruction = (
             "For EACH criterion assign score: 2=Present, 1=Partial, 0=Absent.\n"
-            + ("For score 1 or 2 you MUST copy a verbatim evidence_quote from the "
-               "document (exact wording, 10-40 words). If you cannot quote it, score 0. "
+            + ("For score 1 or 2 you MUST list evidence_quotes: 1 to 5 verbatim excerpts copied "
+               "from the document (exact wording, 10-40 words each), one per passage that "
+               "discloses the criterion, most direct first; never merge text from two places. "
+               "If you cannot quote anything, score 0. "
                if full else
                "Abstract is limited — if silent on a criterion, score 0. ")
             + "Do NOT infer beyond what the text states.")
@@ -1275,7 +1277,7 @@ async def evaluate_single_document_text(
         scoring_instruction = (
             f"For EACH item, match=true only when the {doc_label} explicitly "
             "discusses that element. When silent, match=false."
-            + (" For match=true include a verbatim evidence_quote." if full else ""))
+            + (" For match=true list 1-5 verbatim evidence_quotes." if full else ""))
         output_schema = (
             '"checklist_results": {\n'
             '    "<item>": {"analysis": "...", ' + evidence_field + '"match": true|false},\n'
