@@ -48,4 +48,17 @@ def test_verify_downgrades_unverifiable():
     assert cr["encrypt"]["score"] == 0 and cr["encrypt"]["quote_unverified"]
     assert cr["no quote"]["score"] == 0 and cr["no quote"]["match"] is False
     assert cr["absent"]["score"] == 0 and "quote_unverified" not in cr["absent"]
-    assert stats == {"scored": 3, "with_quote": 2, "verified": 1, "downgraded": 2}
+    assert stats == {"scored": 3, "with_quote": 2, "quotes": 2, "verified": 1, "downgraded": 2}
+
+
+def test_verify_keeps_multiple_quotes_and_downgrades_only_when_none_survive():
+    cr = {"buffer": {"score": 2, "evidence_quotes": [
+        "a buffering control unit receives data via the first virtual channel",
+        "the switching unit stores that data in the second receive buffer",
+        "packets are encrypted with a rotating key schedule"]}}
+    stats = verify_checklist_results(cr, DOC)
+    item = cr["buffer"]
+    assert item["score"] == 2 and len(item["verified_quotes"]) == 2
+    assert [c["verified"] for c in item["quote_checks"]] == [True, True, False]
+    assert item["evidence_quote"] == item["verified_quotes"][0]
+    assert stats["quotes"] == 3 and stats["verified"] == 2 and stats["downgraded"] == 0

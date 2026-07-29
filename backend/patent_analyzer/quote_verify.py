@@ -42,10 +42,30 @@ def locate_quote(quote: str, document: str, threshold: float = 0.9) -> tuple[boo
     return best >= threshold, round(best, 4)
 
 
+def _quotes_of(item: dict) -> list[str]:
+    raw = item.get("evidence_quotes")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        raw = [item["evidence_quote"]] if item.get("evidence_quote") else []
+    seen, out = set(), []
+    for q in raw:
+        q = str(q or "").strip()
+        if q and q.lower() not in seen:
+            seen.add(q.lower())
+            out.append(q)
+    return out[:5]
+
+
 def verify_checklist_results(checklist_results: dict, document: str,
                              threshold: float = 0.9) -> dict:
-    """Downgrade unverifiable quotes in place; return verification stats."""
-    stats = {"scored": 0, "with_quote": 0, "verified": 0, "downgraded": 0}
+    """Verify every quote (evidence_quotes list, or the single evidence_quote)
+    against the document: char-level locate_quote OR the dual span/bigram
+    rule. Keeps the verified quotes, downgrades the score to 0 when none
+    survive. Returns verification stats."""
+    from .quote_dual import DocIndex, verify_quote_dual
+    idx = DocIndex(document) if document else None
+    stats = {"scored": 0, "with_quote": 0, "quotes": 0, "verified": 0, "downgraded": 0}
     for item in checklist_results.values():
         if not isinstance(item, dict):
             continue
@@ -55,14 +75,25 @@ def verify_checklist_results(checklist_results: dict, document: str,
         if score <= 0:
             continue
         stats["scored"] += 1
-        quote = (item.get("evidence_quote") or "").strip()
-        if quote:
-            stats["with_quote"] += 1
-            found, sim = locate_quote(quote, document, threshold)
-            item["quote_similarity"] = sim
-            if found:
+        quotes = _quotes_of(item)
+        verified, checks = [], []
+        for q in quotes:
+            stats["quotes"] += 1
+            found, sim = locate_quote(q, document, threshold)
+            dual, sr, br = verify_quote_dual(q, idx) if idx is not None else (False, 0.0, 0.0)
+            ok = found or dual
+            checks.append({"quote": q, "verified": ok, "sim": sim, "span": sr, "bigram": br})
+            if ok:
+                verified.append(q)
                 stats["verified"] += 1
-                continue
+        if quotes:
+            stats["with_quote"] += 1
+        item["evidence_quotes"] = quotes
+        item["quote_checks"] = checks
+        item["evidence_quote"] = verified[0] if verified else (quotes[0] if quotes else "")
+        item["verified_quotes"] = verified
+        if verified:
+            continue
         item["score"], item["match"] = 0, False
         item["quote_unverified"] = True
         stats["downgraded"] += 1
