@@ -70,6 +70,8 @@ async def report_node(state: GraphState) -> dict:
         "search": {
             "summary": state.get("search_stats", {}),
         },
+        "extraction": state.get("extraction", {}),
+        "eval_stats": state.get("eval_stats", {}),
         "evaluation": {
             "scoring_report": scoring_report,
             "summary": state.get("overall_summary", ""),
@@ -86,11 +88,14 @@ async def report_node(state: GraphState) -> dict:
     (job_dir / "results.json").write_text(results_str)
     _save_to_gcs(job_id, "results.json", results_str, "application/json")
 
-    html = generate_html(results)
+    from patent_analyzer.report_sections import inject_html, inject_md
+    html = inject_html(generate_html(results), results["extraction"], results["search"]["summary"],
+                       scoring_report, state.get("checklist", []))
     (job_dir / "report.html").write_text(html, encoding="utf-8")
     _save_to_gcs(job_id, "report.html", html, "text/html")
 
-    md = generate_markdown(results)
+    md = inject_md(generate_markdown(results), results["extraction"], results["search"]["summary"],
+                   scoring_report, state.get("checklist", []))
     (job_dir / "report.md").write_text(md, encoding="utf-8")
     _save_to_gcs(job_id, "report.md", md, "text/markdown")
 
