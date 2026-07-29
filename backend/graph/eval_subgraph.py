@@ -87,6 +87,16 @@ async def eval_single_doc(input: SingleDocInput) -> dict:
     match_type = doc.get("match_type", "Paper")
     pub_num = doc.get("pub_num", "")
 
+    from patent_analyzer.quote_verify import verify_checklist_results
+
+    def _pdf_text(path: str) -> str:
+        try:
+            import fitz
+            with fitz.open(path) as d:
+                return "\n".join(page.get_text() for page in d)
+        except Exception:
+            return ""
+
     if pdf and Path(pdf).exists():
         result = await evaluate_single_document(
             input["summary"], input["checklist"], pdf, title, match_type,
@@ -95,13 +105,25 @@ async def eval_single_doc(input: SingleDocInput) -> dict:
             persona=input["persona"],
         )
         result["source"] = "pdf"
+        full_text = _pdf_text(pdf)
+        if full_text:
+            result["quote_verification"] = verify_checklist_results(result.get("checklist_results", {}), full_text)
     else:
-        text = (doc.get("abstract") or "").strip() or (doc.get("snippet") or "").strip()
+        # full text when we have it (claims from BigQuery + abstract), else abstract/snippet
+        claims = (doc.get("claims_text") or "").strip()
+        abstract = (doc.get("abstract") or "").strip() or (doc.get("snippet") or "").strip()
+        if claims:
+            text = f"[ABSTRACT] {abstract}\n\n[CLAIMS]\n{claims}"
+            mode = "full_text"
+        else:
+            text, mode = abstract, "abstract"
         if len(text) >= 120:
             result = await evaluate_single_document_text(
                 input["summary"], input["checklist"], text, title, match_type,
-                persona=input["persona"],
+                persona=input["persona"], doc_mode=mode,
             )
+            if mode == "full_text":
+                result["quote_verification"] = verify_checklist_results(result.get("checklist_results", {}), text)
         else:
             result = {"title": title, "match_type": match_type,
                       "checklist_results": {}, "source": "no_content"}
