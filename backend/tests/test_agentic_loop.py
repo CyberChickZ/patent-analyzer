@@ -59,5 +59,6 @@ def test_loop_rounds_and_budget(monkeypatch):
     assert rounds[0]["cpc_hint"] == "H04N"
     # e2 never covered: rounds 2 (CL=) and 3 (CPC=) both tried
     assert any("CL=(" in q["query"] for q in rounds[1]["queries"]) if len(rounds) > 1 else True
+    assert all("AB=(" not in q["query"] for q in rounds[0]["queries"])
     assert any("CPC=H04N" in q["query"] for q in rounds[2]["queries"]) if len(rounds) > 2 else True
     assert all(k == "round_done" for k, _ in events)

@@ -82,8 +82,10 @@ async def run_loop(state: dict, serpapi_left, serpapi_take, event, embed=None) -
     for rnd in range(1, MAX_ROUNDS + 1):
         if not uncovered:
             break
-        field = "CL" if rnd == 2 else "AB"
-        start_mode = "loose" if rnd == 2 else "strict"
+        # round 1: loose on full text (two facets); validator tightens if too broad.
+        # round 2: claims-scoped; round 3: strict + CPC from the seeds.
+        field = "CL" if rnd == 2 else ""
+        start_mode = "strict" if rnd == 3 else "loose"
         new_this_round: list[Candidate] = []
         queries_log = []
         for el in uncovered:
