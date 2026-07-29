@@ -30,6 +30,7 @@ class EvalState(TypedDict, total=False):
     overall_summary: str
     novelty_score: float
     risk_level: str
+    eval_stats: dict
     events: list[dict]
     phase_results: dict
 
@@ -187,8 +188,18 @@ async def reduce_eval(state: EvalState) -> dict:
         except Exception as e:
             overall_summary = f"(Summary generation failed: {e})"
 
+    quote_stats = {"docs_verified": 0, "quotes": 0, "verified": 0, "downgraded": 0}
+    for r in scoring_report:
+        qv = r.get("quote_verification") or {}
+        if qv:
+            quote_stats["docs_verified"] += 1
+            for k in ("quotes", "verified", "downgraded"):
+                quote_stats[k] += int(qv.get(k, 0))
+
     events = [
         _event("info", f"Evaluated {len(scoring_report)} docs, top score: {top_score:.2%}, risk: {risk_level}"),
+        _event("info", f"Quote verification: {quote_stats['verified']}/{quote_stats['quotes']} quotes verified "
+                       f"across {quote_stats['docs_verified']} docs, {quote_stats['downgraded']} criteria downgraded"),
     ]
 
     return {
@@ -197,10 +208,11 @@ async def reduce_eval(state: EvalState) -> dict:
         "overall_summary": overall_summary,
         "novelty_score": round(1.0 - top_score, 4),
         "risk_level": risk_level,
+        "eval_stats": {"quote_stats": quote_stats, "evaluated": len(scoring_report)},
         "events": events,
         "phase_results": {"phase4": {
             "status": "completed",
-            "data": {"evaluated": len(scoring_report), "top_score": round(top_score, 4)},
+            "data": {"evaluated": len(scoring_report), "top_score": round(top_score, 4), **quote_stats},
         }},
     }
 

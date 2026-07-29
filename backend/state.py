@@ -83,6 +83,8 @@ class GraphState(TypedDict, total=False):
     # ── Phase 4: Evaluation outputs ──
     eval_results: Annotated[list[dict], operator.add]    # reducer: parallel append
     scoring_report: list[dict]     # scored + sorted
+    eval_stats: dict               # {quote_stats: {...}, evaluated}
+    extraction: dict               # Phase 2 extraction schema (candidate_inventions, ...)
     combination_analysis: str
     overall_summary: str
     novelty_score: float
