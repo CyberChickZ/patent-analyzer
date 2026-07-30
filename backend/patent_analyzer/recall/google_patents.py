@@ -19,6 +19,7 @@ import re
 import urllib.parse
 
 import hashlib
+import os
 
 import httpx
 
@@ -30,11 +31,13 @@ _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
 _XHR = "https://patents.google.com/xhr/query"
 _PAGE = "https://patents.google.com/patent/{pub}/en"
-_sem = asyncio.Semaphore(2)
-_MIN_GAP = 1.0
+_sem = asyncio.Semaphore(1)
+_MIN_GAP = float(os.environ.get("GP_MIN_GAP", "4.0"))        # community-measured safe pace
 _last_call = 0.0
-_BLOCK_COOLDOWN = 15 * 60
+_BLOCK_COOLDOWN = 15 * 60                                   # Sorry page
+_SOFT_COOLDOWN = float(os.environ.get("GP_503_COOLDOWN", "90"))   # bare 503 / 429
 _breaker = Breaker("google_patents", cooldown_s=_BLOCK_COOLDOWN)
+_soft_breaker = Breaker("google_patents_503", cooldown_s=_SOFT_COOLDOWN)
 _CACHE_DAYS = 30
 last_total: dict[str, int] = {}   # query -> total_num_results from the last live call
 
@@ -46,10 +49,10 @@ def _clean(s: str) -> str:
 async def _get(url: str, timeout: float = 30) -> httpx.Response | None:
     """Polite GET: 2 concurrent, >=1s apart, retry 429/5xx with backoff."""
     global _last_call
-    if _breaker.is_open():
+    if _breaker.is_open() or _soft_breaker.is_open():
         return None
     async with _sem:
-        for attempt in range(3):
+        for attempt in range(2):
             wait = _MIN_GAP - (asyncio.get_event_loop().time() - _last_call)
             if wait > 0:
                 await asyncio.sleep(wait)
@@ -68,12 +71,16 @@ async def _get(url: str, timeout: float = 30) -> httpx.Response | None:
                 # Google abuse page: this IP is soft-blocked; trip the shared breaker
                 _breaker.trip(f"Sorry page on {url[:80]}")
                 return None
+            if r is not None and r.status_code in (429, 503):
+                # rate signal without the Sorry page: back off 90 s, do not hammer
+                _soft_breaker.trip(f"HTTP {r.status_code}")
+                return None
             await asyncio.sleep(2.0 * (attempt + 1))
     return r
 
 
 def is_blocked() -> bool:
-    return _breaker.is_open()
+    return _breaker.is_open() or _soft_breaker.is_open()
 
 
 def _cache_key(query: str, num: int, page: int, before: str | None) -> str:
