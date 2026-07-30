@@ -263,14 +263,14 @@ def should_retry_elements(state: ExtractionState) -> str:
 
 def build_extraction_subgraph():
     g = StateGraph(ExtractionState)
-    g.add_node("candidates", candidates_node)
-    g.add_node("elements", elements_node)
-    g.add_node("verify", verify_node)
-    g.add_node("self_check", self_check_node)
+    g.add_node("a1_candidates", candidates_node)
+    g.add_node("a2_elements", elements_node)
+    g.add_node("a3_verify", verify_node)
+    g.add_node("a5_self_check", self_check_node)
 
-    g.set_entry_point("candidates")
-    g.add_conditional_edges("candidates", route_after_candidates, {"elements": "elements", END: END})
-    g.add_edge("elements", "verify")
-    g.add_edge("verify", "self_check")
-    g.add_conditional_edges("self_check", should_retry_elements, {"elements": "elements", END: END})
+    g.set_entry_point("a1_candidates")
+    g.add_conditional_edges("a1_candidates", route_after_candidates, {"elements": "a2_elements", END: END})
+    g.add_edge("a2_elements", "a3_verify")
+    g.add_edge("a3_verify", "a5_self_check")
+    g.add_conditional_edges("a5_self_check", should_retry_elements, {"elements": "a2_elements", END: END})
     return g.compile()

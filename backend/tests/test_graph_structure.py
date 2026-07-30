@@ -64,3 +64,9 @@ if __name__ == "__main__":
     test_route_search_empty()
     test_route_search_has_results()
     print("All graph structure tests passed!")
+
+
+def test_extraction_subgraph_compiles_inside_main_graph(monkeypatch):
+    monkeypatch.delenv("EXTRACTOR", raising=False)
+    for phase in ("all", "first_half", "second_half"):
+        assert build_graph(phase=phase) is not None
