@@ -462,10 +462,14 @@ function renderEvent(e: any, idx: number): string {
     done: '✓',
     error: '✗',
     warn: '⚠',
+    round_done: '↻',
+    channel_done: '▸',
+    channel_limited: '⏸',
+    channel_crashed: '✗',
   };
   const icon = kindIcon[e.kind] || '·';
   const cls = e.kind === 'error' ? 'evt-error' : e.kind === 'warn' ? 'evt-warn' : e.kind.startsWith('llm') ? 'evt-llm' : '';
-  const hasDetail = e.payload && (e.payload.system || e.payload.user || e.payload.response || e.payload.full || e.payload.traceback || e.payload.query);
+  const hasDetail = e.payload && (e.payload.system || e.payload.user || e.payload.response || e.payload.full || e.payload.traceback || e.payload.query || e.payload.round !== undefined || e.payload.errors);
   const clickable = hasDetail ? 'evt-clickable' : '';
   let payloadHtml = '';
   if (e.payload) {
@@ -473,6 +477,10 @@ function renderEvent(e: any, idx: number): string {
       payloadHtml = `<div class="evt-payload">${escapeHtml(e.payload.preview)}</div>`;
     } else if (e.payload.query) {
       payloadHtml = `<div class="evt-payload"><code>${escapeHtml(e.payload.query)}</code></div>`;
+    } else if (e.payload.round !== undefined) {
+      const p = e.payload;
+      const n = (p.covered?.length || 0) + (p.uncovered?.length || 0);
+      payloadHtml = `<div class="evt-payload">round ${p.round}: ${p.n_queries} queries · google ${p.gp_calls}${p.gp_blocked ? ' (blocked)' : ''} · serpapi ${p.serpapi_calls} · seeds ${p.seeds} · +${p.expanded} cited · pool ${p.pool_size} · covered ${p.covered?.length || 0}/${n}</div>`;
     }
   }
   return `<div class="event-row ${cls} ${clickable}" data-evt-idx="${idx}">
@@ -506,6 +514,14 @@ function openEventModal(e: any) {
   }
   if (p.traceback) {
     html += `<div class="modal-section"><h4>Traceback</h4><pre>${escapeHtml(p.traceback)}</pre></div>`;
+  }
+  if (p.round !== undefined && Array.isArray(p.queries)) {
+    const rows = p.queries.map((q: any) => `<tr><td>${escapeHtml(q.element)}</td><td>${escapeHtml(q.mode)}</td><td>${escapeHtml(q.channel)}</td><td>${q.total ?? '–'}</td><td>${q.hits}</td><td>${escapeHtml(q.verdict)}</td><td><code>${escapeHtml(q.query)}</code></td></tr>`).join('');
+    html += `<div class="modal-section"><h4>Queries this round</h4><table class="tbl"><thead><tr><th>Element</th><th>Mode</th><th>Channel</th><th>Total</th><th>Hits</th><th>Verdict</th><th>Query</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    html += `<div class="modal-section"><h4>Uncovered after this round</h4><pre>${escapeHtml((p.uncovered || []).join(', ') || '(none)')}</pre></div>`;
+  }
+  if (p.errors && p.errors.length) {
+    html += `<div class="modal-section"><h4>Channel errors</h4><pre>${escapeHtml(JSON.stringify(p.errors, null, 1))}</pre></div>`;
   }
   content.innerHTML = html;
   overlay.classList.add("open");
