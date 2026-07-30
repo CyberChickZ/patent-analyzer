@@ -192,7 +192,7 @@ async def _run_langgraph_pipeline(job_id: str):
                      "fields_map", "source_title", "source_arxiv_id", "source_doi",
                      "status_determination", "doc_type", "input_mode", "personas",
                      "input_local_path", "notify_email", "evolve", "hitl_enabled",
-                     "phase_results"):
+                     "phase_results", "extraction", "document_text"):
             if key in final_state:
                 state_to_save[key] = final_state[key]
 
