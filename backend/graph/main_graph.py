@@ -7,7 +7,8 @@ P2: HITL via manual two-phase split (interrupt_after unreliable on Cloud Run ast
 from langgraph.graph import END, StateGraph
 
 from graph.eval_subgraph import build_eval_subgraph
-from graph.ssr_subgraph import build_ssr_subgraph
+from graph.extraction_subgraph import build_extraction_subgraph
+from graph.ssr_subgraph import build_ssr_subgraph  # legacy; kept for EXTRACTOR=ssr
 from nodes.idca import idca_node
 from nodes.report import report_node
 from nodes.search import search_node
@@ -38,11 +39,16 @@ def build_graph(checkpointer=None, hitl_enabled=False, phase="all"):
     phase="first_half": IDCA → SSR → END (for HITL pause after checklist)
     phase="second_half": Search → Eval → Report → END (resume after HITL)
     """
+    import os
+    # Phase 2 implementation: the extraction subgraph (candidate inventions +
+    # claim-language elements with verbatim evidence). EXTRACTOR=ssr restores
+    # the legacy SSR checklist path.
+    phase2 = build_ssr_subgraph if os.environ.get("EXTRACTOR", "extraction") == "ssr" else build_extraction_subgraph
     g = StateGraph(GraphState)
 
     if phase == "first_half":
         g.add_node("idca", idca_node)
-        g.add_node("ssr", build_ssr_subgraph())
+        g.add_node("ssr", phase2())
         g.add_node("report", report_node)
         g.set_entry_point("idca")
         g.add_conditional_edges("idca", route_after_idca, {
@@ -66,7 +72,7 @@ def build_graph(checkpointer=None, hitl_enabled=False, phase="all"):
 
     else:
         g.add_node("idca", idca_node)
-        g.add_node("ssr", build_ssr_subgraph())
+        g.add_node("ssr", phase2())
         g.add_node("search", search_node)
         g.add_node("evaluate", build_eval_subgraph())
         g.add_node("report", report_node)
