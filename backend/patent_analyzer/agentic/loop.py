@@ -125,6 +125,9 @@ async def run_loop(state: dict, serpapi_left, serpapi_take, event, embed=None) -
                  "new_in_pool": len(new_this_round) + len(expanded),
                  "covered": sorted(covered_ids), "uncovered": [e["id"] for e in uncovered],
                  "cpc_hint": cpc_hint, "queries": queries_log,
+                 "pool_pubs": sorted(k for k in pool),
+                 "new_pubs": sorted({(c.pub_num or c.title).upper() for c in new_this_round + expanded}),
+                 "seed_pubs": sorted(set(seeds)),
                  "ts": datetime.now(timezone.utc).isoformat()}
         rounds.append(stats)
         event("round_done", f"loop round {rnd}: pool {len(pool)}, covered {len(covered_ids)}/{len(elements)}, "
