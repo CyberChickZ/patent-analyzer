@@ -110,6 +110,54 @@ def locate_quote(quote: str, document: str, threshold: float = 0.9) -> tuple[boo
     return True, round(worst, 4)
 
 
+def pdf_text(path: str) -> str:
+    """Page text for quote verification: hyphens at line ends joined, ligatures
+    expanded, lines repeated on most pages (running headers/footers) and bare
+    page-number lines dropped. Reading order is PyMuPDF's default (sort=True
+    interleaves the columns of OCR'd two-column patents)."""
+    try:
+        import fitz
+    except ImportError:
+        return ""
+    flags = (fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_MEDIABOX_CLIP | fitz.TEXT_DEHYPHENATE)
+    try:
+        with fitz.open(path) as doc:
+            pages = [page.get_text("text", flags=flags) for page in doc]
+    except Exception:
+        return ""
+    return "\n".join(strip_running_lines(pages))
+
+
+_PAGE_NO = re.compile(r"^\s*(?:page\s*)?[\divxlc]{1,4}(?:\s*(?:/|of)\s*\d{1,4})?\s*$", re.IGNORECASE)
+_SHEET = re.compile(r"^\s*sheet\s*\d+\s*of\s*\d+\s*$", re.IGNORECASE)
+
+
+def strip_running_lines(pages: list[str], min_pages: int = 3, share: float = 0.5) -> list[str]:
+    """Remove short lines that recur on >= share of the pages (running
+    headers/footers such as 'US 2009/0248944 A1') and page-number lines."""
+    n = len(pages)
+    counts: dict[str, int] = {}
+    per_page = [p.split("\n") for p in pages]
+    for lines in per_page:
+        for key in {normalize(l) for l in lines if 0 < len(l.strip()) <= 80}:
+            if key:
+                counts[key] = counts.get(key, 0) + 1
+    running = {k for k, c in counts.items() if n >= min_pages and c >= max(min_pages, share * n)}
+    out = []
+    for lines in per_page:
+        kept = []
+        for l in lines:
+            s = l.strip()
+            if not s:
+                kept.append(l)
+                continue
+            if _PAGE_NO.match(s) or _SHEET.match(s) or (len(s) <= 80 and normalize(s) in running):
+                continue
+            kept.append(l)
+        out.append("\n".join(kept))
+    return out
+
+
 def _quotes_of(item: dict) -> list[str]:
     raw = item.get("evidence_quotes")
     if isinstance(raw, str):

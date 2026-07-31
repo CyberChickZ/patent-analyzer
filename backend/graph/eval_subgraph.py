@@ -88,15 +88,7 @@ async def eval_single_doc(input: SingleDocInput) -> dict:
     match_type = doc.get("match_type", "Paper")
     pub_num = doc.get("pub_num", "")
 
-    from patent_analyzer.quote_verify import verify_checklist_results
-
-    def _pdf_text(path: str) -> str:
-        try:
-            import fitz
-            with fitz.open(path) as d:
-                return "\n".join(page.get_text() for page in d)
-        except Exception:
-            return ""
+    from patent_analyzer.quote_verify import pdf_text as _pdf_text, verify_checklist_results
 
     if pdf and Path(pdf).exists():
         result = await evaluate_single_document(

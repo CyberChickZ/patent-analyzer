@@ -140,3 +140,15 @@ def test_translated_quote_is_flagged_not_verified():
     stats = verify_checklist_results(cr, doc)
     assert cr["x"]["score"] == 0 and cr["x"]["quote_checks"][0]["reason"] == "translated"
     assert stats["translated"] == 1 and stats["downgraded"] == 1
+
+
+from patent_analyzer.quote_verify import strip_running_lines
+
+
+def test_running_headers_and_page_numbers_removed():
+    pages = [f"US 2009/0248944 A1\nOct. 1, 2009\nbody text of page {i} with accompa\nnying words\n{i + 1}\nSheet 1 of 4"
+             for i in range(4)]
+    out = strip_running_lines(pages)
+    assert all("US 2009/0248944 A1" not in p and "Sheet 1 of 4" not in p for p in out)
+    assert all(f"body text of page {i}" in out[i] for i in range(4))
+    assert not any(line.strip().isdigit() for p in out for line in p.split("\n"))
