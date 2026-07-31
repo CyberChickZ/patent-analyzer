@@ -1,20 +1,28 @@
 """Verify that an LLM evidence_quote actually appears in the source text.
 
-Whitespace/punctuation/case are normalized on both sides, then the best
+Both sides are NFKC-normalized, lowered and reduced to Unicode word
+characters (CJK kept, spaces inside CJK runs dropped), then the best
 local alignment of the quote inside the document is scored with
 difflib. A quote that cannot be located is treated as fabricated and the
 associated score is downgraded to 0.
 """
 
 import re
+import unicodedata
 from difflib import SequenceMatcher
 
-_NORM = re.compile(r"[^a-z0-9 ]+")
+CJK = r"\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af"
+_NONWORD = re.compile(r"[\W_]+")
 _WS = re.compile(r"\s+")
+_CJK_SPACE = re.compile(rf"(?<=[{CJK}]) +| +(?=[{CJK}])")
 
 
 def normalize(text: str) -> str:
-    return _WS.sub(" ", _NORM.sub(" ", (text or "").lower())).strip()
+    """NFKC (ligatures, full-width punctuation), lower, Unicode word chars only
+    (CJK survives), no spaces next to CJK (PDF line breaks split sentences)."""
+    t = unicodedata.normalize("NFKC", text or "").lower()
+    t = _WS.sub(" ", _NONWORD.sub(" ", t)).strip()
+    return _CJK_SPACE.sub("", t)
 
 
 def locate_quote(quote: str, document: str, threshold: float = 0.9) -> tuple[bool, float]:
