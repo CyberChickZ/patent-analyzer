@@ -1,4 +1,4 @@
-"""Dual-threshold quote grounding (eval-only, sits beside patent_analyzer/quote_verify).
+"""Dual-threshold quote grounding (second gate beside quote_verify.locate_quote).
 
 A quote passes when both hold:
   span_ratio   >= SPAN_TAU   — share of the quote's content words (stop words
@@ -13,12 +13,16 @@ control arm for the multi-quote coverage eval.
 """
 
 import re
+import unicodedata
+
+from .quote_verify import CJK
 
 SPAN_TAU = 0.70
 BIGRAM_TAU = 0.30
 MIN_CONTENT = 3
 
-_TOK = re.compile(r"[a-z0-9]+")
+_TOK = re.compile(rf"[^\W_{CJK}]+|[{CJK}]+")
+_CJK_RUN = re.compile(rf"^[{CJK}]")
 STOP = frozenset("""
 a an the and or of to in on at by for with from as is are was were be been being
 this that these those it its into onto than then such via each any all one two
@@ -30,7 +34,15 @@ hereby further least between through over under about above below said
 
 
 def tokens(text: str) -> list[str]:
-    return _TOK.findall((text or "").lower())
+    """Latin/digit runs as words; a CJK run becomes its character bigrams
+    (Elasticsearch cjk_bigram), a lone CJK character stays a unigram."""
+    out = []
+    for run in _TOK.findall(unicodedata.normalize("NFKC", text or "").lower()):
+        if _CJK_RUN.match(run):
+            out.extend([run[i:i + 2] for i in range(len(run) - 1)] or [run])
+        else:
+            out.append(run)
+    return out
 
 
 def content_tokens(text: str) -> list[str]:

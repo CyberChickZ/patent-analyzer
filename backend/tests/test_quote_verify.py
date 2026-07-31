@@ -86,3 +86,19 @@ def test_cjk_quote_from_other_document_rejected():
 
 def test_ligature_and_fullwidth_forms_normalized():
     assert normalize("ﬁnal conﬁguration，ＡＢＣ") == "final configuration abc"
+
+
+from patent_analyzer.quote_dual import tokens, verify_quote_dual
+
+
+def test_cjk_tokens_are_character_bigrams():
+    assert tokens("无人机 t=1") == ["无人", "人机", "t", "1"]
+    assert tokens("Für eine") == ["für", "eine"]
+
+
+def test_cjk_quote_with_formula_dropped_by_pdf_passes_dual_not_locate():
+    q = "步骤602、计数器t=1开始迭代,利用第(t-1)轮迭代中的用户分组{K_m(t-1)}和无人机的位置{v_m(t-1)},求解优化问题更新用户功率分配;"
+    ok, sr, br = verify_quote_dual(q, CN_DOC)
+    assert ok and sr >= 0.85 and br >= 0.7
+    ok, _, _ = verify_quote_dual("每架无人机都有一个对应的队友模型,每个模型记录该无人机的最大概率方向", CN_DOC)
+    assert not ok
