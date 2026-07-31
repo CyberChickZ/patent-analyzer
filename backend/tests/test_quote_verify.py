@@ -102,3 +102,28 @@ def test_cjk_quote_with_formula_dropped_by_pdf_passes_dual_not_locate():
     assert ok and sr >= 0.85 and br >= 0.7
     ok, _, _ = verify_quote_dual("每架无人机都有一个对应的队友模型,每个模型记录该无人机的最大概率方向", CN_DOC)
     assert not ok
+
+
+from patent_analyzer.quote_verify import quote_segments, strip_labels
+
+
+def test_source_labels_and_ellipsis_are_stripped():
+    assert strip_labels("将摄像头拍摄的实时画面进行特征信息的提取; (Abstract)") == "将摄像头拍摄的实时画面进行特征信息的提取;"
+    assert strip_labels("Claim 1: Initialize the single UAV") == "Initialize the single UAV"
+    assert strip_labels("[Page 4] ...the input (o^n, d^n) of Q_g") == "...the input (o^n, d^n) of Q_g"
+    assert strip_labels("对于待执行的任务; (Claim 1: For tasks (to be) executed)") == "对于待执行的任务;"
+    assert quote_segments("a buffering control unit ... second receive buffer (Claim 2)") == \
+        ["a buffering control unit", "second receive buffer"]
+
+
+def test_elided_quote_needs_every_segment():
+    found, _ = locate_quote("a buffering control unit receives data ... stores that data in the second receive buffer", DOC)
+    assert found
+    found, _ = locate_quote("a buffering control unit receives data ... encrypts every packet with a key", DOC)
+    assert not found
+
+
+def test_ligature_dash_and_hyphenless_line_break():
+    pdf = "Enabling this\ncapability requires the ﬁnal conﬁguration of motion–LED behaviors while accompa\nnying agents"
+    found, sim = locate_quote("the final configuration of motion-LED behaviors while accompanying agents", pdf)
+    assert found and sim >= 0.9

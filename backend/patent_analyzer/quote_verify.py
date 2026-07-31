@@ -1,38 +1,57 @@
 """Verify that an LLM evidence_quote actually appears in the source text.
 
-Both sides are NFKC-normalized, lowered and reduced to Unicode word
-characters (CJK kept, spaces inside CJK runs dropped), then the best
-local alignment of the quote inside the document is scored with
-difflib. A quote that cannot be located is treated as fabricated and the
-associated score is downgraded to 0.
+Both sides are NFKC-normalized (ligatures, full-width punctuation), lowered,
+reduced to Unicode word characters (so CJK survives), and whitespace inside
+CJK runs is dropped (PDF line breaks fall inside Chinese sentences). The
+quote may carry a source label ("(Abstract)", "Claim 1:", "[Page 4]") and
+"..." elisions: labels are stripped and every elided segment must be found.
+The best local alignment inside the document is scored with difflib; a
+second pass ignores all spaces (OCR text layers drop the hyphen and keep
+the line break: "accompa nying"). A quote that cannot be located is
+treated as fabricated and the associated score is downgraded to 0.
 """
 
 import re
 import unicodedata
 from difflib import SequenceMatcher
 
-CJK = r"\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af"
+CJK = r"぀-ヿ㐀-䶿一-鿿豈-﫿가-힯"
 _NONWORD = re.compile(r"[\W_]+")
 _WS = re.compile(r"\s+")
 _CJK_SPACE = re.compile(rf"(?<=[{CJK}]) +| +(?=[{CJK}])")
 
+_LABEL = r"(?:abstract|claims?|para(?:graph)?|page|fig(?:ure)?s?|col(?:umn)?|lines?|section|step|source|see)"
+_LEAD_LABEL = re.compile(
+    rf"^\s*(?:\[[^\]]{{1,40}}\]|\({_LABEL}[^)]{{0,40}}\)|{_LABEL}\.?\s*[\d.\-–,]*(?:\s*step\s*\d+)?)\s*[:：\-–]?\s*",
+    re.IGNORECASE)
+_TRAIL_LABEL = re.compile(rf"\s*[\[(]\s*{_LABEL}\b.*[\])]\s*$", re.IGNORECASE | re.DOTALL)
+_ELLIPSIS = re.compile(r"\s*(?:\.{3,}|…)\s*")
+
 
 def normalize(text: str) -> str:
-    """NFKC (ligatures, full-width punctuation), lower, Unicode word chars only
-    (CJK survives), no spaces next to CJK (PDF line breaks split sentences)."""
     t = unicodedata.normalize("NFKC", text or "").lower()
     t = _WS.sub(" ", _NONWORD.sub(" ", t)).strip()
     return _CJK_SPACE.sub("", t)
 
 
-def locate_quote(quote: str, document: str, threshold: float = 0.9) -> tuple[bool, float]:
-    """Return (found, similarity). Exact normalized substring short-circuits;
-    otherwise slide a window of the quote's length over the document."""
-    q, d = normalize(quote), normalize(document)
-    if len(q) < 10 or not d:
-        return False, 0.0
+def strip_labels(quote: str) -> str:
+    """Drop a leading/trailing source label the model attached to the excerpt."""
+    q = unicodedata.normalize("NFKC", quote or "").strip()
+    for _ in range(2):
+        q = _LEAD_LABEL.sub("", q, count=1)
+    q = _TRAIL_LABEL.sub("", q)
+    return q.strip()
+
+
+def quote_segments(quote: str) -> list[str]:
+    """Label-stripped quote split on '...' elisions; each part is verified alone."""
+    parts = [p for p in _ELLIPSIS.split(strip_labels(quote)) if p and p.strip()]
+    return parts or [quote]
+
+
+def _best_ratio(q: str, d: str, threshold: float) -> float:
     if q in d:
-        return True, 1.0
+        return 1.0
     n = len(q)
     step = max(1, n // 4)
     best = 0.0
@@ -47,7 +66,34 @@ def locate_quote(quote: str, document: str, threshold: float = 0.9) -> tuple[boo
             best = ratio
             if best >= 0.995:
                 break
-    return best >= threshold, round(best, 4)
+    return best
+
+
+def _locate_normalized(q: str, d: str, threshold: float) -> float:
+    best = _best_ratio(q, d, threshold)
+    if best < threshold and " " in q:
+        best = max(best, _best_ratio(q.replace(" ", ""), d.replace(" ", ""), threshold))
+    return best
+
+
+def locate_quote(quote: str, document: str, threshold: float = 0.9) -> tuple[bool, float]:
+    """Return (found, similarity). Exact normalized substring short-circuits;
+    otherwise slide a window of the quote's length over the document, with a
+    space-insensitive second pass. An elided quote ("a ... b") is found only
+    when every segment is found; similarity is the weakest segment."""
+    d = normalize(document)
+    if not d:
+        return False, 0.0
+    segs = [s for s in (normalize(p) for p in quote_segments(quote)) if len(s) >= 10]
+    if not segs:
+        return False, 0.0
+    worst = 1.0
+    for s in segs:
+        r = _locate_normalized(s, d, threshold)
+        worst = min(worst, r)
+        if worst < threshold:
+            return False, round(worst, 4)
+    return True, round(worst, 4)
 
 
 def _quotes_of(item: dict) -> list[str]:
@@ -88,7 +134,7 @@ def verify_checklist_results(checklist_results: dict, document: str,
         for q in quotes:
             stats["quotes"] += 1
             found, sim = locate_quote(q, document, threshold)
-            dual, sr, br = verify_quote_dual(q, idx) if idx is not None else (False, 0.0, 0.0)
+            dual, sr, br = verify_quote_dual(strip_labels(q), idx) if idx is not None else (False, 0.0, 0.0)
             ok = found or dual
             checks.append({"quote": q, "verified": ok, "sim": sim, "span": sr, "bigram": br})
             if ok:
