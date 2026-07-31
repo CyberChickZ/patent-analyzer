@@ -19,6 +19,8 @@ CJK = r"぀-ヿ㐀-䶿一-鿿豈-﫿가-힯"
 _NONWORD = re.compile(r"[\W_]+")
 _WS = re.compile(r"\s+")
 _CJK_SPACE = re.compile(rf"(?<=[{CJK}]) +| +(?=[{CJK}])")
+_CJK_CHAR = re.compile(rf"[{CJK}]")
+_LATIN_CHAR = re.compile(r"[a-z]")
 
 _LABEL = r"(?:abstract|claims?|para(?:graph)?|page|fig(?:ure)?s?|col(?:umn)?|lines?|section|step|source|see)"
 _LEAD_LABEL = re.compile(
@@ -47,6 +49,18 @@ def quote_segments(quote: str) -> list[str]:
     """Label-stripped quote split on '...' elisions; each part is verified alone."""
     parts = [p for p in _ELLIPSIS.split(strip_labels(quote)) if p and p.strip()]
     return parts or [quote]
+
+
+def script_mismatch(quote: str, document: str) -> bool:
+    """True when the document is mostly CJK but the quote has no CJK at all
+    (the model translated the passage; nothing verbatim can be matched)."""
+    q = normalize(quote)
+    if _CJK_CHAR.search(q):
+        return False
+    sample = document[:20000]
+    n_cjk = len(_CJK_CHAR.findall(sample))
+    n_lat = len(_LATIN_CHAR.findall(sample.lower()))
+    return n_cjk > 200 and n_cjk > 2 * n_lat
 
 
 def _best_ratio(q: str, d: str, threshold: float) -> float:
@@ -119,7 +133,8 @@ def verify_checklist_results(checklist_results: dict, document: str,
     survive. Returns verification stats."""
     from .quote_dual import DocIndex, verify_quote_dual
     idx = DocIndex(document) if document else None
-    stats = {"scored": 0, "with_quote": 0, "quotes": 0, "verified": 0, "downgraded": 0}
+    stats = {"scored": 0, "with_quote": 0, "quotes": 0, "verified": 0, "downgraded": 0,
+             "translated": 0}
     for item in checklist_results.values():
         if not isinstance(item, dict):
             continue
@@ -136,7 +151,11 @@ def verify_checklist_results(checklist_results: dict, document: str,
             found, sim = locate_quote(q, document, threshold)
             dual, sr, br = verify_quote_dual(strip_labels(q), idx) if idx is not None else (False, 0.0, 0.0)
             ok = found or dual
-            checks.append({"quote": q, "verified": ok, "sim": sim, "span": sr, "bigram": br})
+            check = {"quote": q, "verified": ok, "sim": sim, "span": sr, "bigram": br}
+            if not ok and script_mismatch(q, document):
+                check["reason"] = "translated"
+                stats["translated"] += 1
+            checks.append(check)
             if ok:
                 verified.append(q)
                 stats["verified"] += 1

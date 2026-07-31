@@ -48,7 +48,7 @@ def test_verify_downgrades_unverifiable():
     assert cr["encrypt"]["score"] == 0 and cr["encrypt"]["quote_unverified"]
     assert cr["no quote"]["score"] == 0 and cr["no quote"]["match"] is False
     assert cr["absent"]["score"] == 0 and "quote_unverified" not in cr["absent"]
-    assert stats == {"scored": 3, "with_quote": 2, "quotes": 2, "verified": 1, "downgraded": 2}
+    assert stats == {"scored": 3, "with_quote": 2, "quotes": 2, "verified": 1, "downgraded": 2, "translated": 0}
 
 
 def test_verify_keeps_multiple_quotes_and_downgrades_only_when_none_survive():
@@ -127,3 +127,16 @@ def test_ligature_dash_and_hyphenless_line_break():
     pdf = "Enabling this\ncapability requires the ﬁnal conﬁguration of motion–LED behaviors while accompa\nnying agents"
     found, sim = locate_quote("the final configuration of motion-LED behaviors while accompanying agents", pdf)
     assert found and sim >= 0.9
+
+
+from patent_analyzer.quote_verify import script_mismatch
+
+
+def test_translated_quote_is_flagged_not_verified():
+    doc = CN_DOC * 20
+    q = "The invention relates to a UAV swarm cooperative patrol trajectory planning method based on the upper confidence bound"
+    assert script_mismatch(q, doc)
+    cr = {"x": {"score": 2, "evidence_quotes": [q]}}
+    stats = verify_checklist_results(cr, doc)
+    assert cr["x"]["score"] == 0 and cr["x"]["quote_checks"][0]["reason"] == "translated"
+    assert stats["translated"] == 1 and stats["downgraded"] == 1
