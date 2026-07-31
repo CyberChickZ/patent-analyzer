@@ -190,12 +190,14 @@ def print_sanity(gold: dict):
 
 
 async def run_pipeline_one(key: str, g: dict) -> dict:
-    """IDCA -> SSR -> search_node on the rendered paper; cached per query."""
+    """IDCA -> Phase 2 (extraction subgraph, or SSR with EXTRACTOR=ssr) -> search_node; cached per query."""
+    from graph.extraction_subgraph import build_extraction_subgraph
     from graph.ssr_subgraph import build_ssr_subgraph
     from nodes.idca import idca_node
     from nodes.search import search_node
 
-    out_path = RUN_DIR / f"{key}_search.json"
+    tag = os.environ.get("E4_TAG", "")
+    out_path = RUN_DIR / f"{key}_search{('_' + tag) if tag else ''}.json"
     if out_path.exists():
         return json.loads(out_path.read_text())
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
@@ -205,16 +207,25 @@ async def run_pipeline_one(key: str, g: dict) -> dict:
     rec = {"key": key, "status_determination": p1.get("status_determination"), "input_mode": p1.get("input_mode"),
            "summary": p1.get("summary", ""), "delegation": {}, "ranked": [], "pool": [], "events": []}
     if p1.get("status_determination") == "Present":
-        p2 = await build_ssr_subgraph().ainvoke({
-            "summary": p1["summary"], "fields_map": p1.get("fields_map", []),
-            "cpc_subclass": p1.get("cpc_subclass", ""), "personas": p1.get("personas", {})})
+        if os.environ.get("EXTRACTOR", "extraction") == "ssr":
+            p2 = await build_ssr_subgraph().ainvoke({
+                "summary": p1["summary"], "fields_map": p1.get("fields_map", []),
+                "cpc_subclass": p1.get("cpc_subclass", ""), "personas": p1.get("personas", {})})
+        else:
+            p2 = await build_extraction_subgraph().ainvoke({
+                "summary": p1["summary"], "document_text": p1.get("document_text", ""), "input_local_path": tmp,
+                "input_mode": p1.get("input_mode", "academic_paper"), "cpc_subclass": p1.get("cpc_subclass", "")})
         rec["delegation"] = p2.get("delegation", {})
+        rec["extraction"] = p2.get("extraction")
         p3 = await search_node({
             "summary": p1["summary"], "source_title": p1.get("source_title", ""),
             "source_arxiv_id": p1.get("source_arxiv_id", ""), "source_doi": p1.get("source_doi", ""),
             "delegation": rec["delegation"], "checklist": p2.get("checklist", []),
+            "extraction": rec["extraction"],
             "date_cutoff": g.get("priority_date") or None,
             "output_dir": str(RUN_DIR / "pdf" / key)})
+        rec["loop_rounds"] = (p3.get("search_stats") or {}).get("loop_rounds", [])
+        rec["serpapi_quota"] = (p3.get("search_stats") or {}).get("serpapi_quota", [])
         rec["ranked"] = [{"pub_num": d.get("pub_num", ""), "match_type": d.get("match_type", ""),
                           "sources": d.get("sources", []), "title": d.get("title", "")[:80]}
                          for d in p3.get("ranked_candidates", [])]
@@ -258,9 +269,24 @@ async def score_pipeline(gold: dict, recs: dict) -> dict:
         per_q.append({"key": key, "n_gold_fam": len(gf), "pool": len(r["pool"]), "ranked": len(r["ranked"]),
                       "pool_hit": len(pool_hit), "r10": hit_at(ranked_f, 10), "r30": hit_at(ranked_f, 30),
                       "r100_pool": len(pool_hit)})
+    # reach by loop round (family-level, cumulative over the loop's own pool)
+    by_round = {}
+    for key, g in gold.items():
+        gf = set(g["gold_families"])
+        r = recs.get(key)
+        if not gf or not r:
+            continue
+        for rd in r.get("loop_rounds") or []:
+            fams_r = {fam_of.get(_canon(p), "") for p in rd.get("pool_pubs") or []}
+            by_round.setdefault(rd["round"], {"hit": 0, "gold": 0, "serp": 0, "gp": 0, "queries": 0})
+            by_round[rd["round"]]["hit"] += len(gf & fams_r)
+            by_round[rd["round"]]["gold"] += len(gf)
+            by_round[rd["round"]]["serp"] += rd.get("serpapi_calls", 0)
+            by_round[rd["round"]]["gp"] += rd.get("gp_calls", 0)
+            by_round[rd["round"]]["queries"] += rd.get("n_queries", 0)
     n = len(per_q)
     tot = sum(q["n_gold_fam"] for q in per_q) or 1
-    return {"queries": n, "gold_families": tot,
+    return {"queries": n, "gold_families": tot, "reach_by_round": by_round,
             "family_recall@10": round(sum(q["r10"] for q in per_q) / tot, 4),
             "family_recall@30": round(sum(q["r30"] for q in per_q) / tot, 4),
             "family_recall_pool": round(sum(q["pool_hit"] for q in per_q) / tot, 4),
