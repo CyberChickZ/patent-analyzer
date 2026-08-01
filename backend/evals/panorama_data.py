@@ -222,3 +222,34 @@ def claim_instances(row: dict) -> list[dict]:
     return out
 
 
+
+def sample_instances(rows: list[dict], n102: int = 40, n103: int = 40, nallow: int = 20,
+                     seed: int = 42, per_app_per_label: int = 2) -> list[dict]:
+    """Seeded sample, at most `per_app_per_label` claims per label per
+    application, independent claims first so the §102/§103 sets are not
+    dominated by 'wherein' one-liners."""
+    rng = random.Random(seed)
+    order = list(range(len(rows)))
+    rng.shuffle(order)
+    quota = {"102": n102, "103": n103, "ALLOW": nallow}
+    picked: list[dict] = []
+    for i in order:
+        if all(v <= 0 for v in quota.values()):
+            break
+        inst = claim_instances(rows[i])
+        if not inst:
+            continue
+        for label in ("102", "103", "ALLOW"):
+            if quota[label] <= 0:
+                continue
+            cands = [x for x in inst if x["label"] == label]
+            if not cands:
+                continue
+            rng.shuffle(cands)
+            cands.sort(key=lambda x: (x["is_dependent"], len(x["cited"])))
+            for x in cands[:min(per_app_per_label, quota[label])]:
+                picked.append(x)
+                quota[label] -= 1
+    return picked
+
+
