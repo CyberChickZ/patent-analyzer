@@ -182,6 +182,47 @@ def quote_matrix_md(scoring_report: list[dict] | None, checklist: list[dict] | N
     return lines
 
 
+# ── 4. prior-art determination (rule output of patent_analyzer.adjudicate) ──
+
+_RISK_STYLE = {"blocking": ("#fee2e2", "#991b1b"), "relevant": ("#fef3c7", "#92400e"), "related": ("#e0f2fe", "#075985")}
+_LABEL_TEXT = {"102": "single-reference blocking risk (§102 pattern)",
+               "103": "combination blocking risk (§103 pattern)",
+               "ALLOW": "no blocking reference among the evaluated documents"}
+
+
+def adjudication_html(adj: dict | None) -> str:
+    if not adj or not adj.get("n_elements"):
+        return ""
+    bg, fg = _RISK_STYLE.get(adj.get("risk", "related"), _RISK_STYLE["related"])
+    n = adj["n_elements"]
+    out = ['<div class="sec"><div class="sec-t">Prior-Art Determination</div>',
+           '<div class="sec-note">Deterministic rule over the verified evidence above: an element counts as disclosed by a '
+           'document only when the evaluator scored it and at least one verbatim quote was located in that document. '
+           'One document disclosing every element is the §102 pattern; a union of up to three is the §103 pattern. '
+           'This states blocking risk from the documents evaluated here — it is not a prediction of grant, and an '
+           'unpublished application or a document outside the search can always change the picture.</div>',
+           f'<div class="sec-b"><span class="badge" style="background:{bg};color:{fg}">{_e(adj.get("risk", ""))}</span> '
+           f'<b>{_e(_LABEL_TEXT.get(adj.get("label"), adj.get("label", "")))}</b> — {_e(adj.get("reason", ""))}</div>']
+    per = adj.get("per_doc_coverage") or []
+    if per:
+        out.append('<table class="tbl"><thead><tr><th>Document</th><th>Elements disclosed</th><th>Coverage</th>'
+                   '<th>Missing</th></tr></thead><tbody>')
+        for d in per[:10]:
+            miss = d.get("missing") or []
+            out.append(f'<tr><td title="{_e(d.get("title", ""))}">{_e(d.get("pub_num") or d.get("title", ""))[:24]}</td>'
+                       f'<td>{d.get("n_covered", 0)}/{n}</td><td>{d.get("coverage", 0):.0%}</td>'
+                       f'<td>{_e("; ".join(m[:60] for m in miss[:4]))}{" …" if len(miss) > 4 else ""}</td></tr>')
+        out.append("</tbody></table>")
+    combo = adj.get("combo")
+    if combo and len(combo.get("docs") or []) >= 2:
+        out.append(f'<div class="sec-b" style="margin-top:.5rem"><b>Best combination:</b> {_e(" + ".join(combo["docs"]))} '
+                   f'covers {combo.get("n_covered", 0)}/{n} elements'
+                   + (f'; still undisclosed: {_e("; ".join(m[:60] for m in combo["missing"][:4]))}' if combo.get("missing") else "")
+                   + '</div>')
+    out.append("</div>")
+    return "\n".join(out)
+
+
 def inject_html(report_html: str, extraction: dict | None, search_stats: dict | None,
                 scoring_report: list[dict] | None, checklist: list[dict] | None) -> str:
     anchor = '<div class="sec-t">Invention Summary</div>'
