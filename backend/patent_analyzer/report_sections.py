@@ -223,11 +223,35 @@ def adjudication_html(adj: dict | None) -> str:
     return "\n".join(out)
 
 
+def adjudication_md(adj: dict | None) -> list[str]:
+    if not adj or not adj.get("n_elements"):
+        return []
+    n = adj["n_elements"]
+    lines = ["## Prior-Art Determination", "",
+             f"**{adj.get('risk', '')}** — {_LABEL_TEXT.get(adj.get('label'), adj.get('label', ''))}. {adj.get('reason', '')}",
+             "", "_Blocking risk from the documents evaluated here only; not a prediction of grant._", ""]
+    per = adj.get("per_doc_coverage") or []
+    if per:
+        lines += ["| Document | Disclosed | Coverage | Missing |", "|---|---|---|---|"]
+        for d in per[:10]:
+            miss = d.get("missing") or []
+            lines.append(f"| {d.get('pub_num') or d.get('title', '')} | {d.get('n_covered', 0)}/{n} | "
+                         f"{d.get('coverage', 0):.0%} | {'; '.join(m[:60] for m in miss[:4])}{' …' if len(miss) > 4 else ''} |")
+        lines.append("")
+    combo = adj.get("combo")
+    if combo and len(combo.get("docs") or []) >= 2:
+        lines += [f"**Best combination:** {' + '.join(combo['docs'])} covers {combo.get('n_covered', 0)}/{n} elements"
+                  + (f"; still undisclosed: {'; '.join(m[:60] for m in combo['missing'][:4])}" if combo.get("missing") else ""), ""]
+    return lines
+
+
 def inject_html(report_html: str, extraction: dict | None, search_stats: dict | None,
-                scoring_report: list[dict] | None, checklist: list[dict] | None) -> str:
+                scoring_report: list[dict] | None, checklist: list[dict] | None,
+                adjudication: dict | None = None) -> str:
     anchor = '<div class="sec-t">Invention Summary</div>'
     block = "\n".join(x for x in (extraction_html(extraction), loop_html(search_stats),
-                                  quote_matrix_html(scoring_report, checklist)) if x)
+                                  quote_matrix_html(scoring_report, checklist),
+                                  adjudication_html(adjudication)) if x)
     if not block:
         return report_html
     i = report_html.find(anchor)
@@ -239,8 +263,10 @@ def inject_html(report_html: str, extraction: dict | None, search_stats: dict | 
 
 
 def inject_md(report_md: str, extraction: dict | None, search_stats: dict | None,
-              scoring_report: list[dict] | None, checklist: list[dict] | None) -> str:
-    lines = extraction_md(extraction) + loop_md(search_stats) + quote_matrix_md(scoring_report, checklist)
+              scoring_report: list[dict] | None, checklist: list[dict] | None,
+              adjudication: dict | None = None) -> str:
+    lines = (extraction_md(extraction) + loop_md(search_stats) + quote_matrix_md(scoring_report, checklist)
+             + adjudication_md(adjudication))
     if not lines:
         return report_md
     marker = "## Novelty Assessment"
