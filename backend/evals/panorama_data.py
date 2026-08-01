@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """H2 data: claim-level §102 / §103 / ALLOW instances from PANORAMA's raw
 parsed_CTNF (LG-AI-Research/PANORAMA, panorama.parquet, 8,143 apps).
 
@@ -25,61 +26,37 @@ Usage:
     python3 evals/panorama_data.py --n102 40 --n103 40 --nallow 20 --max-pages 60
 """
 
-
 import argparse
-
 import html
-
 import json
-
 import os
-
 import random
-
 import re
-
 import sys
-
 import time
-
 from collections import Counter
-
 from pathlib import Path
-
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-
 PANORAMA_ROOT = Path(os.environ.get("PANORAMA_ROOT", "/tmp/panorama"))
-
 PARQUET = PANORAMA_ROOT / "panorama.parquet"
-
 PARQUET_URL = "https://huggingface.co/datasets/LG-AI-Research/PANORAMA/resolve/main/panorama.parquet"
-
 PAGES = PANORAMA_ROOT / "pages"
-
 RUN_DIR = Path(__file__).parent.parent / "eval_data" / "runs" / "h2"
 
-
 _BAD_REASON = re.compile(r"same reasons? as (?:set forth in )?(?:claim|the)|inherent|implicit|does not explicitly", re.I)
-
 _DEP_PREFIX = re.compile(r"^\s*\d+\s*\.\s*(?:The|A|An)\b[^,]{0,200}?\b(?:of|according to|as (?:recited |claimed |defined |set forth )?in)\s+claims?\s+\d+\s*,?\s*", re.I)
-
 _CLAIM_NUM = re.compile(r"^\s*(\d+)\s*\.\s*")
-
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
-
 _PAGE_GAP_S = 4.0
-
 _last_page_call = 0.0
-
 
 
 def norm_pub(p: str) -> str:
     """'US 2005/0025220 A1', '20050025220', 'US7123456B2' -> digits only."""
     return re.sub(r"[^0-9]", "", p or "")
-
 
 
 def ensure_parquet() -> Path:
@@ -88,7 +65,6 @@ def ensure_parquet() -> Path:
         PARQUET.parent.mkdir(parents=True, exist_ok=True)
         urllib.request.urlretrieve(PARQUET_URL, PARQUET)
     return PARQUET
-
 
 
 def load_rows(limit: int | None = None) -> list[dict]:
@@ -101,7 +77,6 @@ def load_rows(limit: int | None = None) -> list[dict]:
     return t.to_pylist()
 
 
-
 def _claims_by_number(initial_claims: list[str]) -> dict[int, str]:
     out = {}
     for c in initial_claims or []:
@@ -111,14 +86,12 @@ def _claims_by_number(initial_claims: list[str]) -> dict[int, str]:
     return out
 
 
-
 def _dependent_body(text: str) -> str:
     """'2. The method of claim 1, wherein X' -> 'wherein X'."""
     body = _DEP_PREFIX.sub("", text or "", count=1)
     if body == (text or ""):
         body = _CLAIM_NUM.sub("", text or "", count=1)
     return body.strip()
-
 
 
 def resolve_chain(parsed: dict[int, dict], texts: dict[int, str], num: int) -> tuple[list[int], str]:
@@ -141,10 +114,8 @@ def resolve_chain(parsed: dict[int, dict], texts: dict[int, str], num: int) -> t
     return chain, "; ".join(p for p in parts if p)
 
 
-
 def _prior_art_reasons(claim: dict) -> list[dict]:
     return [r for r in claim.get("reasons") or [] if r.get("sectionCode") in (102, 103)]
-
 
 
 def claim_instances(row: dict) -> list[dict]:
@@ -222,7 +193,6 @@ def claim_instances(row: dict) -> list[dict]:
     return out
 
 
-
 def sample_instances(rows: list[dict], n102: int = 40, n103: int = 40, nallow: int = 20,
                      seed: int = 42, per_app_per_label: int = 2) -> list[dict]:
     """Seeded sample, at most `per_app_per_label` claims per label per
@@ -253,3 +223,154 @@ def sample_instances(rows: list[dict], n102: int = 40, n103: int = 40, nallow: i
     return picked
 
 
+def cited_texts(rows: list[dict]) -> dict[str, dict]:
+    """pub digits -> {title, abstract, claims[]} from patentsCitedByExaminer."""
+    out = {}
+    for r in rows:
+        for c in r.get("patentsCitedByExaminer") or []:
+            key = norm_pub(c.get("referenceIdentifier"))
+            if key and key not in out:
+                out[key] = {"title": c.get("title") or "", "abstract": c.get("abstract") or "",
+                            "claims": [x for x in (c.get("claims") or []) if x]}
+    return out
+
+
+def _gp_pub(pub_digits: str) -> str:
+    return f"US{pub_digits}"
+
+
+def _clean(s: str) -> str:
+    return html.unescape(re.sub(r"<[^>]+>", " ", s or "")).replace("\xa0", " ")
+
+
+def parse_patent_page(h: str) -> dict:
+    """Title, abstract, claims, numbered description paragraphs from a
+    patents.google.com page. Pre-grant pages use class="description-line",
+    granted ones class="description-paragraph"."""
+    m_t = re.search(r'<meta name="DC.title" content="([^"]*)"', h)
+    m_abs = re.search(r'<section itemprop="abstract".*?<div[^>]*class="abstract"[^>]*>(.*?)</div>', h, re.S)
+    claims = [re.sub(r"\s+", " ", _clean(b)).strip()
+              for b in re.findall(r'<div id="CLM-\d+"[^>]*>.*?(?=<div id="CLM-\d+"|</section>)', h, re.S)]
+    desc = []
+    sec = re.search(r'<section itemprop="description".*?</section>', h, re.S)
+    body = sec.group(0) if sec else h
+    for num, chunk in re.findall(r'<div (?:id="[pP]-\d+" )?num="(?:p-)?(\d+)" class="description-(?:line|paragraph)">(.*?)(?=<div (?:id="[pP]-\d+" )?num=|</section>|<para-num)', body, re.S):
+        txt = re.sub(r"\s+", " ", _clean(chunk)).strip()
+        if txt:
+            desc.append({"num": int(num), "text": txt})
+    if not desc and body:
+        txt = re.sub(r"\s+", " ", _clean(body)).strip()
+        desc = [{"num": i + 1, "text": p} for i, p in enumerate(re.split(r"(?<=\.)\s{2,}", txt)) if len(p) > 40]
+    return {"title": html.unescape(m_t.group(1)).strip() if m_t else "",
+            "abstract": re.sub(r"\s+", " ", _clean(m_abs.group(1))).strip() if m_abs else "",
+            "claims": [c for c in claims if c], "description": desc}
+
+
+def fetch_page(pub_digits: str) -> dict | None:
+    """One Google Patents page, >= 4 s after the previous one, cached on disk.
+    Returns None when blocked or not found (caller falls back)."""
+    global _last_page_call
+    import httpx
+    PAGES.mkdir(parents=True, exist_ok=True)
+    cache = PAGES / f"{pub_digits}.json"
+    if cache.exists():
+        return json.loads(cache.read_text())
+    blocked = PAGES / "BLOCKED"
+    if blocked.exists() and time.time() - blocked.stat().st_mtime < 15 * 60:
+        return None
+    wait = _PAGE_GAP_S - (time.time() - _last_page_call)
+    if wait > 0:
+        time.sleep(wait)
+    _last_page_call = time.time()
+    url = f"https://patents.google.com/patent/{_gp_pub(pub_digits)}/en"
+    try:
+        r = httpx.get(url, headers={"User-Agent": _UA}, timeout=30, follow_redirects=True)
+    except httpx.HTTPError as e:
+        print(f"  page {pub_digits}: {e}", file=sys.stderr)
+        return None
+    if r.status_code != 200 or "<title>Sorry" in r.text[:400]:
+        if r.status_code == 429 or "<title>Sorry" in r.text[:400]:
+            blocked.write_text(url)
+            print(f"  page {pub_digits}: blocked ({r.status_code})", file=sys.stderr)
+        else:
+            print(f"  page {pub_digits}: HTTP {r.status_code}", file=sys.stderr)
+        return None
+    parsed = parse_patent_page(r.text)
+    parsed["pub"] = pub_digits
+    parsed["url"] = str(r.url)
+    cache.write_text(json.dumps(parsed))
+    return parsed
+
+
+def render_doc(doc: dict) -> str:
+    """Text handed to the evaluator: title, abstract, numbered description, claims."""
+    parts = [f"Title: {doc.get('title', '')}", ""]
+    if doc.get("abstract"):
+        parts += ["Abstract", doc["abstract"], ""]
+    if doc.get("description"):
+        parts += ["Description"] + [f"[{p['num']:04d}] {p['text']}" for p in doc["description"]] + [""]
+    if doc.get("claims"):
+        parts += ["Claims:"] + list(doc["claims"])
+    return "\n".join(parts).strip() + "\n"
+
+
+def build_docs(samples: list[dict], rows: list[dict], max_pages: int = 60) -> dict[str, dict]:
+    """Document text per cited pub. Pages are fetched most-used first; the
+    rest use abstract + claims from the parquet."""
+    base = cited_texts(rows)
+    use = Counter(c["pub"] for s in samples for c in s["cited"])
+    docs: dict[str, dict] = {}
+    pages_used = 0
+    for pub, _ in use.most_common():
+        doc = {"pub": pub, "title": "", "abstract": "", "claims": [], "description": [], "text_mode": "abstract_claims"}
+        b = base.get(pub)
+        if b:
+            doc.update({"title": b["title"], "abstract": b["abstract"], "claims": b["claims"]})
+        cached = (PAGES / f"{pub}.json").exists()
+        if cached or pages_used < max_pages:
+            page = fetch_page(pub)
+            if not cached:
+                pages_used += 1
+            if page and page.get("description"):
+                doc["description"] = page["description"]
+                doc["title"] = doc["title"] or page.get("title", "")
+                doc["abstract"] = doc["abstract"] or page.get("abstract", "")
+                doc["claims"] = doc["claims"] or page.get("claims", [])
+                doc["text_mode"] = "full_text"
+        if not (doc["abstract"] or doc["claims"] or doc["description"]):
+            doc["text_mode"] = "missing"
+        doc["text"] = render_doc(doc)
+        docs[pub] = doc
+    return docs
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--n102", type=int, default=40)
+    ap.add_argument("--n103", type=int, default=40)
+    ap.add_argument("--nallow", type=int, default=20)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--max-pages", type=int, default=60)
+    ap.add_argument("--no-pages", action="store_true", help="abstract + claims only")
+    args = ap.parse_args()
+
+    rows = load_rows()
+    samples = sample_instances(rows, args.n102, args.n103, args.nallow, args.seed)
+    docs = build_docs(samples, rows, max_pages=0 if args.no_pages else args.max_pages)
+    for s in samples:
+        for c in s["cited"]:
+            c["text_mode"] = docs[c["pub"]]["text_mode"]
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    (RUN_DIR / "samples.json").write_text(json.dumps(samples, indent=1, ensure_ascii=False))
+    (RUN_DIR / "docs.json").write_text(json.dumps(docs, ensure_ascii=False))
+    labels = Counter(s["label"] for s in samples)
+    dep = Counter((s["label"], s["is_dependent"]) for s in samples)
+    modes = Counter(d["text_mode"] for d in docs.values())
+    print(f"samples: {dict(labels)}  dependent: {dict(dep)}")
+    print(f"docs: {len(docs)} unique, text modes {dict(modes)}, "
+          f"avg chars {sum(len(d['text']) for d in docs.values()) // max(len(docs), 1)}")
+    print(f"wrote {RUN_DIR / 'samples.json'}")
+
+
+if __name__ == "__main__":
+    main()
