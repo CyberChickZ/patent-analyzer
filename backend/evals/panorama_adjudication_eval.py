@@ -136,6 +136,43 @@ async def run_stage1(samples: list[dict], docs: dict[str, dict], with_preamble: 
 
 
 
+def confusion(pairs: list[tuple[str, str]]) -> dict:
+    """pairs of (gold, pred) -> accuracy, macro-F1, per-class P/R/F1, matrix."""
+    m = {g: {p: 0 for p in LABELS} for g in LABELS}
+    for g, p in pairs:
+        m[g][p] += 1
+    per = {}
+    for c in LABELS:
+        tp = m[c][c]
+        fp = sum(m[g][c] for g in LABELS if g != c)
+        fn = sum(m[c][p] for p in LABELS if p != c)
+        pr = tp / (tp + fp) if tp + fp else 0.0
+        rc = tp / (tp + fn) if tp + fn else 0.0
+        per[c] = {"precision": round(pr, 4), "recall": round(rc, 4),
+                  "f1": round(2 * pr * rc / (pr + rc), 4) if pr + rc else 0.0, "support": tp + fn}
+    n = len(pairs)
+    return {"n": n, "accuracy": round(sum(1 for g, p in pairs if g == p) / n, 4) if n else 0.0,
+            "macro_f1": round(sum(v["f1"] for v in per.values()) / len(LABELS), 4),
+            "per_class": per, "matrix": m}
+
+
+
+def score_rules(stage1: dict, params: dict, drop_preamble: bool = False) -> tuple[dict, list[dict]]:
+    from patent_analyzer.adjudicate import adjudicate
+    pairs, rows = [], []
+    for key, r in stage1.items():
+        checklist = [c for c in r["checklist"] if not (drop_preamble and c.get("preamble"))]
+        adj = adjudicate(checklist, r["docs"], **params)
+        pairs.append((r["label"], adj["label"]))
+        rows.append({"key": key, "gold": r["label"], "pred": adj["label"], "risk": adj["risk"],
+                     "is_dependent": r["is_dependent"], "n_elements": adj["n_elements"],
+                     "best_coverage": adj["best_coverage"],
+                     "combo_coverage": adj["combo"]["coverage"] if adj["combo"] else 0.0,
+                     "text_modes": [d.get("text_mode") for d in r["docs"]]})
+    return confusion(pairs), rows
+
+
+
 VARIANTS = {
     "base (min_cover 1.0, allow_missing 0, score>0, preamble in)": {},
     "score>=2 only (Present, not Partial)": {"min_score": 2},
@@ -146,6 +183,21 @@ VARIANTS = {
     "no preamble + allow_missing 1": {"_drop_preamble": True, "allow_missing": 1},
     "no preamble + single_partial_103 0.7": {"_drop_preamble": True, "single_partial_103": 0.7},
 }
+
+
+
+def fmt_table(name: str, c: dict) -> str:
+    per = c["per_class"]
+    return (f"| {name} | {c['accuracy']:.3f} | {c['macro_f1']:.3f} | "
+            + " | ".join(f"{per[l]['f1']:.2f}" for l in LABELS) + " |")
+
+
+
+def fmt_matrix(c: dict) -> str:
+    lines = ["| gold \\ pred | " + " | ".join(LABELS) + " |", "|---|---|---|---|"]
+    for g in LABELS:
+        lines.append(f"| {g} | " + " | ".join(str(c["matrix"][g][p]) for p in LABELS) + " |")
+    return "\n".join(lines)
 
 
 
