@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """H2: does the determination stage reproduce US examiner §102 / §103 / ALLOW
 calls when handed the examiner's own references?
 
@@ -24,40 +25,25 @@ Usage:
     python3 evals/panorama_adjudication_eval.py --claim-only --limit 100
 """
 
-
 import argparse
-
 import asyncio
-
 import hashlib
-
 import json
-
 import re
-
 import sys
-
 from collections import Counter
-
 from pathlib import Path
 
-
 sys.path.insert(0, str(Path(__file__).parent.parent))
-
 sys.path.insert(0, str(Path(__file__).parent))
 
-
 RUN_DIR = Path(__file__).parent.parent / "eval_data" / "runs" / "h2"
-
 LABELS = ("102", "103", "ALLOW")
-
 MAX_DOC_CHARS = 120_000
-
 
 
 class BudgetExceeded(RuntimeError):
     pass
-
 
 
 def install_budget(max_live: int):
@@ -72,7 +58,6 @@ def install_budget(max_live: int):
         return await cached_text(*a, **k)
 
     llm.call_llm = text
-
 
 
 def claim_elements(chain_text: str, with_preamble: bool = True) -> list[dict]:
@@ -91,7 +76,6 @@ def claim_elements(chain_text: str, with_preamble: bool = True) -> list[dict]:
             for i, t in enumerate(texts)]
 
 
-
 async def score_document(claim_text: str, checklist: list[dict], doc: dict) -> dict:
     from app.llm import evaluate_single_document_text
     from patent_analyzer.quote_verify import verify_checklist_results
@@ -105,7 +89,6 @@ async def score_document(claim_text: str, checklist: list[dict], doc: dict) -> d
     res["pub_num"] = doc["pub"]
     res["text_mode"] = doc.get("text_mode")
     return res
-
 
 
 async def run_stage1(samples: list[dict], docs: dict[str, dict], with_preamble: bool,
@@ -135,7 +118,6 @@ async def run_stage1(samples: list[dict], docs: dict[str, dict], with_preamble: 
     return done
 
 
-
 def confusion(pairs: list[tuple[str, str]]) -> dict:
     """pairs of (gold, pred) -> accuracy, macro-F1, per-class P/R/F1, matrix."""
     m = {g: {p: 0 for p in LABELS} for g in LABELS}
@@ -156,7 +138,6 @@ def confusion(pairs: list[tuple[str, str]]) -> dict:
             "per_class": per, "matrix": m}
 
 
-
 def score_rules(stage1: dict, params: dict, drop_preamble: bool = False) -> tuple[dict, list[dict]]:
     from patent_analyzer.adjudicate import adjudicate
     pairs, rows = [], []
@@ -172,7 +153,6 @@ def score_rules(stage1: dict, params: dict, drop_preamble: bool = False) -> tupl
     return confusion(pairs), rows
 
 
-
 VARIANTS = {
     "base (min_cover 1.0, allow_missing 0, score>0, preamble in)": {},
     "score>=2 only (Present, not Partial)": {"min_score": 2},
@@ -185,12 +165,10 @@ VARIANTS = {
 }
 
 
-
 def fmt_table(name: str, c: dict) -> str:
     per = c["per_class"]
     return (f"| {name} | {c['accuracy']:.3f} | {c['macro_f1']:.3f} | "
             + " | ".join(f"{per[l]['f1']:.2f}" for l in LABELS) + " |")
-
 
 
 def fmt_matrix(c: dict) -> str:
@@ -199,6 +177,85 @@ def fmt_matrix(c: dict) -> str:
         lines.append(f"| {g} | " + " | ".join(str(c["matrix"][g][p]) for p in LABELS) + " |")
     return "\n".join(lines)
 
+
+async def claim_only(samples: list[dict]) -> dict:
+    """Control: label from the claim text alone, one Gemini call per claim."""
+    from app.llm import call_llm
+    system = ("You are a US patent examiner. Output JSON only.")
+    pairs, rows = [], []
+    for s in samples:
+        prompt = (
+            "Without any prior art in front of you, predict how the first office action treated this claim: "
+            "\"102\" (anticipated by a single reference), \"103\" (obvious over a combination), or \"ALLOW\" "
+            "(no prior-art rejection).\n\nCLAIM:\n" + s["chain_text"] +
+            "\n\nJSON: {\"label\": \"102\"|\"103\"|\"ALLOW\", \"why\": \"one sentence\"}")
+        pred = "ALLOW"
+        try:
+            resp = await call_llm(system, prompt, thinking_budget=0)
+            m = re.search(r'"label"\s*:\s*"(102|103|ALLOW)"', resp)
+            if m:
+                pred = m.group(1)
+        except BudgetExceeded:
+            break
+        except Exception:
+            pass
+        pairs.append((s["label"], pred))
+        rows.append({"key": f"{s['app']}:{s['claimNumber']}", "gold": s["label"], "pred": pred,
+                     "is_dependent": s["is_dependent"]})
+    return {"confusion": confusion(pairs), "rows": rows}
+
+
+async def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--limit", type=int, default=100)
+    ap.add_argument("--max-live-calls", type=int, default=260)
+    ap.add_argument("--no-preamble", action="store_true", help="elements without preamble features (stage 1)")
+    ap.add_argument("--variants", action="store_true", help="re-score cached stage-1 results under every rule variant")
+    ap.add_argument("--claim-only", action="store_true", help="run the claim-only Gemini control")
+    ap.add_argument("--concurrency", type=int, default=3)
+    args = ap.parse_args()
+
+    import llm_cache
+    install_budget(args.max_live_calls)
+    samples = json.loads((RUN_DIR / "samples.json").read_text())[:args.limit]
+    docs = json.loads((RUN_DIR / "docs.json").read_text())
+
+    if args.claim_only:
+        res = await claim_only(samples)
+        (RUN_DIR / "claim_only.json").write_text(json.dumps(res, indent=1))
+        c = res["confusion"]
+        print("claim-only control:", fmt_table("claim-only", c))
+        print(fmt_matrix(c))
+        dep = Counter((r["is_dependent"], r["pred"]) for r in res["rows"])
+        print("pred by dependent:", dict(dep))
+        print(llm_cache.summary())
+        return
+
+    try:
+        stage1 = await run_stage1(samples, docs, with_preamble=not args.no_preamble, concurrency=args.concurrency)
+    except BudgetExceeded as exc:
+        print(f"stopped: {exc}")
+        stage1 = json.loads((RUN_DIR / "doc_results.json").read_text())
+    stage1 = {k: v for k, v in stage1.items() if k in {f"{s['app']}:{s['claimNumber']}" for s in samples}}
+    print(f"stage 1: {len(stage1)} instances, {sum(len(v['docs']) for v in stage1.values())} scored documents; "
+          + llm_cache.summary())
+
+    header = "| rule | acc | macro-F1 | F1 102 | F1 103 | F1 ALLOW |\n|---|---|---|---|---|---|"
+    report = {"n": len(stage1), "variants": {}}
+    print(header)
+    for name, p in (VARIANTS if args.variants else {list(VARIANTS)[0]: {}}).items():
+        p = dict(p)
+        drop = p.pop("_drop_preamble", False)
+        c, rows = score_rules(stage1, p, drop_preamble=drop)
+        report["variants"][name] = {"params": p, "drop_preamble": drop, "confusion": c, "rows": rows}
+        print(fmt_table(name, c))
+    base = list(report["variants"].values())[0]
+    print(fmt_matrix(base["confusion"]))
+    dep = Counter((r["is_dependent"], r["gold"] == r["pred"]) for r in base["rows"])
+    print("base correct by dependent:", dict(dep))
+    modes = Counter(m for r in base["rows"] for m in r["text_modes"])
+    print("document text modes:", dict(modes))
+    (RUN_DIR / "adjudication_result.json").write_text(json.dumps(report, indent=1))
 
 
 if __name__ == "__main__":
