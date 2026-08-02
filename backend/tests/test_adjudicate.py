@@ -1,9 +1,7 @@
 from patent_analyzer.adjudicate import adjudicate, element_covered, greedy_cover
 
-
 E = ["a first sensor", "a controller coupled to the sensor", "wherein the controller halts the motor",
      "a display showing the halt state"]
-
 
 
 def _doc(pub, covered, partial=(), unquoted=()):
@@ -20,14 +18,12 @@ def _doc(pub, covered, partial=(), unquoted=()):
     return {"pub_num": pub, "title": pub, "checklist_results": cr}
 
 
-
 def test_single_doc_full_coverage_is_102():
     out = adjudicate(E, [_doc("A", E), _doc("B", E[:2])])
     assert out["label"] == "102"
     assert out["risk"] == "blocking"
     assert out["best_single"] == "A"
     assert out["per_doc_coverage"][0]["coverage"] == 1.0
-
 
 
 def test_union_of_two_docs_is_103_and_single_is_not():
@@ -38,7 +34,6 @@ def test_union_of_two_docs_is_103_and_single_is_not():
     assert out["per_doc_coverage"][0]["coverage"] == 0.75
 
 
-
 def test_unverified_quote_does_not_count():
     # score 2 but no located quote: not evidence -> the element stays missing
     out = adjudicate(E, [_doc("A", E[:3], unquoted=[E[3]])])
@@ -46,7 +41,6 @@ def test_unverified_quote_does_not_count():
     assert out["per_doc_coverage"][0]["missing"] == [E[3]]
     assert not element_covered({"score": 2, "verified_quotes": []})
     assert element_covered({"score": 2, "verified_quotes": []}, require_quotes=False)
-
 
 
 def test_allow_missing_and_min_cover_relax_the_single_reference_rule():
@@ -63,7 +57,6 @@ def test_allow_missing_and_min_cover_relax_the_single_reference_rule():
     assert adjudicate(E, docs, single_partial_103=0.7)["label"] == "103"
 
 
-
 def test_greedy_cover_prefers_fewest_docs_and_caps_combo():
     sets = [("A", {"1", "2"}), ("B", {"3"}), ("C", {"1", "2", "3"}), ("D", {"4"})]
     docs, covered = greedy_cover(["1", "2", "3", "4"], sets, needed=4, max_combo=3)
@@ -75,3 +68,37 @@ def test_greedy_cover_prefers_fewest_docs_and_caps_combo():
     assert out["label"] == "ALLOW" and out["risk"] == "related"  # 3 docs cap: 3/4 union, 1/4 single
     assert adjudicate([], [_doc("A", E)])["label"] == "ALLOW"
     assert adjudicate(E, [])["label"] == "ALLOW" and adjudicate(E, [])["risk"] == "related"
+
+
+def test_report_section_states_blocking_risk_only():
+    from patent_analyzer.report_sections import adjudication_html, adjudication_md, inject_html, inject_md
+    adj = adjudicate(E, [_doc("US-1", E[:3]), _doc("US-2", E[2:])])
+    html = adjudication_html(adj)
+    md = "\n".join(adjudication_md(adj))
+    assert "Prior-Art Determination" in html and "US-1 + US-2" in html and "blocking" in html
+    assert "combination blocking risk" in md and "4/4" in md
+    for text in (html, md):
+        assert "grantable" not in text.lower() and "would be granted" not in text.lower()
+    assert adjudication_html(None) == "" and adjudication_md({}) == []
+    base = '<div class="sec"><div class="sec-t">Invention Summary</div><div class="sec-b">S</div>\n</div>'
+    assert "Prior-Art Determination" in inject_html(base, None, None, None, None, adj)
+    out = inject_md("## Invention Summary\n\nS\n\n## Novelty Assessment\n\nN\n", None, None, None, None, adj)
+    assert out.index("Prior-Art Determination") < out.index("## Novelty Assessment")
+
+
+def test_reduce_eval_emits_adjudication_without_touching_scores(monkeypatch):
+    import asyncio
+    import app.llm as llm
+    from graph.eval_subgraph import reduce_eval
+
+    async def _no_llm(*a, **k):
+        return ""
+    monkeypatch.setattr(llm, "generate_overall_summary", _no_llm)
+    monkeypatch.setattr(llm, "generate_combination_analysis", _no_llm)
+    checklist = [{"criterion": e, "weight": 0.25} for e in E]
+    state = {"checklist": checklist, "summary": "s", "eval_results": [_doc("US-1", E)]}
+    out = asyncio.run(reduce_eval(state))
+    assert out["adjudication"]["label"] == "102"
+    assert out["eval_stats"]["adjudication"]["risk"] == "blocking"
+    assert out["novelty_score"] == 0.0 and out["risk_level"] == out["risk_level"]
+    assert out["scoring_report"][0]["similarity_score"] == 1.0
