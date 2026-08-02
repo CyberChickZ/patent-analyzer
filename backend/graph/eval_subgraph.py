@@ -30,6 +30,7 @@ class EvalState(TypedDict, total=False):
     overall_summary: str
     novelty_score: float
     risk_level: str
+    adjudication: dict
     eval_stats: dict
     events: list[dict]
     phase_results: dict
@@ -188,10 +189,15 @@ async def reduce_eval(state: EvalState) -> dict:
             for k in ("quotes", "verified", "downgraded"):
                 quote_stats[k] += int(qv.get(k, 0))
 
+    # Rule-based prior-art determination over the verified coverage (novelty_score / risk_level untouched)
+    from patent_analyzer.adjudicate import adjudicate
+    adjudication = adjudicate(checklist, scoring_report)
+
     events = [
         _event("info", f"Evaluated {len(scoring_report)} docs, top score: {top_score:.2%}, risk: {risk_level}"),
         _event("info", f"Quote verification: {quote_stats['verified']}/{quote_stats['quotes']} quotes verified "
                        f"across {quote_stats['docs_verified']} docs, {quote_stats['downgraded']} criteria downgraded"),
+        _event("info", f"Determination: {adjudication['risk']} ({adjudication['label']}) — {adjudication['reason']}"),
     ]
 
     return {
@@ -200,7 +206,9 @@ async def reduce_eval(state: EvalState) -> dict:
         "overall_summary": overall_summary,
         "novelty_score": round(1.0 - top_score, 4),
         "risk_level": risk_level,
-        "eval_stats": {"quote_stats": quote_stats, "evaluated": len(scoring_report)},
+        "adjudication": adjudication,
+        # GraphState has no `adjudication` channel yet (state.py untouched here); eval_stats carries it to the report
+        "eval_stats": {"quote_stats": quote_stats, "evaluated": len(scoring_report), "adjudication": adjudication},
         "events": events,
         "phase_results": {"phase4": {
             "status": "completed",
