@@ -24,8 +24,15 @@ evidence_quote) or --quotes multi (evals/eval_prompts, up to 5 quotes per
 criterion); each quote is verified by locate_quote (>= .9), the dual
 span/bigram test (evals/quote_dual) or both, and located to a passage.
 
+Document source: --doc_source text feeds format_cited (abstract + claims +
+description) to evaluate_single_document_text; --doc_source pdf downloads the
+cited patent's PDF from Google Patents (citation_pdf_url) and runs the
+production PDF path (app.llm.evaluate_single_document, Gemini reads the PDF
+natively) — quotes are then verified against quote_verify.pdf_text(pdf).
+
 Usage:
     python3 evals/coverage_eval.py --limit 20 --checklist oracle --doc_mode full_text
+    python3 evals/coverage_eval.py --protocol fine --doc_source pdf --checklist both --verifier either --limit 20
     python3 evals/coverage_eval.py --protocol fine --checklist both --limit 100
     python3 evals/coverage_eval.py --protocol fine --checklist both --verifier dual --limit 100
     python3 evals/coverage_eval.py --protocol fine --quotes multi --checklist both --limit 100
@@ -176,6 +183,64 @@ async def run_one_multi(app: str, checklist_kind: str) -> dict:
     return result
 
 
+PDF_DIR = Path(__file__).parent.parent / "eval_data" / "pdfs"
+
+
+async def fetch_patent_pdf(pub: str) -> str | None:
+    """PDF of a publication: Google Patents page (recall.google_patents.fetch_patent,
+    paced + circuit-broken) gives citation_pdf_url, downloaded with
+    patent_analyzer.searcher.download_pdf (cached). USPTO ppubs PDFs are
+    image-only (no text layer) so they are not used as a fallback."""
+    from patent_analyzer.recall.google_patents import fetch_patent
+    from patent_analyzer.searcher import download_pdf
+
+    PDF_DIR.mkdir(parents=True, exist_ok=True)
+    out = PDF_DIR / f"{pub}.pdf"
+    if out.exists():
+        return str(out)
+    page = await fetch_patent(pub)
+    if not page or not page.get("pdf_url"):
+        print(f"[{pub}] google patents: no page / no citation_pdf_url (blocked?)")
+        return None
+    return await asyncio.to_thread(download_pdf, page["pdf_url"], PDF_DIR, f"{pub}.pdf")
+
+
+def result_document(result: dict, app_data: dict) -> str:
+    """Text the quotes are verified against: the PDF's extracted text for
+    doc_source=pdf runs, format_cited otherwise."""
+    if result.get("doc_mode") == "pdf" and result.get("pdf"):
+        from patent_analyzer.quote_verify import pdf_text
+        return pdf_text(result["pdf"])
+    return format_cited(app_data["cited_patent"])
+
+
+async def run_one_pdf(app: str, checklist_kind: str) -> dict | None:
+    """Production PDF path: Gemini reads the cited patent's PDF natively.
+    checklist_results are stored raw (no in-place downgrade); verification is
+    applied at scoring time so verifier variants can be compared."""
+    from app.llm import evaluate_single_document
+
+    out_path = RUN_DIR / f"{app}_{checklist_kind}_pdf.json"
+    if out_path.exists():
+        return json.loads(out_path.read_text())
+
+    data = load_app(app)
+    pub = data["cited_patent"].get("publication_number") or ""
+    pdf = await fetch_patent_pdf(pub)
+    if not pdf:
+        return None
+    checklist = build_checklist(data, checklist_kind)
+    claim1 = (data["rejected_patent"].get("claims") or [""])[0]
+    res = await evaluate_single_document(
+        claim1, checklist, pdf, data["cited_patent"].get("title") or "", "Patent")
+    result = {"app": app, "checklist_kind": checklist_kind, "doc_mode": "pdf", "pdf": pdf,
+              "pub": pub, "checklist": checklist, "checklist_results": res.get("checklist_results", {}),
+              "source": "pdf", "error": res.get("error")}
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(result, ensure_ascii=False, indent=1))
+    return result
+
+
 def score(result: dict, app_data: dict) -> dict:
     """Feature-level coverage against examiner-disclosed features."""
     from extraction_eval import embed, greedy_match
@@ -304,8 +369,10 @@ def annotate_quotes(result: dict, app_data: dict) -> dict:
     from patent_analyzer.quote_verify import locate_quote
     from quote_dual import DocIndex, locate_dual, verify_quote_dual
 
+    from patent_analyzer.quote_verify import strip_labels
+
     patent = app_data["cited_patent"]
-    doc = format_cited(patent)
+    doc = result_document(result, app_data)
     idx = DocIndex(doc)
     refs = cited_passages(patent)
     cr = result["checklist_results"]
@@ -320,7 +387,7 @@ def annotate_quotes(result: dict, app_data: dict) -> dict:
         checks = []
         for q in quotes:
             found, sim = locate_quote(q, doc)
-            ok, sr, br = verify_quote_dual(q, idx)
+            ok, sr, br = verify_quote_dual(strip_labels(q), idx)
             loc_strict = quote_location(q, patent)
             loc_dual = loc_strict or (locate_dual(q, refs) if ok else None)
             checks.append({"quote": q, "locate": found, "locate_sim": sim,
@@ -447,6 +514,9 @@ async def main():
     ap.add_argument("--limit", type=int, default=20)
     ap.add_argument("--checklist", default="oracle", choices=["oracle", "regex", "both"])
     ap.add_argument("--doc_mode", default="full_text", choices=["full_text", "abstract", "both"])
+    ap.add_argument("--doc_source", default="text", choices=["text", "pdf"],
+                    help="pdf: production PDF path (Gemini reads the Google Patents PDF natively), "
+                         "scored under --protocol fine with --verifier (default: every verifier)")
     ap.add_argument("--protocol", default="legacy", choices=["legacy", "fine"])
     ap.add_argument("--baseline", default=None, choices=["rougeL", "embed"])
     ap.add_argument("--sample", default="test", choices=["test", "stage"])
@@ -480,12 +550,25 @@ async def main():
                 try:
                     if mode == "multi":
                         return await run_one_multi(app, kind)
+                    if mode == "pdf":
+                        return await run_one_pdf(app, kind)
                     return await run_one(app, kind, mode)
                 except Exception as exc:
                     print(f"[{app}/{kind}/{mode}] FAILED {type(exc).__name__}: {exc}")
                     return None
 
-        if args.quotes == "multi":
+        if args.doc_source == "pdf":
+            _print_fine_header(quotes=True)
+            for kind in kinds:
+                results = [r for r in await asyncio.gather(*(one(a, kind, "pdf") for a in apps)) if r]
+                results = [r for r in results if r.get("checklist_results")]
+                for verifier in ([args.verifier] if args.verifier else VERIFIERS):
+                    name = f"{kind}/pdf/{verifier}"
+                    agg = score_fine_quotes(results, verifier)
+                    _print_fine_row(name, agg)
+                    summary[name] = agg
+            print("\n" + llm_cache.summary())
+        elif args.quotes == "multi":
             _print_fine_header(quotes=True)
             for kind in kinds:
                 results = [r for r in await asyncio.gather(*(one(a, kind, "multi") for a in apps)) if r]
@@ -500,7 +583,7 @@ async def main():
             _print_fine_header(quotes=args.verifier is not None)
         else:
             print(f"{'variant':<22}{'n':>4}{'gold':>6}{'cov_raw':>9}{'cov_verified':>14}{'para_hit':>10}{'key_match':>11}")
-        for kind in (kinds if args.quotes == "single" else []):
+        for kind in (kinds if args.quotes == "single" and args.doc_source == "text" else []):
             for mode in modes:
                 results = [r for r in await asyncio.gather(*(one(a, kind, mode) for a in apps)) if r]
                 name = f"{kind}/{mode}"
@@ -526,7 +609,7 @@ async def main():
                       f"{agg['covered'] / g:>9.3f}{agg['covered_verified'] / g:>14.3f}"
                       f"{(agg['para_hit'] / agg['para_eval']) if agg['para_eval'] else 0:>10.3f}"
                       f"{agg['key_match'] / (agg['n_crit'] or 1):>11.3f}")
-        if args.quotes == "single":
+        if args.quotes == "single" and args.doc_source == "text":
             print("\n" + llm_cache.summary())
 
     if args.summary:
