@@ -279,7 +279,7 @@ def llm_predictions(result: dict, app_data: dict) -> list[tuple[str, set]]:
     return preds
 
 
-VERIFIERS = ("locate", "dual", "both")
+VERIFIERS = ("locate", "dual", "both", "either")
 
 
 def _item_quotes(item: dict) -> list[str]:
@@ -334,12 +334,14 @@ def annotate_quotes(result: dict, app_data: dict) -> dict:
 def quote_predictions(result: dict, app_data: dict, verifier: str = "locate"
                       ) -> tuple[list[tuple[str, set]], dict]:
     """Per checklist item: passages of the quotes that pass `verifier`
-    (locate = locate_quote >= .9; dual = span/bigram; both = AND). Location
+    (locate = locate_quote >= .9; dual = span/bigram; both = AND; either = OR,
+    the production rule of verify_checklist_results). Location
     is the strict quote_location for locate/both; dual falls back to
     locate_dual. Returns (preds, quote stats)."""
     annotate_quotes(result, app_data)
     cr = result["checklist_results"]
-    stats = {"items": 0, "positive": 0, "quotes": 0, "passed": 0, "located": 0, "items_with_passage": 0}
+    stats = {"items": 0, "positive": 0, "quotes": 0, "passed": 0, "located": 0, "items_with_passage": 0,
+             "downgraded": 0}
     preds = []
     for c in result["checklist"]:
         stats["items"] += 1
@@ -347,17 +349,21 @@ def quote_predictions(result: dict, app_data: dict, verifier: str = "locate"
         passages = set()
         if isinstance(item, dict) and _raw_positive(item):
             stats["positive"] += 1
+            n_passed_before = stats["passed"]
             for ch in item.get("quote_checks") or []:
                 stats["quotes"] += 1
                 passed = {"locate": ch["locate"], "dual": ch["dual"],
-                          "both": ch["locate"] and ch["dual"]}[verifier]
+                          "both": ch["locate"] and ch["dual"],
+                          "either": ch["locate"] or ch["dual"]}[verifier]
                 if not passed:
                     continue
                 stats["passed"] += 1
-                loc = ch["loc_dual"] if verifier == "dual" else ch["loc_strict"]
+                loc = ch["loc_dual"] if verifier in ("dual", "either") else ch["loc_strict"]
                 if loc:
                     stats["located"] += 1
                     passages.add(tuple(loc))
+            if stats["passed"] == n_passed_before:
+                stats["downgraded"] += 1
         if passages:
             stats["items_with_passage"] += 1
         preds.append((c["criterion"], passages))
@@ -406,7 +412,7 @@ def aggregate_fine(rows: list[dict]) -> dict:
 def _print_fine_header(quotes: bool = False):
     print(f"{'variant':<22}{'n':>4}{'feats':>6}{'feat_P':>8}{'feat_R':>8}{'feat_F1':>8}"
           f"{'claim_P':>9}{'claim_R':>9}{'claim_F1':>9}{'pred_psg':>9}"
-          + (f"{'q/item':>8}{'survive':>12}{'located':>9}" if quotes else ""))
+          + (f"{'q/item':>8}{'survive':>12}{'located':>9}{'downgr':>8}" if quotes else ""))
 
 
 def _print_fine_row(name: str, agg: dict):
@@ -417,7 +423,8 @@ def _print_fine_row(name: str, agg: dict):
     q = agg.get("quotes")
     if q:
         line += (f"{q['quotes'] / max(q['positive'], 1):>8.2f}"
-                 f"{q['passed']:>6}/{q['quotes']:<5}{q['located']:>9}")
+                 f"{q['passed']:>6}/{q['quotes']:<5}{q['located']:>9}"
+                 f"{q.get('downgraded', 0):>4}/{q['positive']:<4}")
     print(line)
 
 
