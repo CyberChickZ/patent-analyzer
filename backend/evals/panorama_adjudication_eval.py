@@ -110,11 +110,17 @@ async def run_stage1(samples: list[dict], docs: dict[str, dict], with_preamble: 
             results = await asyncio.gather(*(score_document(s["chain_text"], checklist, d) for d in cited))
         done[key] = {"label": s["label"], "is_dependent": s["is_dependent"], "checklist": checklist,
                      "docs": results, "with_preamble": with_preamble, "text_shas": shas}
+        _flush()
+
+    def _flush():
+        tmp = out_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(done, ensure_ascii=False))
+        tmp.replace(out_path)
 
     try:
         await asyncio.gather(*(one(s) for s in samples))
     finally:
-        out_path.write_text(json.dumps(done, ensure_ascii=False))
+        _flush()
     return done
 
 
