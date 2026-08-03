@@ -152,3 +152,8 @@ def test_running_headers_and_page_numbers_removed():
     assert all("US 2009/0248944 A1" not in p and "Sheet 1 of 4" not in p for p in out)
     assert all(f"body text of page {i}" in out[i] for i in range(4))
     assert not any(line.strip().isdigit() for p in out for line in p.split("\n"))
+
+
+def test_trailing_label_strip_keeps_inner_parentheticals():
+    assert strip_labels("the port (see FIG. 2) and the buffer (claim 3)") == "the port (see FIG. 2) and the buffer"
+    assert strip_labels("不依赖于单一的决策中心... (Para [0007]: The object ... (a) center...)") == "不依赖于单一的决策中心..."

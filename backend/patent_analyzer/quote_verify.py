@@ -26,7 +26,7 @@ _LABEL = r"(?:abstract|claims?|para(?:graph)?|page|fig(?:ure)?s?|col(?:umn)?|lin
 _LEAD_LABEL = re.compile(
     rf"^\s*(?:\[[^\]]{{1,40}}\]|\({_LABEL}[^)]{{0,40}}\)|{_LABEL}\.?\s*[\d.\-–,]*(?:\s*step\s*\d+)?)\s*[:：\-–]?\s*",
     re.IGNORECASE)
-_TRAIL_LABEL = re.compile(rf"\s*[\[(]\s*{_LABEL}\b.*[\])]\s*$", re.IGNORECASE | re.DOTALL)
+_TRAIL_LABEL = re.compile(rf"\s*[\[(]\s*{_LABEL}\b(?:[^()\[\]]|\([^()]*\)|\[[^\[\]]*\])*[\])]\s*$", re.IGNORECASE | re.DOTALL)
 _ELLIPSIS = re.compile(r"\s*(?:\.{3,}|…)\s*")
 
 
