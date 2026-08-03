@@ -17,15 +17,26 @@ def _canon(p: str) -> str:
     return re.sub(r"[\s\-/,.]", "", (p or "").upper())
 
 
-async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CITED_PER_ROUND
-                 ) -> tuple[list[Candidate], dict]:
+def _after(meta: dict, cutoff: str | None) -> bool:
+    """priority_date on/after the cutoff (YYYYMMDD): not prior art, never a seed."""
+    d = str(meta.get("priority_date") or "").replace("-", "")[:8]
+    return bool(cutoff and d and d >= cutoff)
+
+
+async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CITED_PER_ROUND,
+                 before: str | None = None) -> tuple[list[Candidate], dict]:
     """Returns (new candidates from citations, info) where info has the
-    seeds' family ids, CPC subclass counts and BQ stats."""
+    seeds' family ids, CPC subclass counts and BQ stats. Seeds and cited
+    documents with priority_date >= `before` (YYYYMMDD) are dropped."""
     seeds = [s for s in dict.fromkeys(_canon(p) for p in seed_pubs if p) if s]
-    info = {"seeds": len(seeds), "cpc_subclasses": {}, "families": {}, "cited_total": 0, "cited_new": 0}
+    info = {"seeds": len(seeds), "cpc_subclasses": {}, "families": {}, "cited_total": 0, "cited_new": 0,
+            "seeds_after_cutoff": []}
     if not seeds:
         return [], info
     meta = await fetch_by_pub_nums(seeds, with_claims=False)
+    info["seeds_after_cutoff"] = sorted(k for k, m in meta.items() if _after(m, before))
+    meta = {k: m for k, m in meta.items() if k not in info["seeds_after_cutoff"]}
+    seeds = [s for s in seeds if s not in info["seeds_after_cutoff"]]
     cpc = Counter()
     for k, m in meta.items():
         info["families"][k] = m.get("family_id", "")
@@ -50,6 +61,8 @@ async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CIT
     cmeta = await fetch_by_pub_nums(new, with_claims=False)
     out = []
     for pub, m in cmeta.items():
+        if _after(m, before):
+            continue
         out.append(Candidate(
             title=m.get("title") or pub, snippet=(m.get("abstract") or "")[:500], abstract=m.get("abstract") or "",
             match_type="Patent", pub_num=pub, year=str(m.get("priority_date") or "")[:4],

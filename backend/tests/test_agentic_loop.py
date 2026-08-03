@@ -43,7 +43,7 @@ def test_loop_rounds_and_budget(monkeypatch):
     monkeypatch.setattr(L.gp, "search", fake_gp)
     monkeypatch.setattr(L.gp, "is_blocked", lambda: False)
 
-    async def fake_expand(seeds, known, max_cited=200):
+    async def fake_expand(seeds, known, max_cited=200, before=None):
         return [_cand("US7", "cited art")], {"cpc_subclasses": {"H04N": 1}}
     monkeypatch.setattr(L, "expand", fake_expand)
 
@@ -62,3 +62,48 @@ def test_loop_rounds_and_budget(monkeypatch):
     assert all("AB=(" not in q["query"] for q in rounds[0]["queries"])
     assert any("CPC=H04N" in q["query"] for q in rounds[2]["queries"]) if len(rounds) > 2 else True
     assert all(k == "round_done" for k, _ in events)
+
+
+def test_expand_drops_seeds_and_cited_on_or_after_cutoff(monkeypatch):
+    from patent_analyzer.agentic import expand as E
+
+    async def fake_meta(pubs, with_claims=False):
+        rows = {"US1B2": {"priority_date": "2010-05-01", "family_id": "f1", "cpc_codes": ["H04N7/15"]},
+                "US2B2": {"priority_date": "2011-02-02", "family_id": "f2", "cpc_codes": ["G06F3/00"]},
+                "US9A": {"priority_date": "2005-01-01", "family_id": "f9", "title": "old art"},
+                "US8A": {"priority_date": "2011-06-01", "family_id": "f8", "title": "later art"}}
+        return {p: rows[p] for p in pubs if p in rows}
+
+    async def fake_cits(pubs):
+        assert "US2B2" not in pubs
+        return {"US1B2": {"cits": [{"cited": "US9A", "category": "SEA"}, {"cited": "US8A", "category": "APP"}]}}
+    monkeypatch.setattr(E, "fetch_by_pub_nums", fake_meta)
+    monkeypatch.setattr(E, "fetch_citations", fake_cits)
+    out, info = asyncio.run(E.expand(["US1B2", "US2B2"], set(), before="20110202"))
+    assert info["seeds_after_cutoff"] == ["US2B2"]
+    assert info["cpc_subclasses"] == {"H04N": 1}
+    assert [c.pub_num for c in out] == ["US9A"]
+
+
+def test_loop_removes_post_cutoff_seeds_from_pool(monkeypatch):
+    state = {"summary": "s", "date_cutoff": "20110202",
+             "checklist": [{"id": "e1", "criterion": "gaze estimation for video conferencing"}]}
+
+    async def fake_facets(els, summary):
+        return {"e1": {"thing": ["gaze"], "place": ["conferenc"], "apparatus": []}}
+    monkeypatch.setattr("app.llm.facet_elements", fake_facets)
+
+    async def fake_gp(query, num=20, page=0, before=None):
+        assert before == "priority:20110202"
+        L.gp.last_total[query] = 2
+        return [_cand("US1", "Horizontal gaze estimation for video conferencing"), _cand("US2", "later gaze patent")], None
+    monkeypatch.setattr(L.gp, "search", fake_gp)
+    monkeypatch.setattr(L.gp, "is_blocked", lambda: False)
+
+    async def fake_expand(seeds, known, max_cited=200, before=None):
+        assert before == "20110202"
+        return [], {"cpc_subclasses": {}, "seeds_after_cutoff": ["US2"]}
+    monkeypatch.setattr(L, "expand", fake_expand)
+    cands, stats = asyncio.run(L.run_loop(state, lambda: 0, lambda: False, lambda k, m, p=None: None))
+    assert {c.pub_num for c in cands} == {"US1"}
+    assert stats["rounds"][0]["seeds_after_cutoff"] == ["US2"] and stats["rounds"][0]["seed_pubs"] == ["US1"]

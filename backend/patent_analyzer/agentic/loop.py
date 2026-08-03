@@ -69,8 +69,9 @@ async def run_loop(state: dict, serpapi_left, serpapi_take, event, embed=None) -
     if not elements:
         return [], {"rounds": [], "reason": "no elements"}
     elements = await attach_facets(elements, state.get("summary", ""))
-    before = state.get("date_cutoff")
-    before = f"priority:{before}" if before and str(before).isdigit() else None
+    cutoff = str(state.get("date_cutoff") or "")
+    cutoff = cutoff if cutoff.isdigit() and len(cutoff) == 8 else None
+    before = f"priority:{cutoff}" if cutoff else None
     budget = Budget(serpapi_left, serpapi_take)
 
     pool: dict[str, Candidate] = {}
@@ -107,7 +108,9 @@ async def run_loop(state: dict, serpapi_left, serpapi_take, event, embed=None) -
                 if mode is None:
                     break
         seeds = [c.pub_num for c in new_this_round if c.pub_num]
-        expanded, info = await expand(seeds, known) if seeds else ([], {})
+        expanded, info = await expand(seeds, known, before=cutoff) if seeds else ([], {})
+        dropped = set(info.get("seeds_after_cutoff") or [])
+        new_this_round = [c for c in new_this_round if (c.pub_num or "").upper() not in dropped]
         if info.get("cpc_subclasses"):
             cpc_hint = next(iter(info["cpc_subclasses"]))
         for c in new_this_round + expanded:
@@ -127,7 +130,7 @@ async def run_loop(state: dict, serpapi_left, serpapi_take, event, embed=None) -
                  "cpc_hint": cpc_hint, "queries": queries_log,
                  "pool_pubs": sorted(k for k in pool),
                  "new_pubs": sorted({(c.pub_num or c.title).upper() for c in new_this_round + expanded}),
-                 "seed_pubs": sorted(set(seeds)),
+                 "seed_pubs": sorted(set(seeds) - dropped), "seeds_after_cutoff": sorted(dropped),
                  "ts": datetime.now(timezone.utc).isoformat()}
         rounds.append(stats)
         event("round_done", f"loop round {rnd}: pool {len(pool)}, covered {len(covered_ids)}/{len(elements)}, "
