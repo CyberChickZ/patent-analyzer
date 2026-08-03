@@ -58,6 +58,27 @@ def quota_status() -> list[dict]:
     return [{"key": _fp(k), "used": _quota(k).used(), "cap": FREE_TIER_PER_KEY} for k in _keys()]
 
 
+def sync_account() -> list[dict]:
+    """Overwrite the local counters with SerpAPI's /account this_month_usage
+    (the provider also bills 'no results' answers, which the local counter
+    used to release)."""
+    import json
+    import urllib.request
+    out = []
+    for k in _keys():
+        try:
+            with urllib.request.urlopen(f"https://serpapi.com/account?api_key={k}", timeout=15) as r:
+                d = json.loads(r.read().decode())
+            _quota(k).set_used(int(d.get("this_month_usage", 0)))
+            out.append({"key": _fp(k), "used": int(d.get("this_month_usage", 0)), "left": d.get("plan_searches_left")})
+        except Exception as exc:
+            out.append({"key": _fp(k), "error": str(exc)[:80]})
+    return out
+
+
+_NO_RESULTS = "hasn't returned any results"
+
+
 def _exhausted(err: str | None) -> bool:
     e = (err or "").lower()
     return any(t in e for t in ("401", "429", "exhaust", "run out", "quota", "limit"))
@@ -93,6 +114,9 @@ async def _search(engine: str, query: str, max_pages: int, num: int, match_type:
             q.exhaust()
             last_err = f"serpapi key {_fp(key)}: {err}"
             continue
+        if err and _NO_RESULTS in err:
+            # billed by SerpAPI like any answer; cache it as an empty page
+            matches, err = [], None
         if err:
             q.release(max_pages)
             return [], err

@@ -71,6 +71,10 @@ class MonthlyQuota:
     def release(self, n: int = 1):
         kv().incr(_NS, self._key(), by=-n)
 
+    def set_used(self, n: int):
+        """Overwrite the counter with the provider's own figure."""
+        kv().put(_NS, self._key(), {"n": int(n)})
+
     def exhaust(self):
         """Mark the whole month as spent (provider said 401/429)."""
         gap = self.cap - self.used()

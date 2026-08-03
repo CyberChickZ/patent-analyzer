@@ -82,3 +82,21 @@ def test_searcher_puts_before_in_url(monkeypatch):
     monkeypatch.setattr(searcher.urllib.request, "urlopen", lambda req, timeout=0, context=None: (urls.append(req.full_url), _Resp())[1])
     searcher.serpapi_search("google_patents", "q", "k", extra={"before": "priority:20110202"})
     assert "before=priority%3A20110202" in urls[0]
+
+
+def test_no_results_answer_is_billed_and_cached(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sp, "_sync_search", lambda *a: (calls.append(1), ([], "SerpAPI error: Google Patents hasn't returned any results for this query."))[1])
+    c, e = asyncio.run(sp.search_patents("nothing"))
+    assert c == [] and e is None and sp.last_total["nothing"] == 0
+    asyncio.run(sp.search_patents("nothing"))
+    assert len(calls) == 1 and sp.quota_status()[0]["used"] == 1
+
+
+def test_sync_account_overwrites_counter(monkeypatch):
+    import io, json, urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda url, timeout=0: io.BytesIO(json.dumps({"this_month_usage": 129, "plan_searches_left": 121}).encode()))
+    out = sp.sync_account()
+    assert [o["used"] for o in out] == [129, 129]
+    assert [s["used"] for s in sp.quota_status()] == [129, 129]
