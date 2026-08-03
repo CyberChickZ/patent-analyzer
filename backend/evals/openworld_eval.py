@@ -239,12 +239,17 @@ async def run_pipeline_one(key: str, g: dict) -> dict:
 
 async def score_pipeline(gold: dict, recs: dict) -> dict:
     """Family-level recall over the ranked list and the pool; channel attribution."""
-    from patent_analyzer.recall.bigquery_patents import fetch_by_pub_nums
+    from patent_analyzer.recall.bigquery_patents import fetch_families
 
-    cand_pubs = sorted({_canon(d["pub_num"]) for r in recs.values() for d in r["pool"]
-                        if d.get("match_type") == "Patent" and d.get("pub_num")})
-    cand_meta = await fetch_by_pub_nums(cand_pubs, with_claims=False) if cand_pubs else {}
-    fam_of = {k: v["family_id"] for k, v in cand_meta.items()}
+    # Family of a pool pub only matters when it is a gold family: expand the
+    # gold families to their members (tens of rows) instead of looking up every
+    # pool pub (thousands of rows, ~0.03 GiB each on the bucketed table).
+    gold_fams = sorted({f for k in recs for f in gold.get(k, {}).get("gold_families", [])})
+    members = await fetch_families(gold_fams) if gold_fams else {}
+    fam_of = {_canon(m["publication_number"]): fid for fid, ms in members.items() for m in ms}
+    for k in recs:
+        for gd in gold.get(k, {}).get("gold", []):
+            fam_of.setdefault(_canon(gd["pub"]), gd["family_id"])
 
     per_q, chan_unique, chan_hits = [], {}, {}
     for key, g in gold.items():
