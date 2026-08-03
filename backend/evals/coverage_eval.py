@@ -186,9 +186,28 @@ async def run_one_multi(app: str, checklist_kind: str) -> dict:
 PDF_DIR = Path(__file__).parent.parent / "eval_data" / "pdfs"
 
 
+def _serpapi_pdf_link(pub: str) -> str:
+    """SerpAPI google_patents point lookup (one call) -> patentimages pdf link."""
+    import os
+    from patent_analyzer.searcher import serpapi_search
+    key = os.environ.get("SERPAPI_KEY", "")
+    if not key:
+        try:
+            import yaml
+            key = yaml.safe_load((Path(__file__).parent.parent / ".env.yaml").read_text()).get("SERPAPI_KEY", "")
+        except Exception:
+            return ""
+    res, _ = serpapi_search("google_patents", pub, key, None, 1, 10)
+    for r in res:
+        if (r.get("pdf_link") or "").endswith(f"{pub}.pdf"):
+            return r["pdf_link"]
+    return ""
+
+
 async def fetch_patent_pdf(pub: str) -> str | None:
     """PDF of a publication: Google Patents page (recall.google_patents.fetch_patent,
-    paced + circuit-broken) gives citation_pdf_url, downloaded with
+    paced + circuit-broken) gives citation_pdf_url, else a SerpAPI point lookup
+    gives the same patentimages link; downloaded with
     patent_analyzer.searcher.download_pdf (cached). USPTO ppubs PDFs are
     image-only (no text layer) so they are not used as a fallback."""
     from patent_analyzer.recall.google_patents import fetch_patent
@@ -199,10 +218,11 @@ async def fetch_patent_pdf(pub: str) -> str | None:
     if out.exists():
         return str(out)
     page = await fetch_patent(pub)
-    if not page or not page.get("pdf_url"):
-        print(f"[{pub}] google patents: no page / no citation_pdf_url (blocked?)")
+    url = (page or {}).get("pdf_url") or await asyncio.to_thread(_serpapi_pdf_link, pub)
+    if not url:
+        print(f"[{pub}] no pdf link (google patents blocked and serpapi empty)")
         return None
-    return await asyncio.to_thread(download_pdf, page["pdf_url"], PDF_DIR, f"{pub}.pdf")
+    return await asyncio.to_thread(download_pdf, url, PDF_DIR, f"{pub}.pdf")
 
 
 def result_document(result: dict, app_data: dict) -> str:
