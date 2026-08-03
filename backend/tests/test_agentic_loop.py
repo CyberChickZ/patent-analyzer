@@ -107,3 +107,26 @@ def test_loop_removes_post_cutoff_seeds_from_pool(monkeypatch):
     cands, stats = asyncio.run(L.run_loop(state, lambda: 0, lambda: False, lambda k, m, p=None: None))
     assert {c.pub_num for c in cands} == {"US1"}
     assert stats["rounds"][0]["seeds_after_cutoff"] == ["US2"] and stats["rounds"][0]["seed_pubs"] == ["US1"]
+
+
+def test_mode_walk_never_repeats_a_query(monkeypatch):
+    state = {"summary": "s", "checklist": [{"id": "e1", "criterion": "x"}]}
+
+    async def fake_facets(els, summary):
+        return {"e1": {"thing": ["videoconference"], "place": ["hub"], "apparatus": []}}
+    monkeypatch.setattr("app.llm.facet_elements", fake_facets)
+    seen = []
+
+    async def fake_gp(query, num=20, page=0, before=None):
+        seen.append(query)
+        L.gp.last_total[query] = 0 if "hub" in query else 90_000
+        return ([], None) if "hub" in query else ([_cand(f"US{len(seen)}", "t")] * 20, None)
+    monkeypatch.setattr(L.gp, "search", fake_gp)
+    monkeypatch.setattr(L.gp, "is_blocked", lambda: False)
+
+    async def fake_expand(seeds, known, max_cited=200, before=None):
+        return [], {"cpc_subclasses": {}}
+    monkeypatch.setattr(L, "expand", fake_expand)
+    _, stats = asyncio.run(L.run_loop(state, lambda: 0, lambda: False, lambda k, m, p=None: None))
+    r1 = [q["query"] for q in stats["rounds"][0]["queries"]]
+    assert len(r1) == len(set(r1))

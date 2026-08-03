@@ -90,11 +90,12 @@ async def run_loop(state: dict, serpapi_left, serpapi_take, event, embed=None) -
         new_this_round: list[Candidate] = []
         queries_log = []
         for el in uncovered:
-            mode = start_mode
+            mode, tried = start_mode, set()
             for attempt in range(3):
                 q = boolean_query(el, mode, field=field, cpc=cpc_hint if rnd == 3 else None)
-                if not q:
+                if not q or q in tried:   # zero → core → too_broad → loose would repeat the query
                     break
+                tried.add(q)
                 cands, total, chan = await _search(q, before, budget)
                 verdict = validate(total, len(cands))
                 queries_log.append({"element": el["id"], "round": rnd, "mode": mode, "query": q[:160],
