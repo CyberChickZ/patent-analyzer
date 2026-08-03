@@ -63,16 +63,17 @@ def _exhausted(err: str | None) -> bool:
     return any(t in e for t in ("401", "429", "exhaust", "run out", "quota", "limit"))
 
 
-def _cache_key(engine: str, query: str, max_pages: int, num: int) -> str:
+def _cache_key(engine: str, query: str, max_pages: int, num: int, before: str | None = None) -> str:
     norm = " ".join(query.lower().split())
-    return hashlib.sha1(f"serp|{engine}|{norm}|{max_pages}|{num}".encode()).hexdigest()
+    tail = f"|{before}" if before else ""
+    return hashlib.sha1(f"serp|{engine}|{norm}|{max_pages}|{num}{tail}".encode()).hexdigest()
 
 
-async def _search(engine: str, query: str, max_pages: int, num: int, match_type: str
-                  ) -> tuple[list[Candidate], str | None]:
+async def _search(engine: str, query: str, max_pages: int, num: int, match_type: str,
+                  before: str | None = None) -> tuple[list[Candidate], str | None]:
     if not query:
         return [], "empty query"
-    ck = _cache_key(engine, query, max_pages, num)
+    ck = _cache_key(engine, query, max_pages, num, before)
     hit = kv().get("search", ck, max_age_days=_CACHE_DAYS)
     if hit is not None:
         last_total[query] = int(hit.get("total", 0))
@@ -86,7 +87,8 @@ async def _search(engine: str, query: str, max_pages: int, num: int, match_type:
         if not q.take(max_pages):
             last_err = f"serpapi key {_fp(key)} monthly quota exhausted"
             continue
-        matches, err = await asyncio.to_thread(_sync_search, engine, query, key, None, max_pages, num)
+        matches, err = await asyncio.to_thread(_sync_search, engine, query, key, None, max_pages, num,
+                                               {"before": before} if before else None)
         if err and _exhausted(err):
             q.exhaust()
             last_err = f"serpapi key {_fp(key)}: {err}"
@@ -102,8 +104,11 @@ async def _search(engine: str, query: str, max_pages: int, num: int, match_type:
     return [], last_err or "serpapi: all keys exhausted"
 
 
-async def search_patents(query: str, max_pages: int = 1) -> tuple[list[Candidate], str | None]:
-    return await _search("google_patents", query, max_pages, 100, "Patent")
+async def search_patents(query: str, max_pages: int = 1, before: str | None = None
+                         ) -> tuple[list[Candidate], str | None]:
+    """`before` = Google Patents date bound, e.g. 'priority:20110202'
+    (SerpAPI: type:YYYYMMDD, type in priority/filing/publication)."""
+    return await _search("google_patents", query, max_pages, 100, "Patent", before=before)
 
 
 async def search_scholar(query: str, max_pages: int = 3) -> tuple[list[Candidate], str | None]:

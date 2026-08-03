@@ -57,7 +57,7 @@ async def _search(query: str, before: str | None, budget: Budget) -> tuple[list[
             budget.gp_blocked += 1
     if query and budget.serp_ok():
         budget.serp_calls += 1
-        cands, err = await sp.search_patents(query, max_pages=1)
+        cands, err = await sp.search_patents(query, max_pages=1, before=before)
         if not err:
             return cands, sp.last_total.get(query), "serpapi_patents"
     return [], None, "none"

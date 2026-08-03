@@ -26,7 +26,7 @@ def _ok(n, total=777):
 def test_rotates_to_next_key_on_exhaustion(monkeypatch):
     used = []
 
-    def fake(engine, query, key, log, pages, num):
+    def fake(engine, query, key, log, pages, num, extra=None):
         used.append(key)
         return ([], "HTTP 401 (invalid SerpAPI key or quota exhausted)") if key == "keyA" else _ok(2)
     monkeypatch.setattr(sp, "_sync_search", fake)
@@ -60,3 +60,25 @@ def test_non_quota_error_releases_credit(monkeypatch):
     monkeypatch.setattr(sp, "_sync_search", lambda *a: ([], "network failure after 4 retries"))
     c, e = asyncio.run(sp.search_patents("x"))
     assert c == [] and "network" in e and sp.quota_status()[0]["used"] == 0
+
+
+def test_before_is_forwarded_and_keyed_separately(monkeypatch):
+    seen = []
+    monkeypatch.setattr(sp, "_sync_search", lambda *a: (seen.append(a[6]), _ok(1))[1])
+    asyncio.run(sp.search_patents("q", before="priority:20110202"))
+    asyncio.run(sp.search_patents("q"))
+    asyncio.run(sp.search_patents("q", before="priority:20110202"))
+    assert seen == [{"before": "priority:20110202"}, None]
+
+
+def test_searcher_puts_before_in_url(monkeypatch):
+    from patent_analyzer import searcher
+    urls = []
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+        def read(self): return b'{"organic_results": []}'
+    monkeypatch.setattr(searcher.urllib.request, "urlopen", lambda req, timeout=0, context=None: (urls.append(req.full_url), _Resp())[1])
+    searcher.serpapi_search("google_patents", "q", "k", extra={"before": "priority:20110202"})
+    assert "before=priority%3A20110202" in urls[0]

@@ -49,8 +49,10 @@ def serpapi_search(
     log_file: str | None = None,
     max_pages: int = 1,
     num_per_page: int = 100,
+    extra: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], str | None]:
-    """Perform a paginated SerpAPI search with retry.
+    """Perform a paginated SerpAPI search with retry. `extra` = engine
+    parameters passed through verbatim (google_patents: before=priority:YYYYMMDD).
 
     Returns (results, error) where error is None on success (even if 0 results)
     or a short human-readable string when something went wrong (HTTP error,
@@ -71,6 +73,7 @@ def serpapi_search(
             "api_key": api_key,
             "num": str(actual_num),
             "page": str(page),
+            **{k: v for k, v in (extra or {}).items() if v},
         }
         url = f"{SERPAPI_URL}?{urllib.parse.urlencode(params)}"
 
