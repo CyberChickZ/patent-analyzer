@@ -1,18 +1,25 @@
 """Google Patents boolean queries from element facets.
 
-Google syntax (official help, verified 2026-09-18): space = AND, OR,
-parentheses, "phrase", AB=/CL=/TI= field scoping, CPC=, '*' wildcard;
-NEAR/ADJ/SAME only affect ranking, never retrieval, so they are appended
-as a ranking hint and ignored by the validator. Dates go through the
-separate `before` parameter, not the query string.
+Google syntax (official help, verified 2026-09-18): space = AND with left
+associativity, OR, parentheses, "phrase" = exact, AB=/CL=/TI= field
+scoping, CPC=, '*' wildcard; unquoted keywords are stemmed and get close
+synonyms automatically; NEAR/ADJ/SAME only affect ranking, never
+retrieval, so they are appended as a ranking hint and ignored by the
+validator. Dates go through the separate `before` parameter.
+
+A facet is an OR group of surface forms (patent-search-pilot: 6-14 forms
+per facet, two words max). A multi-word form is written unquoted inside
+its own parentheses — (sound damping) — so each word is stemmed and the
+words only have to co-occur in the document, not as an exact phrase.
 """
 
 from __future__ import annotations
 
 MODES = ("strict", "loose", "core")
+FORMS_PER_FACET = 8
 
 
-def _group(terms: list[str], cap: int = 4) -> str:
+def _group(terms: list[str], cap: int = FORMS_PER_FACET) -> str:
     ts = []
     for t in terms:
         t = " ".join(str(t).split()).strip().strip('"')
@@ -21,7 +28,7 @@ def _group(terms: list[str], cap: int = 4) -> str:
     ts = ts[:cap]
     if not ts:
         return ""
-    q = " OR ".join(f'"{t}"' if " " in t else t for t in ts)
+    q = " OR ".join(f"({t})" if " " in t else t for t in ts)
     return f"({q})" if len(ts) > 1 else q
 
 
