@@ -58,7 +58,9 @@ def _identity_keys(c: Candidate) -> list[str]:
     if c.pub_num and c.match_type == "Patent":
         keys.append(f"patent:{c.pub_num.lower().replace(' ', '')}")
     nt = _norm_title(c.title)
-    if len(nt) >= 20:
+    if len(nt) >= 20 and not (c.pub_num and c.match_type == "Patent"):
+        # a numbered patent is identified by its number/family only: two
+        # distinct families can share a title verbatim (US5517465A / US5675555A)
         keys.append(f"title:{nt}")
     return keys
 
