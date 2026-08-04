@@ -90,7 +90,8 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
               "single_partial_103": single_partial_103}
     if n == 0:
         return {"label": "ALLOW", "risk": "related", "reason": "no elements to compare",
-                "n_elements": 0, "needed": 0, "per_doc_coverage": [], "combo": None, "params": params}
+                "n_elements": 0, "needed": 0, "best_single": "", "best_coverage": 0.0,
+                "per_doc_coverage": [], "combo": None, "params": params}
 
     slack = max(allow_missing, int(math.floor(n * (1.0 - min_cover) + 1e-9)))
     needed = max(1, n - slack)
