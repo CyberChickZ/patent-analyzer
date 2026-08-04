@@ -15,7 +15,7 @@ def test_strict_query_scoped_with_hint():
     assert q.startswith('AB=(((gaze estimation) OR (eye tracking)) ((video conferencing) OR telepresence) (camera OR (head mount)))')
     assert "NEAR/10" not in q  # multi-word first terms: no hint
     q2 = boolean_query({"facets": {"thing": ["gaze"], "place": ["telepresence"], "apparatus": []}}, "strict", cpc="H04N7")
-    assert q2 == "AB=(gaze telepresence) CPC=H04N7 (gaze NEAR/10 telepresence)"
+    assert q2 == "AB=(gaze telepresence) CPC=H04N7/low (gaze NEAR/10 telepresence)"
 
 
 def test_loose_and_core():
@@ -48,3 +48,14 @@ def test_validator_and_mode_walk():
     assert next_mode("strict", "too_broad") is None
     assert next_mode("strict", "ok") is None
 
+
+def test_term_never_repeated_across_facets():
+    el = {"facets": {"thing": ["pressure sensor"], "place": ["housing"], "apparatus": ["pressure sensor", "transducer"]}}
+    assert boolean_query(el, "strict", field="") == "(pressure sensor) housing transducer"
+    el = {"facets": {"thing": ["accelerometer"], "place": ["housing"], "apparatus": ["Accelerometer"]}}
+    assert boolean_query(el, "strict", field="") == "accelerometer housing (accelerometer NEAR/10 housing)"
+
+
+def test_cpc_subclass_asks_for_the_subtree():
+    from patent_analyzer.agentic.query_gen import cpc_clause
+    assert cpc_clause("h04n") == "CPC=H04N/low" and cpc_clause("") == ""

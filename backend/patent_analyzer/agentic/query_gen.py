@@ -32,11 +32,37 @@ def _group(terms: list[str], cap: int = FORMS_PER_FACET) -> str:
     return f"({q})" if len(ts) > 1 else q
 
 
+def _distinct(f: dict) -> tuple[list[str], list[str], list[str]]:
+    """Facets as term lists with a term never repeated across facets (a
+    form in `thing` is dropped from `place`/`apparatus`): repeating it just
+    lengthens the query without narrowing it (H1-06: `accelerometer housing
+    accelerometer`)."""
+    seen, out = set(), []
+    for k in ("thing", "place", "apparatus"):
+        terms = []
+        for t in f.get(k) or []:
+            key = " ".join(str(t).lower().split()).strip('"')
+            if key and key not in seen:
+                seen.add(key)
+                terms.append(t)
+        out.append(terms)
+    return out[0], out[1], out[2]
+
+
+def cpc_clause(subclass: str) -> str:
+    """Google Patents: `CPC=B60R22` matches exactly that code, `/low` adds the
+    children — a bare subclass never matches a document, so always ask for
+    the subtree."""
+    c = (subclass or "").strip().upper()
+    return f"CPC={c}/low" if c else ""
+
+
 def boolean_query(element: dict, mode: str = "strict", field: str = "AB", cpc: str | None = None) -> str:
     """strict: thing AND place AND apparatus, scoped to field (AB or CL),
     optional CPC=; loose: thing AND place; core: thing only, no field."""
     f = element.get("facets") or {}
-    thing, place, app = _group(f.get("thing") or []), _group(f.get("place") or []), _group(f.get("apparatus") or [])
+    t_terms, p_terms, a_terms = _distinct(f)
+    thing, place, app = _group(t_terms), _group(p_terms), _group(a_terms)
     if not thing:
         return ""
     if mode == "core":
@@ -46,10 +72,10 @@ def boolean_query(element: dict, mode: str = "strict", field: str = "AB", cpc: s
     body = " ".join(parts)
     q = f"{field}=({body})" if field else body
     if mode == "strict" and cpc:
-        q += f" CPC={cpc}"
+        q += " " + cpc_clause(cpc)
     if mode == "strict" and thing and place:
-        t0 = (f.get("thing") or [""])[0]
-        p0 = (f.get("place") or [""])[0]
+        t0 = (t_terms or [""])[0]
+        p0 = (p_terms or [""])[0]
         if t0 and p0 and " " not in t0 and " " not in p0:
             q += f" ({t0} NEAR/10 {p0})"   # ranking hint only
     return q
