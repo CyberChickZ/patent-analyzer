@@ -136,8 +136,9 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
                   f"{combo['n_covered']}/{n} — every element is known, combination risk under §103 (MPEP 2143 A).")
     elif single_partial_103 is not None and best and best_cov >= single_partial_103:
         label = "103"
-        reason = (f"{_key(best)} covers {best['n_covered']}/{n} ({best_cov:.0%} >= {single_partial_103:.0%}); "
-                  f"remaining elements may be routine modifications (PANORAMA C.5.3 rule a).")
+        reason = (f"{_key(best)} alone covers {best['n_covered']}/{n} elements ({best_cov:.0%} >= {single_partial_103:.0%}); "
+                  f"the remaining {n - best['n_covered']} would need only a secondary reference or a routine modification "
+                  f"— primary-reference combination risk under §103 (MPEP 2143).")
     else:
         label = "ALLOW"
         missing = combo["missing"] if combo else names
