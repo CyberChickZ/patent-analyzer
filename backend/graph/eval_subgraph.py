@@ -190,8 +190,10 @@ async def reduce_eval(state: EvalState) -> dict:
                 quote_stats[k] += int(qv.get(k, 0))
 
     # Rule-based prior-art determination over the verified coverage (novelty_score / risk_level untouched)
+    # single_partial_103=0.7: a primary reference covering >=70% of the elements is flagged as §103-pattern risk
+    # (PANORAMA App. C.5.3 rule a; H2 eval: macro-F1 .413 -> .450, blocking recall .29 -> .55 on examiner labels)
     from patent_analyzer.adjudicate import adjudicate
-    adjudication = adjudicate(checklist, scoring_report)
+    adjudication = adjudicate(checklist, scoring_report, single_partial_103=0.7)
 
     events = [
         _event("info", f"Evaluated {len(scoring_report)} docs, top score: {top_score:.2%}, risk: {risk_level}"),
