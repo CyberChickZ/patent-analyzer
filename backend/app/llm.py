@@ -1691,19 +1691,23 @@ TOP MATCHES (sorted by overlap):
 async def facet_elements(elements: list[dict], summary: str) -> dict[str, dict]:
     """One call: for each element give search facets in Google Patents
     vocabulary. Returns {element_id: {thing[], place[], apparatus[]}}.
-    Rules follow practitioner query craft: short stems, no generic head
-    nouns, synonyms across engineering/industrial/research vocabularies."""
+    Shape follows patent-search-pilot's measured query craft: 6-14 surface
+    forms per facet, two words max, no generic head nouns, vocabularies
+    from different communities. Full words, not truncated stems: Google
+    Patents stems unquoted keywords itself."""
     if not elements:
         return {}
     listing = "\n".join(f'{e["id"]}: {e["text"]}' for e in elements)
     system = "You write patent search facets. Output JSON only."
     prompt = f"""For EACH element below, give three facets of search terms:
-  thing     — what the element IS (the core noun/mechanism), 2-4 short stems or phrases
-  place     — where/in what context it operates (domain, host system, signal), 1-3 stems
-  apparatus — the concrete structural/implementation term, 1-3 stems
-RULES: use DIFFERENT vocabulary across terms (older term, generic term, industrial term, research term).
+  thing     — what the element IS (the core noun/mechanism): 6-10 surface forms
+  place     — where/in what context it operates (domain, host system, signal): 4-8 forms
+  apparatus — the concrete structural/implementation term: 3-6 forms
+RULES: each form is ONE or TWO full English words (the engine stems them: write "damping" not "damp").
+Use DIFFERENT vocabulary across forms: the older term, the generic term, the industrial term,
+the research term, the term a competitor in another field would use.
 NEVER use words so general they appear in every patent: device, member, element, portion, means, unit, system, method, apparatus, module, component, assembly.
-DROP THE HEAD NOUN: write "sound damp" not "sound damping device". Lowercase. No quotes inside terms.
+DROP THE HEAD NOUN: write "sound damping" not "sound damping device". Lowercase. No quotes inside terms.
 
 INVENTION CONTEXT: {summary[:1500]}
 
@@ -1718,7 +1722,7 @@ JSON output: {{"facets": {{"<element id>": {{"thing": [...], "place": [...], "ap
         out = {}
         for e in elements:
             f = (data.get("facets") or {}).get(e["id"]) or {}
-            out[e["id"]] = {k: [str(t).strip().lower() for t in (f.get(k) or []) if str(t).strip()][:4]
+            out[e["id"]] = {k: [str(t).strip().lower() for t in (f.get(k) or []) if str(t).strip()][:FACET_FORMS_CAP]
                             for k in ("thing", "place", "apparatus")}
         return out
     except Exception:
@@ -1732,6 +1736,7 @@ JSON output: {{"facets": {{"<element id>": {{"thing": [...], "place": [...], "ap
 EXTRACTION_LEVELS = ("core", "component", "application")
 EXTRACTION_KINDS = ("structure", "step", "condition", "parameter")
 _EXTRACTION_DOC_CAP = 150_000
+FACET_FORMS_CAP = 10
 _FACET_BANNED = frozenset("device member element portion means unit system method apparatus module component assembly".split())
 
 _DOC_KIND_GUIDANCE = {

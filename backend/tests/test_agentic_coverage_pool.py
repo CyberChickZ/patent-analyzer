@@ -40,3 +40,32 @@ def test_pool_dedupes_by_family_before_pub():
     assert len(pooled) == 2
     fam1 = next(p for p in pooled if p.pub_num == "US1B2")
     assert sorted(fam1.sources) == ["cit", "gp"]
+
+
+def test_merge_facets_unions_two_samples_in_order():
+    from patent_analyzer.agentic.elements import merge_facets
+    m = merge_facets({"thing": ["gaze estimation", "eye tracking"], "place": ["telepresence"]},
+                     {"thing": ["Eye Tracking", "gaze direction", "line of sight"], "place": [], "apparatus": ["camera"]})
+    assert m == {"thing": ["gaze estimation", "eye tracking", "gaze direction", "line of sight"],
+                 "place": ["telepresence"], "apparatus": ["camera"]}
+    assert len(merge_facets({"thing": [str(i) for i in range(20)]}, {})["thing"]) == 10
+
+
+def test_attach_facets_widens_every_element(monkeypatch):
+    import asyncio
+    from patent_analyzer.agentic.elements import attach_facets
+    asked = []
+
+    async def fake(els, summary):
+        asked.extend(e["id"] for e in els)
+        return {"e1": {"thing": ["eye tracking", "gaze direction"], "place": ["video call"], "apparatus": []},
+                "e2": {"thing": [], "place": [], "apparatus": []}}
+    monkeypatch.setattr("app.llm.facet_elements", fake)
+    els = [{"id": "e1", "text": "gaze estimation for telepresence", "facets": {"thing": ["gaze estimation"], "place": ["telepresence"]}},
+           {"id": "e2", "text": "a motorized swivelling turntable", "facets": {}}]
+    out = asyncio.run(attach_facets(els, "s"))
+    assert asked == ["e1", "e2"]
+    assert out[0]["facets"]["thing"] == ["gaze estimation", "eye tracking", "gaze direction"]
+    assert out[0]["facets"]["place"] == ["telepresence", "video call"]
+    assert out[1]["facets"]["thing"]  # fallback kept the loop alive
+

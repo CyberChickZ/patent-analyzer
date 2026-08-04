@@ -45,13 +45,27 @@ def fallback_facets(text: str) -> dict:
     return {"thing": uniq[:3], "place": uniq[3:5], "apparatus": []}
 
 
+def merge_facets(base: dict, extra: dict, cap: int = 10) -> dict:
+    """Union of two facet samples, base first, deduped, capped per facet
+    (patent-search-pilot: which words the model reaches for is a coin flip;
+    the fix is to toss it twice and merge)."""
+    out = {}
+    for k in ("thing", "place", "apparatus"):
+        seen = []
+        for t in list((base or {}).get(k) or []) + list((extra or {}).get(k) or []):
+            t = " ".join(str(t).lower().split())
+            if t and t not in seen:
+                seen.append(t)
+        out[k] = seen[:cap]
+    return out
+
+
 async def attach_facets(elements: list[dict], summary: str) -> list[dict]:
-    """Fill missing facets with one LLM call; fallback keeps the loop alive."""
-    need = [e for e in elements if not any((e.get("facets") or {}).get(k) for k in ("thing", "place", "apparatus"))]
-    if need:
-        from app.llm import facet_elements
-        got = await facet_elements([{"id": e["id"], "text": e["text"]} for e in need], summary)
-        for e in need:
-            f = got.get(e["id"]) or {}
-            e["facets"] = f if f.get("thing") else fallback_facets(e["text"])
+    """One LLM call widens every element's facets (union with the
+    extraction's own forms); fallback keeps the loop alive."""
+    from app.llm import facet_elements
+    got = await facet_elements([{"id": e["id"], "text": e["text"]} for e in elements], summary)
+    for e in elements:
+        merged = merge_facets(e.get("facets") or {}, got.get(e["id"]) or {})
+        e["facets"] = merged if merged.get("thing") else fallback_facets(e["text"])
     return elements
