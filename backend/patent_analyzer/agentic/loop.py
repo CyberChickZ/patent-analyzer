@@ -47,8 +47,23 @@ class Budget:
         return self._serp_left() > 0 and self._serp_take()
 
 
+GP_WAIT_S = int(os.environ.get("LOOP_GP_WAIT_S", "0"))   # evals: wait out a Google block instead of dropping the query
+
+
+async def _wait_for_gp(budget: Budget) -> None:
+    """With no SerpAPI credit left, an eval run may sit out Google's soft
+    block (15 min breaker) rather than log the query as `none`."""
+    import asyncio
+    waited = 0
+    while GP_WAIT_S and gp.is_blocked() and budget.gp_calls < GP_CALLS_PER_JOB and budget.serp_left() <= 0 and waited < GP_WAIT_S:
+        await asyncio.sleep(30)
+        waited += 30
+
+
 async def _search(query: str, before: str | None, budget: Budget) -> tuple[list[Candidate], int | None, str]:
     """Direct first; SerpAPI only when direct is blocked or errors."""
+    if query:
+        await _wait_for_gp(budget)
     if query and budget.gp_ok():
         budget.gp_calls += 1
         cands, err = await gp.search(query, num=20, before=before)
