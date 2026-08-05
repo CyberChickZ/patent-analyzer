@@ -46,7 +46,7 @@ def test_merge_facets_unions_two_samples_in_order():
     from patent_analyzer.agentic.elements import merge_facets
     m = merge_facets({"thing": ["gaze estimation", "eye tracking"], "place": ["telepresence"]},
                      {"thing": ["Eye Tracking", "gaze direction", "line of sight"], "place": [], "apparatus": ["camera"]})
-    assert m == {"thing": ["gaze estimation", "eye tracking", "gaze direction", "line of sight"],
+    assert m == {"named": [], "thing": ["gaze estimation", "eye tracking", "gaze direction", "line of sight"],
                  "place": ["telepresence"], "apparatus": ["camera"]}
     assert len(merge_facets({"thing": [str(i) for i in range(20)]}, {})["thing"]) == 10
 

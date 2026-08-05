@@ -32,13 +32,13 @@ def _group(terms: list[str], cap: int = FORMS_PER_FACET) -> str:
     return f"({q})" if len(ts) > 1 else q
 
 
-def _distinct(f: dict) -> tuple[list[str], list[str], list[str]]:
+def _distinct(f: dict) -> tuple[list[str], list[str], list[str], list[str]]:
     """Facets as term lists with a term never repeated across facets (a
-    form in `thing` is dropped from `place`/`apparatus`): repeating it just
-    lengthens the query without narrowing it (H1-06: `accelerometer housing
-    accelerometer`)."""
+    form in `named` is dropped from `thing`, a form in `thing` from
+    `place`/`apparatus`): repeating it just lengthens the query without
+    narrowing it (H1-06: `accelerometer housing accelerometer`)."""
     seen, out = set(), []
-    for k in ("thing", "place", "apparatus"):
+    for k in ("named", "thing", "place", "apparatus"):
         terms = []
         for t in f.get(k) or []:
             key = " ".join(str(t).lower().split()).strip('"')
@@ -46,7 +46,22 @@ def _distinct(f: dict) -> tuple[list[str], list[str], list[str]]:
                 seen.add(key)
                 terms.append(t)
         out.append(terms)
-    return out[0], out[1], out[2]
+    return out[0], out[1], out[2], out[3]
+
+
+def _named_group(terms: list[str], cap: int = 6) -> str:
+    """Distinctive names are fixed strings: multi-word names stay an exact
+    "phrase" (indocyanine green), acronyms a bare word."""
+    ts = []
+    for t in terms:
+        t = " ".join(str(t).split()).strip().strip('"')
+        if t and t not in ts:
+            ts.append(t)
+    ts = ts[:cap]
+    if not ts:
+        return ""
+    q = " OR ".join(f'"{t}"' if " " in t else t for t in ts)
+    return f"({q})" if len(ts) > 1 else q
 
 
 def cpc_clause(subclass: str) -> str:
@@ -58,16 +73,19 @@ def cpc_clause(subclass: str) -> str:
 
 
 def boolean_query(element: dict, mode: str = "strict", field: str = "AB", cpc: str | None = None) -> str:
-    """strict: thing AND place AND apparatus, scoped to field (AB or CL),
-    optional CPC=; loose: thing AND place; core: thing only, no field."""
+    """strict: named AND thing AND place AND apparatus, scoped to field (AB
+    or CL), optional CPC=; loose: thing AND place (the names are dropped —
+    a coinage of the document would otherwise zero every query); core:
+    thing only, no field. The names are the element's distinctive
+    identifiers (chemical / organism / product names, acronym + expansion)."""
     f = element.get("facets") or {}
-    t_terms, p_terms, a_terms = _distinct(f)
-    thing, place, app = _group(t_terms), _group(p_terms), _group(a_terms)
+    n_terms, t_terms, p_terms, a_terms = _distinct(f)
+    named, thing, place, app = _named_group(n_terms), _group(t_terms), _group(p_terms), _group(a_terms)
     if not thing:
         return ""
     if mode == "core":
         return thing
-    parts = [thing, place] if mode == "loose" else [thing, place, app]
+    parts = [thing, place] if mode == "loose" else [named, thing, place, app]
     parts = [p for p in parts if p]
     body = " ".join(parts)
     q = f"{field}=({body})" if field else body

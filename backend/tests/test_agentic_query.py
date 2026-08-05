@@ -59,3 +59,13 @@ def test_term_never_repeated_across_facets():
 def test_cpc_subclass_asks_for_the_subtree():
     from patent_analyzer.agentic.query_gen import cpc_clause
     assert cpc_clause("h04n") == "CPC=H04N/low" and cpc_clause("") == ""
+
+
+def test_named_terms_are_required_in_strict_and_dropped_in_loose():
+    el = {"facets": {"named": ["soluble adenylyl cyclase", "sAC", "sac"], "thing": ["proliferation inhibition", "sac"],
+                     "place": ["prostate cancer"], "apparatus": ["kh7"]}}
+    q = boolean_query(el, "strict", field="")
+    assert q.startswith('("soluble adenylyl cyclase" OR sAC) (proliferation inhibition) (prostate cancer) kh7')
+    assert boolean_query(el, "loose", field="") == "(proliferation inhibition) (prostate cancer)"
+    el2 = {"facets": {"named": [], "thing": ["gaze"], "place": ["telepresence"], "apparatus": []}}
+    assert boolean_query(el2, "strict", field="") == "gaze telepresence (gaze NEAR/10 telepresence)"

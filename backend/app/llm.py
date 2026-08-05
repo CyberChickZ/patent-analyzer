@@ -1699,7 +1699,12 @@ async def facet_elements(elements: list[dict], summary: str) -> dict[str, dict]:
         return {}
     listing = "\n".join(f'{e["id"]}: {e["text"]}' for e in elements)
     system = "You write patent search facets. Output JSON only."
-    prompt = f"""For EACH element below, give three facets of search terms:
+    prompt = f"""For EACH element below, give four facets of search terms:
+  named     — 0-4 DISTINCTIVE NAMES that identify this element in this document, COPIED as written
+              from the element text or the invention context: chemical / biological / material /
+              organism / product / algorithm / protocol names. For an acronym give BOTH the acronym
+              and its expansion as separate entries ("icg", "indocyanine green"). Leave empty when
+              the element has no such name; never invent one.
   thing     — what the element IS (the core noun/mechanism): 6-10 surface forms
   place     — where/in what context it operates (domain, host system, signal): 4-8 forms
   apparatus — the concrete structural/implementation term: 3-6 forms
@@ -1709,12 +1714,12 @@ the research term, the term a competitor in another field would use.
 NEVER use words so general they appear in every patent: device, member, element, portion, means, unit, system, method, apparatus, module, component, assembly.
 DROP THE HEAD NOUN: write "sound damping" not "sound damping device". Lowercase. No quotes inside terms.
 
-INVENTION CONTEXT: {summary[:1500]}
+INVENTION CONTEXT: {summary[:4000]}
 
 ELEMENTS:
 {listing}
 
-JSON output: {{"facets": {{"<element id>": {{"thing": [...], "place": [...], "apparatus": [...]}}, ...}}}}"""
+JSON output: {{"facets": {{"<element id>": {{"named": [...], "thing": [...], "place": [...], "apparatus": [...]}}, ...}}}}"""
     try:
         resp = await call_llm(system, prompt, thinking_budget=2048)
         m = re.search(r'\{.*\}', resp, re.DOTALL)
@@ -1723,10 +1728,10 @@ JSON output: {{"facets": {{"<element id>": {{"thing": [...], "place": [...], "ap
         for e in elements:
             f = (data.get("facets") or {}).get(e["id"]) or {}
             out[e["id"]] = {k: [str(t).strip().lower() for t in (f.get(k) or []) if str(t).strip()][:FACET_FORMS_CAP]
-                            for k in ("thing", "place", "apparatus")}
+                            for k in ("named", "thing", "place", "apparatus")}
         return out
     except Exception:
-        return {e["id"]: {"thing": [], "place": [], "apparatus": []} for e in elements}
+        return {e["id"]: {"named": [], "thing": [], "place": [], "apparatus": []} for e in elements}
 
 
 # ════════════════════════════════════════════════════════════

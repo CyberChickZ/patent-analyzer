@@ -50,7 +50,7 @@ def merge_facets(base: dict, extra: dict, cap: int = 10) -> dict:
     (patent-search-pilot: which words the model reaches for is a coin flip;
     the fix is to toss it twice and merge)."""
     out = {}
-    for k in ("thing", "place", "apparatus"):
+    for k in ("named", "thing", "place", "apparatus"):
         seen = []
         for t in list((base or {}).get(k) or []) + list((extra or {}).get(k) or []):
             t = " ".join(str(t).lower().split())
