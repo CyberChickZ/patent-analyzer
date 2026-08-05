@@ -1703,8 +1703,9 @@ async def facet_elements(elements: list[dict], summary: str) -> dict[str, dict]:
   named     — 0-4 DISTINCTIVE NAMES that identify this element in this document, COPIED as written
               from the element text or the invention context: chemical / biological / material /
               organism / product / algorithm / protocol names. For an acronym give BOTH the acronym
-              and its expansion as separate entries ("icg", "indocyanine green"). Leave empty when
-              the element has no such name; never invent one.
+              and its expansion as separate entries ("icg", "indocyanine green"). NOT generic product
+              categories (tablet pc, camera, server) and NOT the document's own coinage for the
+              invention. Leave empty when the element has no such name; never invent one.
   thing     — what the element IS (the core noun/mechanism): 6-10 surface forms
   place     — where/in what context it operates (domain, host system, signal): 4-8 forms
   apparatus — the concrete structural/implementation term: 3-6 forms
