@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """H2 data: claim-level §102 / §103 / ALLOW instances from PANORAMA's raw
 parsed_CTNF (LG-AI-Research/PANORAMA, panorama.parquet, 8,143 apps).
 
@@ -17,46 +16,77 @@ that has §102/§103 rejections elsewhere.
 
 Reference text: abstract + claims come from the parquet's own
 patentsCitedByExaminer (same fields BigQuery would give, zero cost);
-the description is scraped from patents.google.com one page at a time
-(>= 4 s apart, at most --max-pages, cached under PANORAMA_ROOT/pages).
-Documents that miss the page budget fall back to abstract + claims and
-are marked text_mode="abstract_claims".
+the description comes from the dataset's spec_cited.zip, read member by
+member over HTTP Range (no 10.9 GB download; cached under
+PANORAMA_ROOT/spec), falling back to a patents.google.com page (>= 4 s
+apart, at most --max-pages, cached under PANORAMA_ROOT/pages). Documents
+with neither fall back to abstract + claims (text_mode="abstract_claims").
 
 Usage:
     python3 evals/panorama_data.py --n102 40 --n103 40 --nallow 20 --max-pages 60
 """
 
+
 import argparse
+
 import html
+
+import io
+
 import json
+
 import os
+
 import random
+
 import re
+
 import sys
+
 import time
+
 from collections import Counter
+
 from pathlib import Path
+
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+
 PANORAMA_ROOT = Path(os.environ.get("PANORAMA_ROOT", "/tmp/panorama"))
+
 PARQUET = PANORAMA_ROOT / "panorama.parquet"
+
 PARQUET_URL = "https://huggingface.co/datasets/LG-AI-Research/PANORAMA/resolve/main/panorama.parquet"
+
 PAGES = PANORAMA_ROOT / "pages"
+
+SPEC_DIR = PANORAMA_ROOT / "spec"
+
+SPEC_ZIP_URL = "https://huggingface.co/datasets/LG-AI-Research/PANORAMA/resolve/main/spec_cited.zip"
+
 RUN_DIR = Path(__file__).parent.parent / "eval_data" / "runs" / "h2"
 
+
 _BAD_REASON = re.compile(r"same reasons? as (?:set forth in )?(?:claim|the)|inherent|implicit|does not explicitly", re.I)
+
 _DEP_PREFIX = re.compile(r"^\s*\d+\s*\.\s*(?:The|A|An)\b[^,]{0,200}?\b(?:of|according to|as (?:recited |claimed |defined |set forth )?in)\s+claims?\s+\d+\s*,?\s*", re.I)
+
 _CLAIM_NUM = re.compile(r"^\s*(\d+)\s*\.\s*")
+
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+
 _PAGE_GAP_S = 4.0
+
 _last_page_call = 0.0
+
 
 
 def norm_pub(p: str) -> str:
     """'US 2005/0025220 A1', '20050025220', 'US7123456B2' -> digits only."""
     return re.sub(r"[^0-9]", "", p or "")
+
 
 
 def ensure_parquet() -> Path:
@@ -65,6 +95,7 @@ def ensure_parquet() -> Path:
         PARQUET.parent.mkdir(parents=True, exist_ok=True)
         urllib.request.urlretrieve(PARQUET_URL, PARQUET)
     return PARQUET
+
 
 
 def load_rows(limit: int | None = None) -> list[dict]:
@@ -77,6 +108,7 @@ def load_rows(limit: int | None = None) -> list[dict]:
     return t.to_pylist()
 
 
+
 def _claims_by_number(initial_claims: list[str]) -> dict[int, str]:
     out = {}
     for c in initial_claims or []:
@@ -86,12 +118,14 @@ def _claims_by_number(initial_claims: list[str]) -> dict[int, str]:
     return out
 
 
+
 def _dependent_body(text: str) -> str:
     """'2. The method of claim 1, wherein X' -> 'wherein X'."""
     body = _DEP_PREFIX.sub("", text or "", count=1)
     if body == (text or ""):
         body = _CLAIM_NUM.sub("", text or "", count=1)
     return body.strip()
+
 
 
 def resolve_chain(parsed: dict[int, dict], texts: dict[int, str], num: int) -> tuple[list[int], str]:
@@ -114,8 +148,10 @@ def resolve_chain(parsed: dict[int, dict], texts: dict[int, str], num: int) -> t
     return chain, "; ".join(p for p in parts if p)
 
 
+
 def _prior_art_reasons(claim: dict) -> list[dict]:
     return [r for r in claim.get("reasons") or [] if r.get("sectionCode") in (102, 103)]
+
 
 
 def claim_instances(row: dict) -> list[dict]:
@@ -193,6 +229,7 @@ def claim_instances(row: dict) -> list[dict]:
     return out
 
 
+
 def sample_instances(rows: list[dict], n102: int = 40, n103: int = 40, nallow: int = 20,
                      seed: int = 42, per_app_per_label: int = 2) -> list[dict]:
     """Seeded sample, at most `per_app_per_label` claims per label per
@@ -223,6 +260,7 @@ def sample_instances(rows: list[dict], n102: int = 40, n103: int = 40, nallow: i
     return picked
 
 
+
 def cited_texts(rows: list[dict]) -> dict[str, dict]:
     """pub digits -> {title, abstract, claims[]} from patentsCitedByExaminer."""
     out = {}
@@ -235,12 +273,15 @@ def cited_texts(rows: list[dict]) -> dict[str, dict]:
     return out
 
 
+
 def _gp_pub(pub_digits: str) -> str:
     return f"US{pub_digits}"
 
 
+
 def _clean(s: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", " ", s or "")).replace("\xa0", " ")
+
 
 
 def parse_patent_page(h: str) -> dict:
@@ -264,6 +305,7 @@ def parse_patent_page(h: str) -> dict:
     return {"title": html.unescape(m_t.group(1)).strip() if m_t else "",
             "abstract": re.sub(r"\s+", " ", _clean(m_abs.group(1))).strip() if m_abs else "",
             "claims": [c for c in claims if c], "description": desc}
+
 
 
 def fetch_page(pub_digits: str) -> dict | None:
@@ -302,6 +344,77 @@ def fetch_page(pub_digits: str) -> dict | None:
     return parsed
 
 
+
+class _HTTPRangeFile(io.RawIOBase):
+    """Seekable read-only view of a remote file via HTTP Range requests, so
+    zipfile can read the central directory and single members of the 10.9 GB
+    spec_cited.zip without downloading it (~12 MB for the directory, then
+    10-30 KB per member)."""
+
+    def __init__(self, url: str):
+        import urllib.request
+        r = urllib.request.urlopen(urllib.request.Request(url, headers={"Range": "bytes=0-0"}))
+        self.size = int(r.headers["Content-Range"].split("/")[1])
+        self.url = r.geturl()
+        self.pos = 0
+
+    def seek(self, off, whence=0):
+        self.pos = off if whence == 0 else (self.pos + off if whence == 1 else self.size + off)
+        return self.pos
+
+    def tell(self):
+        return self.pos
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def read(self, n=-1):
+        import urllib.request
+        if n == -1:
+            n = self.size - self.pos
+        if n <= 0:
+            return b""
+        end = min(self.size, self.pos + n) - 1
+        r = urllib.request.urlopen(urllib.request.Request(self.url, headers={"Range": f"bytes={self.pos}-{end}"}))
+        data = r.read()
+        self.pos += len(data)
+        return data
+
+
+
+_spec_zip = None
+
+
+
+def fetch_spec_text(pub_digits: str) -> str | None:
+    """Raw description text of a cited patent from PANORAMA's own
+    spec_cited.zip (member spec_cited/text/spec_txt_<pub>.txt), cached on disk."""
+    global _spec_zip
+    import zipfile
+    SPEC_DIR.mkdir(parents=True, exist_ok=True)
+    cache = SPEC_DIR / f"{pub_digits}.txt"
+    if cache.exists():
+        return cache.read_text() or None
+    if _spec_zip is None:
+        _spec_zip = zipfile.ZipFile(_HTTPRangeFile(SPEC_ZIP_URL))
+    name = f"spec_cited/text/spec_txt_{pub_digits}.txt"
+    try:
+        raw = _spec_zip.read(name).decode("utf-8", "replace")
+    except KeyError:
+        cache.write_text("")
+        return None
+    cache.write_text(raw)
+    return raw or None
+
+
+
+_PARA_MARK = re.compile(r"(?m)^\s*(?:\[(\d{4})\]|\((\d{1,4})\))\s*")
+
+
+
 def render_doc(doc: dict) -> str:
     """Text handed to the evaluator: title, abstract, numbered description, claims."""
     parts = [f"Title: {doc.get('title', '')}", ""]
@@ -312,6 +425,7 @@ def render_doc(doc: dict) -> str:
     if doc.get("claims"):
         parts += ["Claims:"] + list(doc["claims"])
     return "\n".join(parts).strip() + "\n"
+
 
 
 def build_docs(samples: list[dict], rows: list[dict], max_pages: int = 60) -> dict[str, dict]:
@@ -326,8 +440,17 @@ def build_docs(samples: list[dict], rows: list[dict], max_pages: int = 60) -> di
         b = base.get(pub)
         if b:
             doc.update({"title": b["title"], "abstract": b["abstract"], "claims": b["claims"]})
+        spec = None
+        try:
+            spec = fetch_spec_text(pub) if pub else None
+        except Exception as e:  # network: fall through to the page scraper
+            print(f"  spec {pub}: {e}", file=sys.stderr)
+        if spec:
+            doc["description"] = parse_spec_text(spec)
+            doc["text_mode"] = "full_text"
+            doc["desc_source"] = "spec_cited.zip"
         cached = (PAGES / f"{pub}.json").exists()
-        if cached or pages_used < max_pages:
+        if not doc["description"] and (cached or pages_used < max_pages):
             page = fetch_page(pub)
             if not cached:
                 pages_used += 1
@@ -337,11 +460,13 @@ def build_docs(samples: list[dict], rows: list[dict], max_pages: int = 60) -> di
                 doc["abstract"] = doc["abstract"] or page.get("abstract", "")
                 doc["claims"] = doc["claims"] or page.get("claims", [])
                 doc["text_mode"] = "full_text"
+                doc["desc_source"] = "patents.google.com"
         if not (doc["abstract"] or doc["claims"] or doc["description"]):
             doc["text_mode"] = "missing"
         doc["text"] = render_doc(doc)
         docs[pub] = doc
     return docs
+
 
 
 def main():
@@ -370,6 +495,7 @@ def main():
     print(f"docs: {len(docs)} unique, text modes {dict(modes)}, "
           f"avg chars {sum(len(d['text']) for d in docs.values()) // max(len(docs), 1)}")
     print(f"wrote {RUN_DIR / 'samples.json'}")
+
 
 
 if __name__ == "__main__":
