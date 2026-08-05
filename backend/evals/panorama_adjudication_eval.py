@@ -39,7 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 RUN_DIR = Path(__file__).parent.parent / "eval_data" / "runs" / "h2"
 LABELS = ("102", "103", "ALLOW")
-MAX_DOC_CHARS = 120_000
+MAX_DOC_CHARS = 600_000
 
 
 class BudgetExceeded(RuntimeError):
@@ -165,6 +165,8 @@ VARIANTS = {
     "allow_missing 1": {"allow_missing": 1},
     "min_cover 0.8": {"min_cover": 0.8},
     "single_partial_103 0.7 (PANORAMA C.5.3 a)": {"single_partial_103": 0.7},
+    "require_quotes off (score alone counts)": {"require_quotes": False},
+    "require_quotes off + single_partial_103 0.7": {"require_quotes": False, "single_partial_103": 0.7},
     "no preamble elements": {"_drop_preamble": True},
     "no preamble + allow_missing 1": {"_drop_preamble": True, "allow_missing": 1},
     "no preamble + single_partial_103 0.7": {"_drop_preamble": True, "single_partial_103": 0.7},
