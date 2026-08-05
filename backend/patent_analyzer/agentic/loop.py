@@ -1,6 +1,7 @@
 """The agentic search loop (channel `agentic_loop` inside search_node).
 
-round 1: every element, strict → validator-driven relax/tighten (≤2)
+round 1: every element, strict (thing ∧ place ∧ apparatus, full text);
+         zero → loose → core; too_broad is accepted (engine ranking)
 round 2: uncovered elements, loose + CL= field (claims)
 round 3: uncovered elements, strict + CPC= from seeds
 Each round: search (Google direct first, SerpAPI only when direct is
@@ -83,10 +84,11 @@ async def run_loop(state: dict, serpapi_left, serpapi_take, event, embed=None) -
     for rnd in range(1, MAX_ROUNDS + 1):
         if not uncovered:
             break
-        # round 1: loose on full text (two facets); validator tightens if too broad.
-        # round 2: claims-scoped; round 3: strict + CPC from the seeds.
+        # round 1: three facets on full text, relax on zero (pilot: AND of
+        # facets, drop one when nothing matches); round 2: claims-scoped
+        # two facets; round 3: strict + CPC from the seeds.
         field = "CL" if rnd == 2 else ""
-        start_mode = "strict" if rnd == 3 else "loose"
+        start_mode = "loose" if rnd == 2 else "strict"
         new_this_round: list[Candidate] = []
         queries_log = []
         for el in uncovered:
