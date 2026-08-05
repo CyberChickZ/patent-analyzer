@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """H2 data: claim-level §102 / §103 / ALLOW instances from PANORAMA's raw
 parsed_CTNF (LG-AI-Research/PANORAMA, panorama.parquet, 8,143 apps).
 
@@ -26,67 +27,40 @@ Usage:
     python3 evals/panorama_data.py --n102 40 --n103 40 --nallow 20 --max-pages 60
 """
 
-
 import argparse
-
 import html
-
 import io
-
 import json
-
 import os
-
 import random
-
 import re
-
 import sys
-
 import time
-
 from collections import Counter
-
 from pathlib import Path
-
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-
 PANORAMA_ROOT = Path(os.environ.get("PANORAMA_ROOT", "/tmp/panorama"))
-
 PARQUET = PANORAMA_ROOT / "panorama.parquet"
-
 PARQUET_URL = "https://huggingface.co/datasets/LG-AI-Research/PANORAMA/resolve/main/panorama.parquet"
-
 PAGES = PANORAMA_ROOT / "pages"
-
 SPEC_DIR = PANORAMA_ROOT / "spec"
-
 SPEC_ZIP_URL = "https://huggingface.co/datasets/LG-AI-Research/PANORAMA/resolve/main/spec_cited.zip"
-
 RUN_DIR = Path(__file__).parent.parent / "eval_data" / "runs" / "h2"
 
-
 _BAD_REASON = re.compile(r"same reasons? as (?:set forth in )?(?:claim|the)|inherent|implicit|does not explicitly", re.I)
-
 _DEP_PREFIX = re.compile(r"^\s*\d+\s*\.\s*(?:The|A|An)\b[^,]{0,200}?\b(?:of|according to|as (?:recited |claimed |defined |set forth )?in)\s+claims?\s+\d+\s*,?\s*", re.I)
-
 _CLAIM_NUM = re.compile(r"^\s*(\d+)\s*\.\s*")
-
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
-
 _PAGE_GAP_S = 4.0
-
 _last_page_call = 0.0
-
 
 
 def norm_pub(p: str) -> str:
     """'US 2005/0025220 A1', '20050025220', 'US7123456B2' -> digits only."""
     return re.sub(r"[^0-9]", "", p or "")
-
 
 
 def ensure_parquet() -> Path:
@@ -95,7 +69,6 @@ def ensure_parquet() -> Path:
         PARQUET.parent.mkdir(parents=True, exist_ok=True)
         urllib.request.urlretrieve(PARQUET_URL, PARQUET)
     return PARQUET
-
 
 
 def load_rows(limit: int | None = None) -> list[dict]:
@@ -108,7 +81,6 @@ def load_rows(limit: int | None = None) -> list[dict]:
     return t.to_pylist()
 
 
-
 def _claims_by_number(initial_claims: list[str]) -> dict[int, str]:
     out = {}
     for c in initial_claims or []:
@@ -118,14 +90,12 @@ def _claims_by_number(initial_claims: list[str]) -> dict[int, str]:
     return out
 
 
-
 def _dependent_body(text: str) -> str:
     """'2. The method of claim 1, wherein X' -> 'wherein X'."""
     body = _DEP_PREFIX.sub("", text or "", count=1)
     if body == (text or ""):
         body = _CLAIM_NUM.sub("", text or "", count=1)
     return body.strip()
-
 
 
 def resolve_chain(parsed: dict[int, dict], texts: dict[int, str], num: int) -> tuple[list[int], str]:
@@ -148,10 +118,8 @@ def resolve_chain(parsed: dict[int, dict], texts: dict[int, str], num: int) -> t
     return chain, "; ".join(p for p in parts if p)
 
 
-
 def _prior_art_reasons(claim: dict) -> list[dict]:
     return [r for r in claim.get("reasons") or [] if r.get("sectionCode") in (102, 103)]
-
 
 
 def claim_instances(row: dict) -> list[dict]:
@@ -229,7 +197,6 @@ def claim_instances(row: dict) -> list[dict]:
     return out
 
 
-
 def sample_instances(rows: list[dict], n102: int = 40, n103: int = 40, nallow: int = 20,
                      seed: int = 42, per_app_per_label: int = 2) -> list[dict]:
     """Seeded sample, at most `per_app_per_label` claims per label per
@@ -260,7 +227,6 @@ def sample_instances(rows: list[dict], n102: int = 40, n103: int = 40, nallow: i
     return picked
 
 
-
 def cited_texts(rows: list[dict]) -> dict[str, dict]:
     """pub digits -> {title, abstract, claims[]} from patentsCitedByExaminer."""
     out = {}
@@ -273,15 +239,12 @@ def cited_texts(rows: list[dict]) -> dict[str, dict]:
     return out
 
 
-
 def _gp_pub(pub_digits: str) -> str:
     return f"US{pub_digits}"
 
 
-
 def _clean(s: str) -> str:
     return html.unescape(re.sub(r"<[^>]+>", " ", s or "")).replace("\xa0", " ")
-
 
 
 def parse_patent_page(h: str) -> dict:
@@ -305,7 +268,6 @@ def parse_patent_page(h: str) -> dict:
     return {"title": html.unescape(m_t.group(1)).strip() if m_t else "",
             "abstract": re.sub(r"\s+", " ", _clean(m_abs.group(1))).strip() if m_abs else "",
             "claims": [c for c in claims if c], "description": desc}
-
 
 
 def fetch_page(pub_digits: str) -> dict | None:
@@ -342,7 +304,6 @@ def fetch_page(pub_digits: str) -> dict | None:
     parsed["url"] = str(r.url)
     cache.write_text(json.dumps(parsed))
     return parsed
-
 
 
 class _HTTPRangeFile(io.RawIOBase):
@@ -384,9 +345,7 @@ class _HTTPRangeFile(io.RawIOBase):
         return data
 
 
-
 _spec_zip = None
-
 
 
 def fetch_spec_text(pub_digits: str) -> str | None:
@@ -410,9 +369,28 @@ def fetch_spec_text(pub_digits: str) -> str | None:
     return raw or None
 
 
-
 _PARA_MARK = re.compile(r"(?m)^\s*(?:\[(\d{4})\]|\((\d{1,4})\))\s*")
 
+
+def parse_spec_text(raw: str) -> list[dict]:
+    """[{num, text}] from a spec_cited text: pre-grant files number paragraphs
+    '[0012]', granted ones '(12)'; a heading line before a marker is kept at
+    the end of the preceding paragraph (verbatim text is what quotes need)."""
+    t = (raw or "").replace("\r\n", "\n")
+    marks = list(_PARA_MARK.finditer(t))
+    if not marks:
+        chunks = [c.strip() for c in re.split(r"\n\s*\n", t) if c.strip()]
+        return [{"num": i + 1, "text": re.sub(r"\s+", " ", c)} for i, c in enumerate(chunks)]
+    out = []
+    lead = t[:marks[0].start()].strip()
+    if lead:
+        out.append({"num": 0, "text": re.sub(r"\s+", " ", lead)})
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(t)
+        body = re.sub(r"\s+", " ", t[m.end():end]).strip()
+        if body:
+            out.append({"num": int(m.group(1) or m.group(2)), "text": body})
+    return out
 
 
 def render_doc(doc: dict) -> str:
@@ -425,7 +403,6 @@ def render_doc(doc: dict) -> str:
     if doc.get("claims"):
         parts += ["Claims:"] + list(doc["claims"])
     return "\n".join(parts).strip() + "\n"
-
 
 
 def build_docs(samples: list[dict], rows: list[dict], max_pages: int = 60) -> dict[str, dict]:
@@ -468,7 +445,6 @@ def build_docs(samples: list[dict], rows: list[dict], max_pages: int = 60) -> di
     return docs
 
 
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--n102", type=int, default=40)
@@ -495,7 +471,6 @@ def main():
     print(f"docs: {len(docs)} unique, text modes {dict(modes)}, "
           f"avg chars {sum(len(d['text']) for d in docs.values()) // max(len(docs), 1)}")
     print(f"wrote {RUN_DIR / 'samples.json'}")
-
 
 
 if __name__ == "__main__":
