@@ -38,12 +38,14 @@ def install():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     real_text, real_pdfs = llm.call_llm, llm.call_llm_with_pdfs
 
-    async def cached_text(system, user, max_tokens=llm.MAX_TOKENS, thinking_budget=0):
-        p = CACHE_DIR / (_key("text", llm.MODEL, system, user, max_tokens, thinking_budget) + ".json")
+    async def cached_text(system, user, max_tokens=llm.MAX_TOKENS, thinking_budget=0, response_schema=None):
+        # schema-less calls keep their historical key (cached IDCA / extraction stay valid)
+        extra = [json.dumps(response_schema, sort_keys=True)] if response_schema else []
+        p = CACHE_DIR / (_key("text", llm.MODEL, system, user, max_tokens, thinking_budget, *extra) + ".json")
         if p.exists():
             stats["hits"] += 1
             return json.loads(p.read_text())["text"]
-        out = await real_text(system, user, max_tokens, thinking_budget)
+        out = await real_text(system, user, max_tokens, thinking_budget, response_schema=response_schema)
         stats["misses"] += 1
         stats["chars_in"] += len(system) + len(user)
         stats["chars_out"] += len(out)

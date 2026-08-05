@@ -62,11 +62,16 @@ def get_client() -> genai.Client:
     return _client
 
 
-def _build_config(system: str, max_tokens: int, thinking_budget: int) -> types.GenerateContentConfig:
+def _build_config(system: str, max_tokens: int, thinking_budget: int,
+                  response_schema: dict | None = None) -> types.GenerateContentConfig:
     config = types.GenerateContentConfig(
         system_instruction=system,
         max_output_tokens=max_tokens,
     )
+    if response_schema:
+        # JSON mode: the model can only emit an instance of the schema
+        config.response_mime_type = "application/json"
+        config.response_schema = response_schema
     if thinking_budget > 0:
         try:
             config.thinking_config = types.ThinkingConfig(
@@ -123,9 +128,10 @@ async def call_llm(
     user: str,
     max_tokens: int = MAX_TOKENS,
     thinking_budget: int = 0,
+    response_schema: dict | None = None,
 ) -> str:
     client = get_client()
-    config = _build_config(system, max_tokens, thinking_budget)
+    config = _build_config(system, max_tokens, thinking_budget, response_schema)
     resp = await client.aio.models.generate_content(
         model=MODEL,
         contents=[types.Part.from_text(text=user)],
