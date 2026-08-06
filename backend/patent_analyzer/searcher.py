@@ -126,7 +126,15 @@ def serpapi_search(
                 "total": total,
             }
 
-            if engine == "google_patents":
+            if engine == "google_patents" and (item.get("is_scholar") or not item.get("publication_number")):
+                # scholar=true mixes Google Scholar hits into the same page
+                result["pub_num"] = ""
+                result["match_type"] = "Paper"
+                result["url"] = item.get("scholar_link", "") or item.get("link", "")
+                result["pdf_link"] = item.get("pdf", "")
+                result["authors"] = item.get("inventor", "") or item.get("author", "")
+                result["year"] = str(item.get("publication_date") or item.get("year") or "")[:4]
+            elif engine == "google_patents":
                 result["pub_num"] = item.get("publication_number", "")
                 result["pdf_link"] = item.get("pdf", "")
                 result["match_type"] = "Patent"

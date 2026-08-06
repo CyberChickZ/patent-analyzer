@@ -100,3 +100,32 @@ def test_sync_account_overwrites_counter(monkeypatch):
     out = sp.sync_account()
     assert [o["used"] for o in out] == [129, 129]
     assert [s["used"] for s in sp.quota_status()] == [129, 129]
+
+
+def test_scholar_flag_mixes_paper_results(monkeypatch):
+    seen = []
+
+    def fake(engine, query, key, log, pages, num, extra=None):
+        seen.append(extra)
+        return [{"title": "P", "pub_num": "US1B2", "match_type": "Patent", "total": 5},
+                {"title": "A paper", "pub_num": "", "match_type": "Paper", "url": "https://x", "total": 5}], None
+    monkeypatch.setattr(sp, "_sync_search", fake)
+    c, e = asyncio.run(sp.search_patents("q", before="priority:20110101", scholar=True))
+    assert seen == [{"before": "priority:20110101", "scholar": "true"}]
+    assert [x.match_type for x in c] == ["Patent", "Paper"]
+
+
+def test_searcher_maps_scholar_items_to_papers():
+    from patent_analyzer import searcher
+    import io, json, urllib.request
+    payload = {"search_information": {"total_results": 2}, "organic_results": [
+        {"title": "Pat", "publication_number": "US1B2", "patent_link": "https://p"},
+        {"title": "Paper", "is_scholar": True, "scholar_link": "https://s", "publication_date": "2009-01-01"}]}
+    real = urllib.request.urlopen
+    urllib.request.urlopen = lambda req, timeout=0, context=None: io.BytesIO(json.dumps(payload).encode())
+    try:
+        res, err = searcher.serpapi_search("google_patents", "q", "k", extra={"scholar": "true"})
+    finally:
+        urllib.request.urlopen = real
+    assert err is None and [r["match_type"] for r in res] == ["Patent", "Paper"]
+    assert res[1]["url"] == "https://s" and res[1]["year"] == "2009"

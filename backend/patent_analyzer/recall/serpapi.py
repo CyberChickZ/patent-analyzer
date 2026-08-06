@@ -84,17 +84,19 @@ def _exhausted(err: str | None) -> bool:
     return any(t in e for t in ("401", "429", "exhaust", "run out", "quota", "limit"))
 
 
-def _cache_key(engine: str, query: str, max_pages: int, num: int, before: str | None = None) -> str:
+def _cache_key(engine: str, query: str, max_pages: int, num: int, before: str | None = None,
+               scholar: bool = False) -> str:
     norm = " ".join(query.lower().split())
-    tail = f"|{before}" if before else ""
+    tail = (f"|{before}" if before else "") + ("|scholar" if scholar else "")
     return hashlib.sha1(f"serp|{engine}|{norm}|{max_pages}|{num}{tail}".encode()).hexdigest()
 
 
 async def _search(engine: str, query: str, max_pages: int, num: int, match_type: str,
-                  before: str | None = None) -> tuple[list[Candidate], str | None]:
+                  before: str | None = None, scholar: bool = False) -> tuple[list[Candidate], str | None]:
     if not query:
         return [], "empty query"
-    ck = _cache_key(engine, query, max_pages, num, before)
+    ck = _cache_key(engine, query, max_pages, num, before, scholar)
+    extra = {k: v for k, v in (("before", before), ("scholar", "true" if scholar else "")) if v} or None
     hit = kv().get("search", ck, max_age_days=_CACHE_DAYS)
     if hit is not None:
         last_total[query] = int(hit.get("total", 0))
@@ -108,8 +110,7 @@ async def _search(engine: str, query: str, max_pages: int, num: int, match_type:
         if not q.take(max_pages):
             last_err = f"serpapi key {_fp(key)} monthly quota exhausted"
             continue
-        matches, err = await asyncio.to_thread(_sync_search, engine, query, key, None, max_pages, num,
-                                               {"before": before} if before else None)
+        matches, err = await asyncio.to_thread(_sync_search, engine, query, key, None, max_pages, num, extra)
         if err and _exhausted(err):
             q.exhaust()
             last_err = f"serpapi key {_fp(key)}: {err}"
@@ -120,7 +121,7 @@ async def _search(engine: str, query: str, max_pages: int, num: int, match_type:
         if err:
             q.release(max_pages)
             return [], err
-        cands = [_to_candidate(m, match_type) for m in matches if m.get("title")]
+        cands = [_to_candidate(m, m.get("match_type") or match_type) for m in matches if m.get("title")]
         total = int((matches[0].get("total") or 0) if matches else 0)
         last_total[query] = total
         kv().put("search", ck, {"cands": [c.__dict__ for c in cands], "total": total})
@@ -128,11 +129,13 @@ async def _search(engine: str, query: str, max_pages: int, num: int, match_type:
     return [], last_err or "serpapi: all keys exhausted"
 
 
-async def search_patents(query: str, max_pages: int = 1, before: str | None = None
-                         ) -> tuple[list[Candidate], str | None]:
+async def search_patents(query: str, max_pages: int = 1, before: str | None = None,
+                         scholar: bool = False) -> tuple[list[Candidate], str | None]:
     """`before` = Google Patents date bound, e.g. 'priority:20110202'
-    (SerpAPI: type:YYYYMMDD, type in priority/filing/publication)."""
-    return await _search("google_patents", query, max_pages, 100, "Patent", before=before)
+    (SerpAPI: type:YYYYMMDD, type in priority/filing/publication).
+    `scholar=True` = SerpAPI's `scholar` parameter ("controls whether or not
+    to include Google Scholar results"): papers come back in the same 100."""
+    return await _search("google_patents", query, max_pages, 100, "Patent", before=before, scholar=scholar)
 
 
 async def search_scholar(query: str, max_pages: int = 3) -> tuple[list[Candidate], str | None]:
