@@ -18,15 +18,18 @@ from ..recall import google_patents as gp
 from ..recall import serpapi as sp
 from ..recall.pool import Candidate, candidates_to_legacy_docs, pool_and_dedupe
 from .coverage import tag_coverage
-from .elements import attach_facets, elements_from_state
-from .expand import expand
+from .elements import attach_facets, candidates_from_state, elements_from_state
+from .expand import MAX_CITED_LIGHT, expand
 from .query_gen import boolean_query, next_mode
 from .validator import validate
+from .wide import wide_queries
 
 MAX_ROUNDS = int(os.environ.get("LOOP_MAX_ROUNDS", "3"))
 MAX_ELEMENTS = int(os.environ.get("LOOP_MAX_ELEMENTS", "12"))
 SEEDS_PER_ELEMENT = 10
 GP_CALLS_PER_JOB = int(os.environ.get("LOOP_GP_MAX_CALLS", "30"))
+LOOP_MODE = os.environ.get("LOOP_MODE", "wide")          # wide (recall-first) | elements (per-element walk)
+WIDE_MAX_QUERIES = int(os.environ.get("LOOP_WIDE_MAX_QUERIES", "10"))
 
 
 class Budget:
@@ -60,27 +63,82 @@ async def _wait_for_gp(budget: Budget) -> None:
         waited += 30
 
 
-async def _search(query: str, before: str | None, budget: Budget) -> tuple[list[Candidate], int | None, str]:
+async def _search(query: str, before: str | None, budget: Budget, num: int = 20,
+                  scholar: bool = False) -> tuple[list[Candidate], int | None, str]:
     """Direct first; SerpAPI only when direct is blocked or errors."""
     if query:
         await _wait_for_gp(budget)
     if query and budget.gp_ok():
         budget.gp_calls += 1
-        cands, err = await gp.search(query, num=20, before=before)
+        cands, err = await gp.search(query, num=num, before=before)
         if not err:
             return cands, gp.last_total.get(query), "google_patents"
         if "blocked" in (err or ""):
             budget.gp_blocked += 1
     if query and budget.serp_ok():
         budget.serp_calls += 1
-        cands, err = await sp.search_patents(query, max_pages=1, before=before)
+        cands, err = await sp.search_patents(query, max_pages=1, before=before, scholar=scholar)
         if not err:
             return cands, sp.last_total.get(query), "serpapi_patents"
     return [], None, "none"
 
 
+async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list[Candidate], dict]:
+    """Recall-first: ≤WIDE_MAX_QUERIES broad queries over every candidate
+    invention, 100 results each (patents + scholar), every hit is a seed,
+    citation expansion up to MAX_CITED_LIGHT. No validator walk: the pool is
+    narrowed afterwards by prune.py."""
+    cands = candidates_from_state(state)
+    if not cands:
+        return [], {"rounds": [], "reason": "no elements"}
+    all_els = [e for c in cands for e in c["elements"]][:4 * MAX_ELEMENTS]
+    await attach_facets(all_els, state.get("summary", ""))
+    cutoff = str(state.get("date_cutoff") or "")
+    cutoff = cutoff if cutoff.isdigit() and len(cutoff) == 8 else None
+    before = f"priority:{cutoff}" if cutoff else None
+    budget = Budget(serpapi_left, serpapi_take)
+    queries = wide_queries(cands, max_total=WIDE_MAX_QUERIES)
+    pool: dict[str, Candidate] = {}
+    log = []
+    seeds: list[str] = []
+    for q in queries:
+        hits, total, chan = await _search(q["query"], before, budget, num=100, scholar=True)
+        log.append({"candidate": q["candidate"], "kind": q["kind"], "query": q["query"][:200],
+                    "channel": chan, "total": total, "hits": len(hits)})
+        for c in hits:
+            c.raw.setdefault("loop", {})["candidate"] = q["candidate"]
+            key = (c.pub_num or c.title).upper()
+            pool.setdefault(key, c)
+            if c.pub_num and c.match_type == "Patent":
+                seeds.append(c.pub_num)
+    seeds = list(dict.fromkeys(seeds))
+    expanded, info = await expand(seeds, set(pool), max_cited=MAX_CITED_LIGHT, before=cutoff, light=True) if seeds else ([], {})
+    dropped = set(info.get("seeds_after_cutoff") or [])
+    for k in list(pool):
+        if k in dropped:
+            del pool[k]
+    for c in expanded:
+        pool.setdefault((c.pub_num or c.title).upper(), c)
+    stats = {"round": 1, "mode": "wide", "n_queries": len(log), "gp_calls": budget.gp_calls,
+             "serpapi_calls": budget.serp_calls, "gp_blocked": budget.gp_blocked,
+             "seeds": len(seeds), "seeds_after_cutoff": sorted(dropped), "expanded": len(expanded),
+             "cited_total": info.get("cited_total", 0), "cited_light": info.get("cited_light", 0),
+             "pool_size": len(pool), "queries": log, "pool_pubs": sorted(pool), "seed_pubs": sorted(set(seeds) - dropped),
+             "covered": [], "uncovered": [], "cpc_hint": next(iter(info.get("cpc_subclasses") or {}), None),
+             "ts": datetime.now(timezone.utc).isoformat()}
+    event("round_done", f"wide: {len(log)} queries, {len(seeds)} seeds, +{len(expanded)} cited, pool {len(pool)}, "
+                        f"gp {budget.gp_calls} serp {budget.serp_calls}", stats)
+    return list(pool.values()), {"rounds": [stats], "mode": "wide",
+                                 "elements": [{"id": e["id"], "text": e["text"], "facets": e.get("facets"),
+                                               "candidate": c["id"]} for c in cands for e in c["elements"]],
+                                 "candidates": [{"id": c["id"], "level": c["level"], "n_elements": len(c["elements"])} for c in cands],
+                                 "coverage_by_element": {}}
+
+
 async def run_loop(state: dict, serpapi_left, serpapi_take, event, embed=None) -> tuple[list[Candidate], dict]:
     """Returns (candidates for the pool, loop_stats)."""
+    if LOOP_MODE == "wide":
+        return await run_wide(state, serpapi_left, serpapi_take, event)
     elements = elements_from_state(state)[:MAX_ELEMENTS]
     if not elements:
         return [], {"rounds": [], "reason": "no elements"}

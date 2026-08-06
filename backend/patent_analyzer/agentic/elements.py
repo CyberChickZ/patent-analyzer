@@ -37,6 +37,24 @@ def elements_from_state(state: dict) -> list[dict]:
     return []
 
 
+def candidates_from_state(state: dict) -> list[dict]:
+    """Every candidate invention with its supported elements (core first);
+    falls back to one pseudo-candidate built from elements_from_state."""
+    ext = state.get("extraction") or {}
+    cands = ext.get("candidate_inventions") or []
+    out = []
+    for i, c in enumerate(cands):
+        els = [{"id": e["id"], "text": e["text"], "source": "extraction", "facets": e.get("facets") or {}}
+               for e in (c.get("elements") or []) if not e.get("unsupported")]
+        if els:
+            out.append({"id": c.get("id") or f"inv{i + 1}", "level": c.get("level", ""),
+                        "concept": c.get("concept", ""), "elements": els})
+    if out:
+        return out
+    els = elements_from_state(state)
+    return [{"id": "inv1", "level": "core", "concept": "", "elements": els}] if els else []
+
+
 def fallback_facets(text: str) -> dict:
     """No-LLM facets: longest content words as 'thing', nothing else."""
     words = [w.lower() for w in re.findall(r"[A-Za-z][A-Za-z\-]{3,}", text)]

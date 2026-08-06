@@ -12,8 +12,9 @@ from patent_analyzer.recall.pool import Candidate
 
 
 @pytest.fixture(autouse=True)
-def _kv(tmp_path):
+def _kv(tmp_path, monkeypatch):
     cache.reset_for_tests(tmp_path / "kv.sqlite")
+    monkeypatch.setattr(L, "LOOP_MODE", "elements")
     yield
     cache.reset_for_tests(None)
 
@@ -154,3 +155,39 @@ def test_expand_light_uses_narrow_lookup_beyond_the_head(monkeypatch):
     assert heavy[1] == ["C0", "C1"] and sorted(light[0]) == ["C2", "C3", "C4"]
     assert len(out) == 5 and info["cited_light"] == 3
     assert {c.pub_num: bool(c.abstract) for c in out} == {"C0": True, "C1": True, "C2": False, "C3": False, "C4": False}
+
+
+def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
+    monkeypatch.setattr(L, "LOOP_MODE", "wide")
+    state = {"summary": "s", "date_cutoff": "20110202", "extraction": {"candidate_inventions": [
+        {"id": "inv1", "level": "core", "elements": [
+            {"id": "inv1.e1", "text": "sac inhibitor", "facets": {"named": ["soluble adenylyl cyclase", "sac"], "thing": ["inhibition"], "place": ["prostate cancer"]}}]},
+        {"id": "inv2", "level": "application", "elements": [
+            {"id": "inv2.e1", "text": "diagnosis", "facets": {"named": [], "thing": ["staining"], "place": ["tissue"]}}]}]}}
+
+    async def fake_facets(els, summary):
+        return {e["id"]: {"named": [], "thing": [], "place": [], "apparatus": []} for e in els}
+    monkeypatch.setattr("app.llm.facet_elements", fake_facets)
+    calls = []
+
+    async def fake_gp(query, num=20, page=0, before=None):
+        calls.append((query, num, before))
+        L.gp.last_total[query] = 500
+        return [_cand(f"US{len(calls)}", f"hit {len(calls)}"), _cand("US2099", "post-cutoff")], None
+    monkeypatch.setattr(L.gp, "search", fake_gp)
+    monkeypatch.setattr(L.gp, "is_blocked", lambda: False)
+    seen = {}
+
+    async def fake_expand(seeds, known, max_cited=200, before=None, light=False):
+        seen.update(seeds=list(seeds), max_cited=max_cited, before=before, light=light)
+        return [_cand("US7", "cited art")], {"cpc_subclasses": {"A61K": 2}, "seeds_after_cutoff": ["US2099"], "cited_total": 40, "cited_light": 10}
+    monkeypatch.setattr(L, "expand", fake_expand)
+    events = []
+    cands, stats = asyncio.run(L.run_loop(state, lambda: 0, lambda: False, lambda k, m, p=None: events.append(k)))
+    assert [c[1] for c in calls] == [100] * len(calls) and all(c[2] == "priority:20110202" for c in calls)
+    kinds = [q["kind"] for q in stats["rounds"][0]["queries"]]
+    assert kinds[:3] == ["named", "named+thing", "thing+place"] and "thing+place" in kinds[3:]
+    assert seen["light"] and seen["max_cited"] == L.MAX_CITED_LIGHT and seen["before"] == "20110202"
+    pubs = {c.pub_num for c in cands}
+    assert "US7" in pubs and "US2099" not in pubs and stats["mode"] == "wide"
+    assert [c["id"] for c in stats["candidates"]] == ["inv1", "inv2"] and events == ["round_done"]
