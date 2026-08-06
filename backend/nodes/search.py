@@ -140,13 +140,46 @@ async def search_node(state: GraphState) -> dict:
                 out.extend(cands)
         return out, errs
 
+    def _paper_queries() -> list[str]:
+        """Plain-keyword queries for the paper APIs (free, unlimited): the
+        title/summary query plus ≤2 per candidate invention from the loop's
+        facets (names + things; things + places)."""
+        out = [recall_query_short]
+        by_cand: dict[str, list[dict]] = {}
+        for e in loop_stats.get("elements") or []:
+            by_cand.setdefault(e.get("candidate") or "inv1", []).append(e)
+        for els in by_cand.values():
+            def _u(k, n):
+                seen = []
+                for e in els:
+                    for t in (e.get("facets") or {}).get(k) or []:
+                        if t not in seen:
+                            seen.append(t)
+                return seen[:n]
+            names, things, places = _u("named", 2), _u("thing", 3), _u("place", 2)
+            if names or things:
+                out.append(" ".join(names + things)[:200])
+            if things and places:
+                out.append(" ".join(things + places)[:200])
+        return list(dict.fromkeys(q for q in out if q.strip()))[:9]
+
     async def run_semantic_scholar():
-        cands, err = await ch_ss.search(recall_query_short, limit=50)
-        return cands, ([{"query": recall_query_short, "error": err}] if err else [])
+        out, errs = [], []
+        for q in _paper_queries():
+            cands, err = await ch_ss.search(q, limit=50)
+            out.extend(cands)
+            if err:
+                errs.append({"query": q, "error": err})
+        return out, errs
 
     async def run_openalex():
-        cands, err = await ch_oa.search_works(recall_query_short, limit=50)
-        return cands, ([{"query": recall_query_short, "error": err}] if err else [])
+        out, errs = [], []
+        for q in _paper_queries():
+            cands, err = await ch_oa.search_works(q, limit=50)
+            out.extend(cands)
+            if err:
+                errs.append({"query": q, "error": err})
+        return out, errs
 
     async def run_arxiv():
         cands, err = await ch_arxiv.search(recall_query_short, limit=50)
@@ -235,10 +268,12 @@ async def search_node(state: GraphState) -> dict:
             "phase_results": {"phase3": {"status": "completed", "data": {"total": 0}}},
         }
 
-    # Citation chaining (top 5)
+    # Citation chaining: hop 1 from the top 5 papers (refs + cits), hop 2
+    # (refs only) from the 3 most-cited hop-1 papers — free S2 calls
     if len(pooled) >= 3:
         top_for_chaining = sorted(pooled, key=lambda c: c.source_score, reverse=True)[:5]
         chain_results: dict[str, list] = {}
+        hop1: list = []
         for cand in top_for_chaining:
             ss_id = ((cand.raw or {}).get("semantic_scholar") or {}).get("paperId") or cand.arxiv_id or ""
             if not ss_id:
@@ -248,6 +283,18 @@ async def search_node(state: GraphState) -> dict:
                 cit_cands, _ = await ch_ss.citations(ss_id, limit=20)
                 chain_results[f"ref_{ss_id[:16]}"] = ref_cands
                 chain_results[f"cit_{ss_id[:16]}"] = cit_cands
+                hop1 += ref_cands + cit_cands
+            except Exception:
+                pass
+        def _cites(c):
+            return int(((c.raw or {}).get("semantic_scholar") or {}).get("citationCount") or 0)
+        for cand in sorted(hop1, key=_cites, reverse=True)[:3]:
+            ss_id = ((cand.raw or {}).get("semantic_scholar") or {}).get("paperId") or ""
+            if not ss_id or f"ref_{ss_id[:16]}" in chain_results:
+                continue
+            try:
+                ref_cands, _ = await ch_ss.references(ss_id, limit=20)
+                chain_results[f"ref2_{ss_id[:16]}"] = ref_cands
             except Exception:
                 pass
         if chain_results:
@@ -365,6 +412,7 @@ async def search_node(state: GraphState) -> dict:
                       "match_type": d.get("match_type", "")} for d in all_docs],
             "loop_rounds": loop_stats.get("rounds", []),
             "loop_elements": loop_stats.get("elements", []),
+            "loop_mode": loop_stats.get("mode", "elements"),
             "coverage_by_element": loop_stats.get("coverage_by_element", {}),
             "serpapi_quota": _serpapi_quota_status(),
         },
