@@ -7,10 +7,12 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-from ..recall.bigquery_patents import fetch_by_pub_nums, fetch_citations
+from ..recall.bigquery_patents import fetch_by_pub_nums, fetch_citations, fetch_meta_light
 from ..recall.pool import Candidate
 
 MAX_CITED_PER_ROUND = 200
+MAX_CITED_LIGHT = int(__import__("os").environ.get("EXPAND_MAX_CITED", "2000"))
+FULL_META_HEAD = 200   # abstracts for the most-cited head; titles only beyond
 
 
 def _canon(p: str) -> str:
@@ -24,10 +26,13 @@ def _after(meta: dict, cutoff: str | None) -> bool:
 
 
 async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CITED_PER_ROUND,
-                 before: str | None = None) -> tuple[list[Candidate], dict]:
+                 before: str | None = None, light: bool = False) -> tuple[list[Candidate], dict]:
     """Returns (new candidates from citations, info) where info has the
     seeds' family ids, CPC subclass counts and BQ stats. Seeds and cited
-    documents with priority_date >= `before` (YYYYMMDD) are dropped."""
+    documents with priority_date >= `before` (YYYYMMDD) are dropped.
+    `light`: the head (FULL_META_HEAD most-cited) gets title+abstract, the
+    rest title/family/date only via the narrow-column lookup — h1b lost 3
+    gold families at citation ranks 1414-1463 to the 200 cap."""
     seeds = [s for s in dict.fromkeys(_canon(p) for p in seed_pubs if p) if s]
     info = {"seeds": len(seeds), "cpc_subclasses": {}, "families": {}, "cited_total": 0, "cited_new": 0,
             "seeds_after_cutoff": []}
@@ -58,7 +63,14 @@ async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CIT
     info["cited_new"] = len(new)
     if not new:
         return [], info
-    cmeta = await fetch_by_pub_nums(new, with_claims=False)
+    if light and len(new) > FULL_META_HEAD:
+        cmeta = await fetch_by_pub_nums(new[:FULL_META_HEAD], with_claims=False)
+        tail = await fetch_meta_light(new[FULL_META_HEAD:])
+        for pub, m in tail.items():
+            cmeta.setdefault(pub, m)
+        info["cited_light"] = len(tail)
+    else:
+        cmeta = await fetch_by_pub_nums(new, with_claims=False)
     out = []
     for pub, m in cmeta.items():
         if _after(m, before):

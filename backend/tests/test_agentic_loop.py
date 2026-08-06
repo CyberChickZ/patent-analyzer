@@ -130,3 +130,27 @@ def test_mode_walk_never_repeats_a_query(monkeypatch):
     _, stats = asyncio.run(L.run_loop(state, lambda: 0, lambda: False, lambda k, m, p=None: None))
     r1 = [q["query"] for q in stats["rounds"][0]["queries"]]
     assert len(r1) == len(set(r1))
+
+
+def test_expand_light_uses_narrow_lookup_beyond_the_head(monkeypatch):
+    from patent_analyzer.agentic import expand as E
+    monkeypatch.setattr(E, "FULL_META_HEAD", 2)
+    heavy, light = [], []
+
+    async def fake_meta(pubs, with_claims=False):
+        heavy.append(list(pubs))
+        return {p: {"priority_date": "2000-01-01", "family_id": f"f{p}", "title": f"t{p}", "abstract": "abs", "cpc_codes": []} for p in pubs}
+
+    async def fake_light(pubs):
+        light.append(list(pubs))
+        return {p: {"priority_date": "2000-01-01", "family_id": f"f{p}", "title": f"t{p}"} for p in pubs}
+
+    async def fake_cits(pubs):
+        return {"S1": {"cits": [{"cited": f"C{i}", "category": "SEA" if i < 2 else "APP"} for i in range(5)]}}
+    monkeypatch.setattr(E, "fetch_by_pub_nums", fake_meta)
+    monkeypatch.setattr(E, "fetch_meta_light", fake_light)
+    monkeypatch.setattr(E, "fetch_citations", fake_cits)
+    out, info = asyncio.run(E.expand(["S1"], set(), max_cited=2000, before="20110101", light=True))
+    assert heavy[1] == ["C0", "C1"] and sorted(light[0]) == ["C2", "C3", "C4"]
+    assert len(out) == 5 and info["cited_light"] == 3
+    assert {c.pub_num: bool(c.abstract) for c in out} == {"C0": True, "C1": True, "C2": False, "C3": False, "C4": False}
