@@ -125,3 +125,9 @@ def test_bigquery_module_exports_all_lookups():
     for name in ("fetch_by_pub_nums", "fetch_citations", "fetch_families", "search_abstracts",
                  "guarded_query", "capped_query"):
         assert callable(getattr(bq, name)), name
+
+
+def test_bigquery_number_spellings():
+    from patent_analyzer.recall.bigquery_patents import _bq_form, _canon_pub
+    assert _bq_form("US20120287933A1") == "US-2012287933-A1" and _canon_pub("US-2012287933-A1") == "US20120287933A1"
+    assert _bq_form("EP1285093A2") == "EP-1285093-A2" and _canon_pub("US5517465A") == "US5517465A"

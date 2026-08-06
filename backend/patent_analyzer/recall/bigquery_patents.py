@@ -201,6 +201,62 @@ async def search_by_limitations(
     return deduped, "; ".join(errors) if errors else None
 
 
+async def fetch_meta_light(pub_nums: list[str], max_gib: float = 15.0) -> dict[str, dict]:
+    """title / family_id / priority_date only, for thousands of numbers at
+    once. BigQuery bills the columns read: on amie_patents.pubs the
+    (publication_number, family_id, priority_date, title) columns are 12.7 GiB
+    for the whole table (dry-run 2026-09-18), whereas fetch_by_pub_nums
+    also reads abstract + cpc_codes (~0.03 GiB per row). Same bucket
+    pruning; keys are canonical."""
+    import asyncio
+    import re
+    from google.cloud import bigquery
+
+    norm = {re.sub(r"[\s\-/,.]", "", p.upper()): p for p in pub_nums if p}
+    if not norm:
+        return {}
+    wanted = [_bq_form(p) for p in norm]
+    client = bigquery.Client(project=GC_PROJECT)
+    pubs_param = bigquery.ArrayQueryParameter("pubs", "STRING", wanted)
+
+    def _run():
+        b = client.query(
+            "SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(p)), 4000) FROM UNNEST(@pubs) p) AS b",
+            job_config=bigquery.QueryJobConfig(query_parameters=[pubs_param]))
+        buckets = list(b.result())[0].b
+        params = [pubs_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
+        return guarded_query(client, f"""
+            SELECT publication_number, family_id, priority_date, title
+            FROM `{GC_PROJECT}.amie_patents.pubs`
+            WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params,
+            max_gib=max_gib)
+
+    rows = await asyncio.to_thread(_run)
+    return {_canon_pub(r.publication_number): {"family_id": r.family_id or "", "priority_date": str(r.priority_date or ""),
+                                              "title": r.title or ""} for r in rows}
+
+
+def _bq_form(p: str) -> str:
+    import re
+    m = re.match(r"^([A-Z]{2})(\d+)([A-Z]\d?)?$", p)
+    if not m:
+        return p
+    cc, digits, kind = m.group(1), m.group(2), m.group(3) or ""
+    if cc == "US" and len(digits) == 11 and digits[4] == "0":
+        digits = digits[:4] + digits[5:]
+    return f"{cc}-{digits}-{kind}".rstrip("-")
+
+
+def _canon_pub(p: str) -> str:
+    import re
+    p = re.sub(r"[\s\-]", "", p.upper())
+    m = re.match(r"^US(\d{10})([A-Z]\d?)?$", p)
+    if m and m.group(1)[:2] in ("19", "20"):
+        return f"US{m.group(1)[:4]}0{m.group(1)[4:]}{m.group(2) or ''}"
+    return p
+
+
+
 async def fetch_by_pub_nums(pub_nums: list[str], with_claims: bool = True) -> dict[str, dict]:
     """Full text for known publication numbers from our own bucketed copy.
 
