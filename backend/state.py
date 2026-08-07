@@ -13,6 +13,10 @@ import operator
 from typing import Annotated, Any, TypedDict
 
 
+def _merge_dicts(a: dict | None, b: dict | None) -> dict:
+    return {**(a or {}), **(b or {})}
+
+
 class Event(TypedDict, total=False):
     ts: str
     phase: str
@@ -99,6 +103,10 @@ class GraphState(TypedDict, total=False):
     hitl_pending: HitlPending | None
     hitl_history: list[dict]  # [{phase, user_input, timestamp, changes}]
     hitl_response: dict  # user's HITL choice/comment from frontend submit
+    pause_after: list[str]    # phases whose gate interrupts: idca | extract | search | evaluate
+    paused_at: str            # phase the graph is currently paused after ("" when running)
+    user_edits: Annotated[list[dict], operator.add]   # {phase, kind, id/pub_num, op, before, after, ts}
+    prompt_versions: Annotated[dict[str, int], _merge_dicts]   # prompt name -> registry version used
 
     # ── Observability (not checkpointed — side channel) ──
     events: Annotated[list[Event], operator.add]
