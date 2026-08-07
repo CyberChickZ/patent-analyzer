@@ -230,6 +230,9 @@ async def run_pipeline_one(key: str, g: dict) -> dict:
                           "sources": d.get("sources", []), "title": d.get("title", "")[:80]}
                          for d in p3.get("ranked_candidates", [])]
         rec["pool"] = (p3.get("search_stats") or {}).get("pool", [])
+        rec["pruned"] = (p3.get("search_stats") or {}).get("pruned", [])
+        rec["prune"] = (p3.get("search_stats") or {}).get("prune", {})
+        rec["loop_mode"] = (p3.get("search_stats") or {}).get("loop_mode", "")
         rec["events"] = [e.get("message", "") for e in p3.get("events", [])
                          if e.get("kind") in ("channel_done", "channel_crashed", "channel_limited")]
         rec["channel_stats"] = [e.get("payload") for e in p3.get("events", []) if e.get("kind") == "channel_done"]
@@ -263,8 +266,13 @@ async def score_pipeline(gold: dict, recs: dict) -> dict:
             return [fam_of.get(_canon(d["pub_num"]), "") for d in docs]
         ranked_f = fams(r["ranked"])
         pool_f = fams(r["pool"])
+        pruned_f = fams(r.get("pruned") or [])
         hit_at = lambda lst, k: len(gf & {f for f in lst[:k] if f})
         pool_hit = gf & {f for f in pool_f if f}
+        pruned_hit = gf & {f for f in pruned_f if f}
+        rounds = r.get("loop_rounds") or []
+        serp_calls = rounds[-1].get("serpapi_calls", 0) if rounds else 0
+        gp_calls = rounds[-1].get("gp_calls", 0) if rounds else 0
         for d, f in zip(r["pool"], pool_f):
             if f in gf:
                 for src in d.get("sources", []):
@@ -273,7 +281,10 @@ async def score_pipeline(gold: dict, recs: dict) -> dict:
                     chan_unique[d["sources"][0]] = chan_unique.get(d["sources"][0], 0) + 1
         per_q.append({"key": key, "n_gold_fam": len(gf), "pool": len(r["pool"]), "ranked": len(r["ranked"]),
                       "pool_hit": len(pool_hit), "r10": hit_at(ranked_f, 10), "r30": hit_at(ranked_f, 30),
-                      "r100_pool": len(pool_hit)})
+                      "r100_pool": len(pool_hit),
+                      "pruned": len(r.get("pruned") or []), "pruned_hit": len(pruned_hit) if r.get("pruned") else None,
+                      "serpapi_calls": serp_calls, "gp_calls": gp_calls,
+                      "prune_calls": (r.get("prune") or {}).get("stage2_calls", 0)})
     # reach by loop round (family-level, cumulative over the loop's own pool)
     by_round = {}
     for key, g in gold.items():
@@ -291,10 +302,21 @@ async def score_pipeline(gold: dict, recs: dict) -> dict:
             by_round[rd["round"]]["queries"] += rd.get("n_queries", 0)
     n = len(per_q)
     tot = sum(q["n_gold_fam"] for q in per_q) or 1
+    with_prune = [q for q in per_q if q["pruned_hit"] is not None]
+    prune_block = {}
+    if with_prune:
+        pt = sum(q["n_gold_fam"] for q in with_prune) or 1
+        prune_block = {"family_recall_pruned": round(sum(q["pruned_hit"] for q in with_prune) / pt, 4),
+                       "gold_lost_in_prune": sum(q["pool_hit"] - q["pruned_hit"] for q in with_prune),
+                       "avg_pruned": round(sum(q["pruned"] for q in with_prune) / len(with_prune), 1),
+                       "avg_prune_calls": round(sum(q["prune_calls"] for q in with_prune) / len(with_prune), 1)}
     return {"queries": n, "gold_families": tot, "reach_by_round": by_round,
             "family_recall@10": round(sum(q["r10"] for q in per_q) / tot, 4),
             "family_recall@30": round(sum(q["r30"] for q in per_q) / tot, 4),
             "family_recall_pool": round(sum(q["pool_hit"] for q in per_q) / tot, 4),
+            **prune_block,
+            "avg_serpapi_calls": round(sum(q["serpapi_calls"] for q in per_q) / max(n, 1), 1),
+            "avg_gp_calls": round(sum(q["gp_calls"] for q in per_q) / max(n, 1), 1),
             "queries_with_any_hit_ranked": sum(1 for q in per_q if q["r30"]),
             "queries_with_any_hit_pool": sum(1 for q in per_q if q["pool_hit"]),
             "reach_vs_ranking": {"never_retrieved": tot - sum(q["pool_hit"] for q in per_q),
