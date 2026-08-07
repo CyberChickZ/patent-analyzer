@@ -38,7 +38,8 @@ async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CIT
             "seeds_after_cutoff": []}
     if not seeds:
         return [], info
-    meta = await fetch_by_pub_nums(seeds, with_claims=False)
+    # light: hundreds of seeds only need family/date (16 GiB vs 4 GiB measured on 501 seeds)
+    meta = await (fetch_meta_light(seeds) if light else fetch_by_pub_nums(seeds, with_claims=False))
     info["seeds_after_cutoff"] = sorted(k for k, m in meta.items() if _after(m, before))
     meta = {k: m for k, m in meta.items() if k not in info["seeds_after_cutoff"]}
     seeds = [s for s in seeds if s not in info["seeds_after_cutoff"]]

@@ -152,7 +152,7 @@ def test_expand_light_uses_narrow_lookup_beyond_the_head(monkeypatch):
     monkeypatch.setattr(E, "fetch_meta_light", fake_light)
     monkeypatch.setattr(E, "fetch_citations", fake_cits)
     out, info = asyncio.run(E.expand(["S1"], set(), max_cited=2000, before="20110101", light=True))
-    assert heavy[1] == ["C0", "C1"] and sorted(light[0]) == ["C2", "C3", "C4"]
+    assert light[0] == ["S1"] and heavy[0] == ["C0", "C1"] and sorted(light[1]) == ["C2", "C3", "C4"]
     assert len(out) == 5 and info["cited_light"] == 3
     assert {c.pub_num: bool(c.abstract) for c in out} == {"C0": True, "C1": True, "C2": False, "C3": False, "C4": False}
 
