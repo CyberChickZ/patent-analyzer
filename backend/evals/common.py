@@ -1,9 +1,29 @@
 """Shared helpers for the stage-level evals (FiNE-Patents adapters)."""
 
 import json
+import os
 import random
 import re
 from pathlib import Path
+
+
+def load_env_yaml(path: Path | None = None, override: bool = False) -> list[str]:
+    """Load backend/.env.yaml (the Cloud Run env file: `KEY: "value"` lines)
+    into os.environ for local evals; existing variables win unless override.
+    Returns the names that were set. Nothing in the file is ever printed."""
+    path = path or Path(__file__).parent.parent / ".env.yaml"
+    if not path.exists():
+        return []
+    setv = []
+    for line in path.read_text().splitlines():
+        m = re.match(r'^([A-Z][A-Z0-9_]*):\s*"([^"]*)"', line)
+        if not m:
+            continue
+        k, v = m.group(1), m.group(2)
+        if override or not os.environ.get(k):
+            os.environ[k] = v
+            setv.append(k)
+    return setv
 
 DATA_DIR = Path(__file__).parent.parent / "eval_data" / "fine-patents" / "data" / "packaged"
 FIXTURE_DIR = Path(__file__).parent / "fixtures"

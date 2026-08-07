@@ -89,3 +89,14 @@ def test_disclosed_features_parses_claim_and_abstract_references():
     gold = disclosed_features(app)
     assert gold[0]["passages"] == {("claim", 1), ("claim", 3), ("abstract", None)}
     assert gold[0]["paragraphs"] == []
+
+
+def test_load_env_yaml_sets_missing_vars_only(tmp_path, monkeypatch):
+    from common import load_env_yaml
+    f = tmp_path / ".env.yaml"
+    f.write_text('A_KEY: "one"\nB_KEY: "two,three"  # comment\n# C_KEY: "no"\nlower: "x"\n')
+    monkeypatch.setenv("A_KEY", "keep")
+    monkeypatch.delenv("B_KEY", raising=False)
+    assert load_env_yaml(f) == ["B_KEY"]
+    import os
+    assert os.environ["A_KEY"] == "keep" and os.environ["B_KEY"] == "two,three" and "C_KEY" not in os.environ
