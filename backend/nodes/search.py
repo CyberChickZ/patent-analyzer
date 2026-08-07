@@ -334,9 +334,24 @@ async def search_node(state: GraphState) -> dict:
     if filtered:
         _event("info", f"Filtered {filtered} self-citations")
 
+    # Precision stage (wide mode): embedding shortlist + LLM screen → ≤60,
+    # then the semantic rerank orders what survived
+    prune_stats: dict = {}
+    pruned_docs: list[dict] = []
+    if os.environ.get("PRUNE", "1") == "1" and loop_stats.get("mode") == "wide" and loop_stats.get("elements"):
+        try:
+            from patent_analyzer.agentic.prune import prune as _prune
+            pruned_docs, prune_stats = await _prune(loop_stats.get("candidates") or [], loop_stats["elements"], all_docs)
+            _event("prune_done", f"prune: pool {prune_stats.get('pool')} → embed {prune_stats.get('stage1_out')} "
+                                 f"→ llm {prune_stats.get('stage2_worth')} worth reading, kept {len(pruned_docs)} "
+                                 f"({prune_stats.get('stage2_calls')} calls)", prune_stats)
+        except Exception as exc:
+            _event("channel_crashed", f"prune: {type(exc).__name__}: {exc}")
+            pruned_docs, prune_stats = [], {"error": str(exc)[:200]}
+
     # Semantic rerank
     from patent_analyzer.semantic_search import rerank_docs
-    ranked = rerank_docs(summary, all_docs, limit=30)
+    ranked = rerank_docs(summary, pruned_docs or all_docs, limit=30)
 
     # Ensure BigQuery patent candidates aren't lost after rerank
     ranked_titles = {d.get("title", "").lower() for d in ranked}
@@ -414,6 +429,10 @@ async def search_node(state: GraphState) -> dict:
             "loop_elements": loop_stats.get("elements", []),
             "loop_mode": loop_stats.get("mode", "elements"),
             "coverage_by_element": loop_stats.get("coverage_by_element", {}),
+            "prune": prune_stats,
+            "pruned": [{"pub_num": d.get("pub_num", ""), "sources": d.get("sources", []),
+                        "match_type": d.get("match_type", ""), "elements": d.get("prune_elements", [])}
+                       for d in pruned_docs],
             "serpapi_quota": _serpapi_quota_status(),
         },
         "events": events,
