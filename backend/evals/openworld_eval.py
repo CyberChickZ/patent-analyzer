@@ -361,7 +361,8 @@ async def main():
     from common import load_env_yaml
     load_env_yaml()
     from patent_analyzer.recall import serpapi as sp
-    print("serpapi keys:", [f"{q['key']} used {q['used']}/{q['cap']}" for q in sp.sync_account()] or "NONE")
+    sp.sync_account()
+    print("serpapi keys:", [f"{q['key']} used {q['used']}/{q['cap']}" for q in sp.quota_status()] or "NONE")
     todo = [(k, g) for k, g in gold.items() if g["gold_families"]][:args.limit]
     sem = asyncio.Semaphore(args.concurrency)
 

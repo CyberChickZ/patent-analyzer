@@ -19,6 +19,24 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+
+
+def _load_local_env() -> None:
+    """Local dev (BACKEND_ENV=dev): read backend/.env.yaml so the process sees
+    the same SERPAPI_KEYS etc. Cloud Run gets the file via --env-vars-file.
+    Variables already in the environment win."""
+    if os.environ.get("K_SERVICE"):
+        return
+    f = Path(__file__).parent.parent / ".env.yaml"
+    if not f.exists():
+        return
+    for line in f.read_text().splitlines():
+        m = re.match(r'^([A-Z][A-Z0-9_]*):\s*"([^"]*)"', line)
+        if m and not os.environ.get(m.group(1)):
+            os.environ[m.group(1)] = m.group(2)
+
+
+_load_local_env()
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
