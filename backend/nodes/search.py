@@ -173,9 +173,16 @@ async def search_node(state: GraphState) -> dict:
         return out, errs
 
     async def run_openalex():
+        # OpenAlex free tier rate-limits bursts (429 on the 2nd query in the
+        # h1d smoke): one query per second, one retry after a pause
         out, errs = [], []
-        for q in _paper_queries():
+        for i, q in enumerate(_paper_queries()):
+            if i:
+                await asyncio.sleep(1.0)
             cands, err = await ch_oa.search_works(q, limit=50)
+            if err and "429" in err:
+                await asyncio.sleep(6.0)
+                cands, err = await ch_oa.search_works(q, limit=50)
             out.extend(cands)
             if err:
                 errs.append({"query": q, "error": err})
