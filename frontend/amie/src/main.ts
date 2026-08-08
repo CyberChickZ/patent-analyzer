@@ -12,6 +12,13 @@ interface Job {
   error?: string;
 }
 
+function pauseAfter(): string[] {
+  return Array.from(document.querySelectorAll<HTMLInputElement>("input.pauseAfter:checked")).map((c) => c.value);
+}
+
+const PAUSE_LABEL: Record<string, string> = { idca: "Invention Detection", extract: "Decomposition", search: "Prior Art Search", evaluate: "Deep Evaluation" };
+const PAUSE_AFTER_PHASE: Record<string, string> = { idca: "phase1", extract: "phase2", search: "phase3b", evaluate: "phase4" };
+
 const PHASES = [
   { key: "phase1", label: "Invention Detection" },
   { key: "phase2", label: "Decomposition" },
@@ -48,11 +55,12 @@ root.innerHTML = `
       <input type="email" id="emailInput" class="email-input" placeholder="recipient@example.com" style="display:none">
     </div>
     <div class="hitl-row">
-      <label class="hitl-toggle">
-        <input type="checkbox" id="hitlCheck">
-        <span>Expert Review Mode</span>
-      </label>
-      <span class="hitl-hint">Pause after checklist &amp; search for your review</span>
+      <span class="hitl-hint">Pause after:</span>
+      <label class="hitl-toggle"><input type="checkbox" class="pauseAfter" value="idca"><span>Detection</span></label>
+      <label class="hitl-toggle"><input type="checkbox" class="pauseAfter" value="extract"><span>Decomposition</span></label>
+      <label class="hitl-toggle"><input type="checkbox" class="pauseAfter" value="search"><span>Search</span></label>
+      <label class="hitl-toggle"><input type="checkbox" class="pauseAfter" value="evaluate"><span>Evaluation</span></label>
+      <span class="hitl-hint">— review and edit that phase's output before the next one runs</span>
     </div>
     <button class="btn" id="startBtn" disabled>Analyze</button>
   </div>
@@ -250,7 +258,8 @@ async function startAnalysis() {
           gcs_uri: urlData.gcs_uri,
           filename: selectedFile.name,
           notify_email: notifyEmail,
-          hitl_enabled: (document.getElementById("hitlCheck") as HTMLInputElement).checked,
+          pause_after: pauseAfter(),
+          hitl_enabled: pauseAfter().length > 0,
         }),
       });
       if (!analyzeResp.ok) {
@@ -264,9 +273,9 @@ async function startAnalysis() {
       startBtn.textContent = "Uploading...";
       const fd = new FormData();
       fd.append("file", selectedFile);
-      const hitlEnabled = (document.getElementById("hitlCheck") as HTMLInputElement).checked;
+      const pa = pauseAfter();
       if (notifyEmail) fd.append("notify_email", notifyEmail);
-      if (hitlEnabled) fd.append("hitl_enabled", "true");
+      if (pa.length) { fd.append("pause_after", pa.join(",")); fd.append("hitl_enabled", "true"); }
       const resp = await authFetch(`${API}/api/analyze`, { method: "POST", body: fd });
       if (!resp.ok) {
         const errText = await resp.text();
@@ -402,11 +411,12 @@ function renderPhases(job: Job) {
       </div>
       ${isOpen ? renderEventTimeline(phaseEvents) : ''}
     </div>`;
-    // Insert HITL waiting indicator after phase2
-    if (p.key === "phase2" && isHitlWaiting) {
+    // Insert the review indicator after the phase the graph paused on
+    const pausedAt = (job as any).paused_at || "extract";
+    if (isHitlWaiting && p.key === (PAUSE_AFTER_PHASE[pausedAt] || "phase2")) {
       html += `<div class="phase-block">
         <div class="phase-row hitl-waiting">
-          <span class="label">⏸ Waiting for Expert Review</span>
+          <span class="label">⏸ Paused after ${PAUSE_LABEL[pausedAt] || pausedAt} — review below</span>
           <span class="badge badge-waiting">review</span>
         </div>
       </div>`;
@@ -686,127 +696,91 @@ async function refreshJobs() {
 let hitlRendered = false;
 
 function renderHitl(jobId: string, job: Job) {
-  const hitlEl = document.getElementById("hitl-inline");
-
+  const el = document.getElementById("hitl-inline");
   if (job.status !== "waiting_for_hitl") {
-    if (hitlEl) hitlEl.remove();
+    if (el) el.remove();
     hitlRendered = false;
     return;
   }
-
   if (hitlRendered) return;
   hitlRendered = true;
-
-  const hitlPending = (job as any).hitl_pending;
-  if (!hitlPending) return;
-
-  const data = hitlPending.data || {};
-  const checklist: any[] = data.checklist || [];
-
   const phasesEl = document.getElementById("phases");
   if (!phasesEl) return;
-
-  _mountHitlForm(phasesEl, jobId, hitlPending.prompt || "", checklist);
+  mountPhasePanel(phasesEl, jobId).catch((e) => { hitlRendered = false; console.error(e); });
 }
 
-function _mountHitlForm(phasesEl: HTMLElement, jobId: string, prompt: string, checklist: any[]) {
+function esc(x: unknown): string {
+  return String(x ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+// GET /api/jobs/{id}/state → editable values of the paused phase; the panel is read-only
+// for now (edits + PATCH come next); Continue → POST /api/jobs/{id}/resume
+async function mountPhasePanel(phasesEl: HTMLElement, jobId: string) {
+  const resp = await authFetch(`${API}/api/jobs/${jobId}/state`);
+  if (!resp.ok) throw new Error(await resp.text());
+  const st = await resp.json();
+  const phase: string = st.paused_at || "extract";
+  const v = st.values || {};
   const old = document.getElementById("hitl-inline");
   if (old) old.remove();
+  const div = document.createElement("div");
+  div.id = "hitl-inline";
+  div.className = "hitl-inline-form";
 
-  const inlineDiv = document.createElement("div");
-  inlineDiv.id = "hitl-inline";
-  inlineDiv.className = "hitl-inline-form";
-
-  const clHtml = checklist.map((c: any, i: number) => {
-    const id = c.id || `c${i + 1}`;
-    const w = parseFloat(c.weight || 0);
-    return `<li><strong>${id}</strong>: ${c.criterion || c}${w > 0 ? ` <span class="hitl-weight">(w=${w.toFixed(2)})</span>` : ""}</li>`;
-  }).join("");
-
-  inlineDiv.innerHTML = `
-    <p class="hitl-prompt">${prompt}</p>
-    <div class="hitl-checklist"><h4>Checklist (${checklist.length} items)</h4><ul>${clHtml}</ul></div>
-    <div class="hitl-options">
-      <label class="hitl-option"><input type="radio" name="hitl-choice" value="A">Looks good, continue</label>
-      <label class="hitl-option"><input type="radio" name="hitl-choice" value="B">I want changes</label>
-    </div>
-    <div id="hitl-edit-area" class="hitl-edit-area hidden">
-      <textarea id="hitl-instructions" class="hitl-comment" placeholder="Describe what to change, e.g.:\n• Remove c3 and c5\n• Add a criterion about thermal stability\n• Make c1 more specific to epoxy systems" rows="4"></textarea>
-      <button class="btn hitl-apply" id="hitl-apply">Apply Changes</button>
-    </div>
-    <button class="btn hitl-submit hidden" id="hitl-submit">Confirm & Continue to Search</button>
-  `;
-
-  const waitingRow = phasesEl.querySelector(".hitl-waiting");
-  if (waitingRow) {
-    waitingRow.closest(".phase-block")!.after(inlineDiv);
-  } else {
-    phasesEl.appendChild(inlineDiv);
-  }
-  inlineDiv.scrollIntoView({ behavior: "smooth", block: "center" });
-
-  const editArea = document.getElementById("hitl-edit-area")!;
-  const submitBtn = document.getElementById("hitl-submit")!;
-
-  // Toggle edit area based on selection
-  inlineDiv.querySelectorAll('input[name="hitl-choice"]').forEach((radio) => {
-    radio.addEventListener("change", () => {
-      const val = (radio as HTMLInputElement).value;
-      if (val === "A") {
-        editArea.classList.add("hidden");
-        submitBtn.classList.remove("hidden");
-      } else {
-        editArea.classList.remove("hidden");
-        submitBtn.classList.add("hidden");
-      }
-    });
-  });
-
-  // "Apply Changes" — send instructions to backend LLM to revise checklist
-  document.getElementById("hitl-apply")!.addEventListener("click", async () => {
-    const instructions = (document.getElementById("hitl-instructions") as HTMLTextAreaElement).value.trim();
-    if (!instructions) { alert("Please describe what to change"); return; }
-    const applyBtn = document.getElementById("hitl-apply") as HTMLButtonElement;
-    applyBtn.disabled = true;
-    applyBtn.textContent = "Revising checklist...";
-
-    try {
-      const resp = await authFetch(`${API}/api/hitl-revise/${jobId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ instructions, current_checklist: checklist }),
-      });
-      if (!resp.ok) throw new Error(await resp.text());
-      const result = await resp.json();
-      const newChecklist = result.checklist || checklist;
-      // Re-mount form with revised checklist
-      hitlRendered = false;
-      _mountHitlForm(phasesEl, jobId, "Revised checklist below. Review and confirm, or request more changes.", newChecklist);
-    } catch (e) {
-      applyBtn.disabled = false;
-      applyBtn.textContent = "Apply Changes";
-      alert(`Revision failed: ${e}`);
+  let body = "";
+  if (phase === "idca") {
+    body = `<h4>Invention summary</h4><p class="hitl-pre">${esc(v.summary)}</p>
+      <p><b>Status:</b> ${esc(v.status_determination)} · <b>Input mode:</b> ${esc(v.input_mode)} · <b>CPC:</b> ${esc(v.cpc_subclass)}</p>`;
+  } else if (phase === "extract") {
+    const cands: any[] = (v.extraction && v.extraction.candidate_inventions) || [];
+    if (cands.length) {
+      body = cands.map((c: any) => `<h4>${esc(c.id)} · ${esc(c.level)} — ${esc((c.concept || "").slice(0, 160))}</h4>
+        <table class="tbl"><thead><tr><th>Element</th><th>Text</th><th>Evidence</th></tr></thead><tbody>` +
+        (c.elements || []).map((e: any) => `<tr><td>${esc(e.id)}</td><td>${esc(e.text)}</td><td class="hitl-quote">${esc((e.evidence_quote || "").slice(0, 160))}${e.unsupported ? " <em>(unsupported)</em>" : ""}</td></tr>`).join("") +
+        `</tbody></table>`).join("");
+    } else {
+      const cl: any[] = v.checklist || [];
+      body = `<h4>Checklist (${cl.length})</h4><ul>` + cl.map((c: any, i: number) => `<li><b>${esc(c.id || "c" + (i + 1))}</b>: ${esc(c.criterion)}</li>`).join("") + "</ul>";
     }
-  });
+  } else if (phase === "search") {
+    const ranked: any[] = v.ranked_candidates || [];
+    const qs: any[] = (st.context && st.context.queries) || [];
+    body = `<h4>Queries (${qs.length})</h4><table class="tbl"><thead><tr><th>#</th><th>Kind</th><th>Query</th><th>Total</th><th>Taken</th><th>New</th></tr></thead><tbody>` +
+      qs.map((q: any, i: number) => `<tr><td>${q.n || i + 1}</td><td>${esc(q.kind || q.mode)}</td><td><code>${esc((q.query || "").slice(0, 160))}</code></td><td>${q.total ?? "?"}</td><td>${q.hits ?? ""}</td><td>${q.new ?? ""}</td></tr>`).join("") +
+      `</tbody></table><h4>Candidates going to evaluation (${ranked.length})</h4><table class="tbl"><thead><tr><th>#</th><th>Pub</th><th>Title</th><th>Sources</th></tr></thead><tbody>` +
+      ranked.map((d: any, i: number) => `<tr><td>${i + 1}</td><td>${esc(d.pub_num)}</td><td>${esc((d.title || "").slice(0, 110))}</td><td>${esc((d.sources || []).join(", "))}</td></tr>`).join("") + `</tbody></table>`;
+  } else if (phase === "evaluate") {
+    const sr: any[] = v.scoring_report || [];
+    body = `<h4>Evaluated documents (${sr.length})</h4><table class="tbl"><thead><tr><th>#</th><th>Pub</th><th>Title</th><th>Score</th><th>Elements matched</th></tr></thead><tbody>` +
+      sr.map((d: any, i: number) => {
+        const cr = d.checklist_results || {};
+        const n = Object.values(cr).filter((x: any) => (x && (x.score ?? (x.match ? 2 : 0))) > 0).length;
+        return `<tr><td>${i + 1}</td><td>${esc(d.pub_num)}</td><td>${esc((d.title || "").slice(0, 110))}</td><td>${esc(d.similarity_score ?? d.score ?? "")}</td><td>${n}/${Object.keys(cr).length}</td></tr>`;
+      }).join("") + `</tbody></table>`;
+  }
 
-  // "Confirm & Continue" — resume pipeline with current checklist
-  submitBtn.addEventListener("click", async () => {
-    (submitBtn as HTMLButtonElement).disabled = true;
-    submitBtn.textContent = "Submitting...";
+  div.innerHTML = `
+    <p class="hitl-prompt">Paused after <b>${esc(PAUSE_LABEL[phase] || phase)}</b>. This is what the next phase will receive.</p>
+    <div id="hitl-body">${body}</div>
+    <div class="hitl-options">
+      <button class="btn hitl-submit" id="hitl-continue">Continue</button>
+      <span class="hitl-hint" id="hitl-msg"></span>
+    </div>`;
+  const waitingRow = phasesEl.querySelector(".hitl-waiting");
+  if (waitingRow) waitingRow.closest(".phase-block")!.after(div); else phasesEl.appendChild(div);
+  div.scrollIntoView({ behavior: "smooth", block: "center" });
+
+  document.getElementById("hitl-continue")!.addEventListener("click", async () => {
+    const btn = document.getElementById("hitl-continue") as HTMLButtonElement;
+    btn.disabled = true; btn.textContent = "Resuming...";
     try {
-      const resp = await authFetch(`${API}/api/hitl-response/${jobId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ choice: "A", comment: "", modifications: { checklist } }),
-      });
-      if (!resp.ok) throw new Error(await resp.text());
-      inlineDiv.innerHTML = `<div class="hitl-resuming"><span class="badge badge-running">resuming</span> Pipeline resuming with ${checklist.length} checklist items...</div>`;
+      const r = await authFetch(`${API}/api/jobs/${jobId}/resume`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "continue" }) });
+      if (!r.ok) throw new Error(await r.text());
+      div.innerHTML = `<div class="hitl-resuming"><span class="badge badge-running">resuming</span> Continuing after ${esc(PAUSE_LABEL[phase] || phase)}...</div>`;
       hitlRendered = false;
-      statusCard.scrollIntoView({ behavior: "smooth" });
     } catch (e) {
-      (submitBtn as HTMLButtonElement).disabled = false;
-      submitBtn.textContent = "Confirm & Continue to Search";
-      alert(`Failed: ${e}`);
+      btn.disabled = false; btn.textContent = "Continue";
+      (document.getElementById("hitl-msg") as HTMLElement).textContent = `Failed: ${e}`;
     }
   });
 }

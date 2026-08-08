@@ -177,3 +177,7 @@ h1{font-size:1.5rem;text-align:center;margin-bottom:0.25rem;font-weight:700}
 .hitl-option input[type="radio"]{accent-color:var(--accent)}
 .hitl-comment{width:100%;border:1px solid var(--border);border-radius:6px;padding:0.6rem;font-size:0.85rem;resize:vertical;font-family:inherit;margin-bottom:0.75rem}
 .hitl-submit{width:100%}
+.hitl-pre{white-space:pre-wrap;font-size:0.9rem;max-height:220px;overflow:auto}
+.hitl-quote{color:#6b7280;font-size:0.8rem}
+.hitl-inline-form .tbl{width:100%;font-size:0.85rem;margin:6px 0 10px}
+.hitl-inline-form .tbl th,.hitl-inline-form .tbl td{padding:4px 6px;border-bottom:1px solid #fde68a;vertical-align:top}
