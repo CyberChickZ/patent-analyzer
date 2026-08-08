@@ -91,13 +91,48 @@ def _enqueue_job(job_id: str):
 USE_LANGGRAPH = True  # Always use LangGraph pipeline
 
 
-async def _run_langgraph_pipeline(job_id: str):
-    """Run the pipeline via LangGraph graph.
+_checkpointer_singleton = None
+PHASE_NODE = {"idca": "idca", "extract": "ssr", "search": "search", "evaluate": "evaluate"}
+PHASE_OF_NODE = {v: k for k, v in PHASE_NODE.items()}
+_SNAPSHOT_KEYS = ("summary", "checklist", "delegation", "innovation_axes", "technology_choices", "applicable_types",
+                  "cpc_subclass", "fields_map", "source_title", "source_arxiv_id", "source_doi", "status_determination",
+                  "doc_type", "input_mode", "personas", "input_local_path", "notify_email", "evolve", "hitl_enabled",
+                  "phase_results", "extraction", "document_text", "ranked_candidates", "search_stats", "scoring_report",
+                  "eval_stats", "pause_after", "user_edits", "prompt_versions", "category", "publication_date")
 
-    HITL uses manual two-phase split (interrupt_after unreliable on Cloud Run).
-    Phase 1: IDCA+SSR → save state → waiting_for_hitl.
-    Phase 2 (after user submits): Search+Eval+Report with saved state.
+
+def _checkpointer():
+    """Process-wide checkpointer. CHECKPOINT_BACKEND=memory (default) keeps
+    threads for the life of the instance; sqlite / gcs (later steps) survive
+    restarts. The job record keeps a whitelist snapshot as the fallback."""
+    global _checkpointer_singleton
+    if _checkpointer_singleton is None:
+        from langgraph.checkpoint.memory import MemorySaver
+        _checkpointer_singleton = MemorySaver()
+    return _checkpointer_singleton
+
+
+def _pause_after(job: dict) -> list[str]:
+    pa = job.get("pause_after") or []
+    if isinstance(pa, str):
+        pa = [x.strip() for x in pa.split(",") if x.strip()]
+    if job.get("hitl_enabled") and not pa:
+        pa = ["extract"]          # legacy toggle = pause after the checklist / extraction
+    return [x for x in pa if x in PHASE_NODE]
+
+
+async def _run_langgraph_pipeline(job_id: str):
+    """Run (or resume, or replay) the pipeline graph for a job.
+
+    One graph with a gate after every phase (graph/main_graph.py). A gate
+    whose phase is in job["pause_after"] interrupts; the job is then
+    `waiting_for_hitl` with `hitl_pending` = the HumanInterrupt payload.
+    Resume: job["_pending_response"] (HumanResponse) → Command(resume=...).
+    Replay: job["_replay_from"] = phase → invoke from the checkpoint taken
+    before that phase (LangGraph replay), e.g. after a prompt change.
     """
+    from langgraph.types import Command
+
     from graph.main_graph import build_graph
 
     job = _get_job(job_id)
@@ -105,22 +140,34 @@ async def _run_langgraph_pipeline(job_id: str):
         print(f"[LANGGRAPH] job {job_id} not found in memory or GCS")
         return
     jobs[job_id] = job
-    hitl_enabled = bool(job.get("hitl_enabled", False))
-    is_hitl_resume = bool(job.get("_hitl_resume"))
+    pause_after = _pause_after(job)
+    graph = build_graph(checkpointer=_checkpointer())
+    config = {"configurable": {"thread_id": job_id, "prompt_overrides": job.get("prompt_overrides") or {}}}
+    pending = job.pop("_pending_response", None)
+    replay_from = job.pop("_replay_from", None)
 
-    if hitl_enabled and not is_hitl_resume:
-        graph_phase = "first_half"
-    elif is_hitl_resume:
-        graph_phase = "second_half"
-    else:
-        graph_phase = "all"
+    def _has_thread() -> bool:
+        try:
+            return bool(graph.get_state(config).values)
+        except Exception:
+            return False
 
-    print(f"[LANGGRAPH] job {job_id} phase={graph_phase} hitl={hitl_enabled} resume={is_hitl_resume}")
-    graph = build_graph(phase=graph_phase)
-
-    if is_hitl_resume:
-        saved = job.get("_hitl_saved_state", {})
-        # Ensure input file exists (instance may have been recycled during HITL wait)
+    if replay_from and _has_thread():
+        cid = (job.get("phase_checkpoints") or {}).get(replay_from)
+        if cid:
+            config = {"configurable": {**config["configurable"], "checkpoint_id": cid}}
+        graph_input = None
+        mode = f"replay:{replay_from}"
+    elif pending is not None and _has_thread():
+        graph_input = Command(resume=pending)
+        mode = "resume"
+    elif pending is not None or replay_from:
+        # checkpoint gone (new instance): rebuild from the job snapshot and
+        # continue from the phase after the pause, applying the edits ourselves
+        from graph.gates import apply_response
+        saved = dict(job.get("_hitl_saved_state") or {})
+        paused = job.get("paused_at") or "extract"
+        saved.update(apply_response(paused, saved, pending) if pending else {})
         input_path = saved.get("input_local_path") or job.get("input_path", "")
         if input_path and not Path(input_path).exists() and job.get("gcs_uri"):
             try:
@@ -128,30 +175,21 @@ async def _run_langgraph_pipeline(job_id: str):
                 path_part = job["gcs_uri"][len("gs://"):]
                 bucket_name, _, object_key = path_part.partition("/")
                 _get_gcs().bucket(bucket_name).blob(object_key).download_to_filename(input_path)
-                print(f"[HITL RESUME] Re-downloaded input file from GCS: {input_path}")
             except Exception as e:
                 print(f"[HITL RESUME] Could not re-download input: {e}")
-        # Apply user modifications to checklist if provided
-        hitl_resume = job.get("_hitl_resume", {})
-        mods = hitl_resume.get("modifications") or {}
-        if mods.get("checklist"):
-            saved["checklist"] = mods["checklist"]
-            print(f"[HITL RESUME] Applied modified checklist: {len(mods['checklist'])} items")
-        initial_state = {
-            **saved,
-            "job_id": job_id,
-            "output_dir": job["output_dir"],
-            "status": "running",
-            "phase": "phase3",
-            "events": [],
-            "hitl_response": hitl_resume,
-        }
+        graph_input = {**saved, "job_id": job_id, "output_dir": job["output_dir"], "status": "running",
+                       "events": [], "pause_after": [p for p in pause_after if p != paused] if not replay_from else pause_after}
+        mode = "snapshot-rebuild"
+        print(f"[HITL] checkpoint missing for {job_id}, rebuilding from job snapshot (paused_at={paused})")
+        graph = build_graph(checkpointer=_checkpointer(), entry=_next_node(paused) if not replay_from else PHASE_NODE[replay_from])
+        config = {"configurable": {"thread_id": f"{job_id}_{uuid.uuid4().hex[:6]}", "prompt_overrides": job.get("prompt_overrides") or {}}}
     else:
-        initial_state = {
+        graph_input = {
             "job_id": job_id,
             "input_local_path": job["input_path"],
             "output_dir": job["output_dir"],
-            "hitl_enabled": hitl_enabled,
+            "hitl_enabled": bool(job.get("hitl_enabled", False)),
+            "pause_after": pause_after,
             "evolve": bool(job.get("evolve", False)),
             "notify_email": job.get("notify_email", ""),
             "status": "running",
@@ -159,20 +197,34 @@ async def _run_langgraph_pipeline(job_id: str):
             "events": [],
             "phase_results": {},
         }
+        mode = "start"
 
-    config = {"configurable": {"thread_id": f"{job_id}_{graph_phase}"}}
-
+    print(f"[LANGGRAPH] job {job_id} mode={mode} pause_after={pause_after}")
     job["status"] = "running"
+    job["paused_at"] = ""
+    job["hitl_pending"] = None
     _save_job(job)
 
-    final_state = dict(initial_state)
-    async for update in graph.astream(initial_state, config=config, stream_mode="updates"):
+    interrupted = None
+    async for update in graph.astream(graph_input, config=config, stream_mode="updates"):
         if not isinstance(update, dict):
+            continue
+        if "__interrupt__" in update:
+            interrupted = update["__interrupt__"]
             continue
         for node_name, patch in update.items():
             if not isinstance(patch, dict):
                 continue
-            print(f"[ASTREAM] node={node_name} keys={list(patch.keys())[:10]} events={len(patch.get('events',[]))}")
+            print(f"[ASTREAM] node={node_name} keys={list(patch.keys())[:10]} events={len(patch.get('events', []))}")
+            if node_name in PHASE_OF_NODE:
+                # checkpoint taken before this phase ran = replay point for "rerun this phase"
+                try:
+                    hist = list(graph.get_state_history(config))
+                    before = next((s for s in hist if s.next == (node_name,)), None)
+                    if before is not None:
+                        job.setdefault("phase_checkpoints", {})[PHASE_OF_NODE[node_name]] = before.config["configurable"]["checkpoint_id"]
+                except Exception:
+                    pass
             if patch.get("phase"):
                 job["phase"] = patch["phase"]
             if patch.get("status") and patch["status"] != "running":
@@ -189,95 +241,52 @@ async def _run_langgraph_pipeline(job_id: str):
             if patch.get("scoring_report"):
                 sr = patch["scoring_report"]
                 top = sr[0].get("similarity_score", 0) if sr else 0
-                job.setdefault("phases", {})["phase4"] = {
-                    "evaluated": len(sr), "top_score": round(top, 4)
-                }
+                job.setdefault("phases", {})["phase4"] = {"evaluated": len(sr), "top_score": round(top, 4)}
+            if patch.get("user_edits"):
+                job.setdefault("user_edits", []).extend(patch["user_edits"])
+            if patch.get("prompt_versions"):
+                job.setdefault("prompt_versions", {}).update(patch["prompt_versions"])
             job["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
             _save_job(job)
-            final_state.update(patch)
 
-    # HITL first_half completed — pause for human review
-    if graph_phase == "first_half" and final_state.get("status") != "error":
-        if final_state.get("status_determination") == "Absent" or \
-           final_state.get("doc_type") == "talks_about_invention_but_no_invention":
-            job["status"] = "completed"
-            _save_job(job)
-            return
-
-        state_to_save = {}
-        for key in ("summary", "checklist", "delegation", "innovation_axes",
-                     "technology_choices", "applicable_types", "cpc_subclass",
-                     "fields_map", "source_title", "source_arxiv_id", "source_doi",
-                     "status_determination", "doc_type", "input_mode", "personas",
-                     "input_local_path", "notify_email", "evolve", "hitl_enabled",
-                     "phase_results", "extraction", "document_text"):
-            if key in final_state:
-                state_to_save[key] = final_state[key]
-
-        job["_hitl_saved_state"] = state_to_save
+    if interrupted:
+        hi = interrupted[0].value if hasattr(interrupted[0], "value") else interrupted[0]
+        phase = str(hi.get("action_request", {}).get("action", "")).replace("review_", "") or "extract"
+        try:
+            values = graph.get_state(config).values
+        except Exception:
+            values = {}
+        job["_hitl_saved_state"] = {k: values[k] for k in _SNAPSHOT_KEYS if k in values}
         job["status"] = "waiting_for_hitl"
-        job["hitl_pending"] = {
-            "type": "checklist_review",
-            "prompt": "Phase 1-2 complete. Review the checklist below, then choose an action.",
-            "options": [
-                "A) Looks good, continue to prior art search",
-                "B) Need modifications to checklist",
-                "C) Add missing checklist items",
-                "D) Regenerate checklist from scratch",
-            ],
-            "data": {
-                "checklist": final_state.get("checklist", []),
-                "summary": (final_state.get("summary") or "")[:500],
-                "next_node": "search",
-            },
-        }
-        print(f"[HITL] Job {job_id} paused — {len(final_state.get('checklist', []))} checklist items")
+        job["paused_at"] = phase
+        # HumanInterrupt plus the legacy fields the current frontend form reads
+        job["hitl_pending"] = {**hi, "type": f"{phase}_review", "phase": phase,
+                               "prompt": hi.get("description") or f"Phase '{phase}' finished. Review, then continue.",
+                               "options": ["A) Looks good, continue", "B) Need modifications"],
+                               "data": {"checklist": values.get("checklist", []), "summary": (values.get("summary") or "")[:500],
+                                        "extraction": values.get("extraction"), "next_node": _next_node(phase)}}
+        print(f"[HITL] Job {job_id} paused after {phase}")
         _save_job(job)
         return
 
-    # Normal completion
+    try:
+        final_state = graph.get_state(config).values
+    except Exception:
+        final_state = {}
     job["status"] = final_state.get("status", "completed")
     if job["status"] not in ("error", "waiting_for_hitl"):
         job["status"] = "completed"
     job["phase"] = final_state.get("phase", "phase5")
     if final_state.get("error"):
         job["error"] = final_state["error"]
-    job.pop("_hitl_resume", None)
     job.pop("_hitl_saved_state", None)
-
     _save_job(job)
 
 
-async def _pipeline_worker():
-    """Single worker that processes pipeline jobs sequentially."""
-    while True:
-        job_id = await _pipeline_queue.get()
-        try:
-            if job_id in _pending_jobs:
-                _pending_jobs.remove(job_id)
-            _active_pipelines.add(job_id)
-            if USE_LANGGRAPH:
-                await _run_langgraph_pipeline(job_id)
-            else:
-                await run_pipeline(job_id)
-        except Exception as exc:
-            import traceback
-            print(f"[PIPELINE WORKER] job {job_id} crashed: {exc}\n{traceback.format_exc()}")
-            job = jobs.get(job_id)
-            if job and job.get("status") != "completed":
-                job["status"] = "error"
-                job["error"] = f"Pipeline worker crash: {exc}"
-                _save_job(job)
-        finally:
-            _active_pipelines.discard(job_id)
-            _pipeline_queue.task_done()
-
-
-@app.on_event("startup")
-async def _start_pipeline_worker():
-    asyncio.create_task(_pipeline_worker())
-
-_gcs_client = None
+def _next_node(phase: str) -> str:
+    order = ["idca", "ssr", "search", "evaluate", "report"]
+    node = PHASE_NODE.get(phase, "ssr")
+    return order[min(order.index(node) + 1, len(order) - 1)]
 
 
 def _get_gcs():
@@ -394,6 +403,7 @@ async def start_analysis(
     evolve: bool = Form(False),
     notify_email: str = Form(""),
     hitl_enabled: bool = Form(False),
+    pause_after: str = Form(""),
     user: dict = Depends(require_auth),
 ):
     job_id = str(uuid.uuid4())[:8]
@@ -416,6 +426,7 @@ async def start_analysis(
         "input_path": str(input_path),
         "evolve": bool(evolve),
         "hitl_enabled": bool(hitl_enabled),
+        "pause_after": [x.strip() for x in (pause_after or "").split(",") if x.strip()],
         "notify_email": notify_email or "",
         "submitted_by": user.get("email", ""),
     }
@@ -508,6 +519,8 @@ async def start_analysis_from_gcs(
         "gcs_uri": gcs_uri,
         "evolve": bool(evolve or payload.get("evolve")),
         "hitl_enabled": bool(payload.get("hitl_enabled", False)),
+        "pause_after": [x.strip() for x in str(payload.get("pause_after") or "").split(",") if x.strip()]
+                       if not isinstance(payload.get("pause_after"), list) else list(payload.get("pause_after")),
         "notify_email": payload.get("notify_email", ""),
         "submitted_by": user.get("email", ""),
     }

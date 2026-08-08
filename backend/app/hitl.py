@@ -77,11 +77,15 @@ async def submit_hitl_response(job_id: str, response: HitlResponse):
     job.setdefault("hitl_history", []).append(hitl_record)
     job["hitl_pending"] = None
     job["status"] = "queued"
-    job["_hitl_resume"] = {
-        "choice": response.choice,
-        "comment": response.comment,
-        "modifications": response.modifications,
-    }
+    # HumanResponse for the gate (graph/gates.py): the legacy form only edits the checklist
+    mods = response.modifications or {}
+    args = {k: v for k, v in mods.items() if k in ("checklist", "extraction", "summary", "ranked_candidates", "scoring_report")}
+    if args:
+        job["_pending_response"] = {"type": "edit", "args": args}
+    elif response.comment and response.choice not in ("A", "accept"):
+        job["_pending_response"] = {"type": "response", "args": response.comment}
+    else:
+        job["_pending_response"] = {"type": "accept", "args": None}
     _save_job(job)
 
     _enqueue_job(job_id)
