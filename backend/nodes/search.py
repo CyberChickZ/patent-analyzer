@@ -359,6 +359,7 @@ async def search_node(state: GraphState) -> dict:
     # Semantic rerank
     from patent_analyzer.semantic_search import rerank_docs
     ranked = rerank_docs(summary, pruned_docs or all_docs, limit=30)
+    rank_of = {id(d): i + 1 for i, d in enumerate(ranked)}
 
     # Ensure BigQuery patent candidates aren't lost after rerank
     ranked_titles = {d.get("title", "").lower() for d in ranked}
@@ -440,6 +441,14 @@ async def search_node(state: GraphState) -> dict:
             "pruned": [{"pub_num": d.get("pub_num", ""), "sources": d.get("sources", []),
                         "match_type": d.get("match_type", ""), "elements": d.get("prune_elements", [])}
                        for d in pruned_docs],
+            # per-document funnel: embedding score / shortlist / LLM verdict + reason / final rank
+            "funnel_docs": [{"pub_num": d.get("pub_num", ""), "title": (d.get("title") or "")[:100],
+                             "match_type": d.get("match_type", ""), "sources": d.get("sources", []),
+                             "cos": round(float(d.get("prune_cos", 0.0)), 4), "best_element": d.get("prune_best_element", ""),
+                             "stage1": bool(d.get("prune_stage1")), "worth_reading": d.get("prune_worth_reading"),
+                             "elements": d.get("prune_elements", []), "reason": d.get("prune_reason", ""),
+                             "rank": rank_of.get(id(d))}
+                            for d in all_docs] if prune_stats else [],
             "serpapi_quota": _serpapi_quota_status(),
         },
         "events": events,

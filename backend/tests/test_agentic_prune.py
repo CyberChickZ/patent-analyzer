@@ -26,7 +26,7 @@ def _emb(texts):
 def test_stage1_union_of_per_element_topk():
     docs = [dict(d) for d in DOCS]
     idxs, st = stage1_embed(ELS, docs, topk=1, embed_docs=_emb, embed_queries=_emb)
-    assert sorted(idxs) == [0, 1] and st == {"stage1_in": 4, "stage1_out": 2}
+    assert sorted(idxs) == [0, 1] and st["stage1_in"] == 4 and st["stage1_out"] == 2 and st["stage1_cut_cos"] > 0.9
     assert docs[0]["prune_cos"] > 0.9
 
 
@@ -44,6 +44,7 @@ def test_stage2_keeps_worth_reading_and_orders_by_elements_then_cosine():
     kept, st = asyncio.run(stage2_llm([{"id": "inv1", "concept": "c"}], ELS, docs, idxs, batch_size=2, keep=2, call=fake_call))
     assert st["stage2_calls"] == 2 and st["stage2_worth"] == 3 and st["stage2_out"] == 2
     assert kept[0] == 1 and kept[1] in (0, 3) and docs[2]["prune_worth_reading"] is False
+    assert docs[2]["prune_reason"] == "" and docs[0]["prune_stage1"] and docs[0]["prune_best_element"] == "e1"
     assert "[0]" in prompts[0] and "e2: turntable rotation" in prompts[0]
 
 

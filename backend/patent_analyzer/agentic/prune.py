@@ -31,7 +31,8 @@ SCREEN_SCHEMA = {
     "properties": {"verdicts": {"type": "ARRAY", "items": {
         "type": "OBJECT",
         "properties": {"i": {"type": "INTEGER"}, "worth_reading": {"type": "BOOLEAN"},
-                       "elements": {"type": "ARRAY", "items": {"type": "STRING"}}},
+                       "elements": {"type": "ARRAY", "items": {"type": "STRING"}},
+                       "reason": {"type": "STRING"}},
         "required": ["i", "worth_reading"]}}},
     "required": ["verdicts"],
 }
@@ -60,10 +61,14 @@ def stage1_embed(elements: list[dict], docs: list[dict], topk: int = STAGE1_TOPK
     for row in sim:
         keep.update(int(i) for i in np.argpartition(-row, k - 1)[:k])
     best = sim.max(axis=0)
-    for i in keep:
+    best_el = sim.argmax(axis=0)
+    for i in range(len(docs)):
         docs[i]["prune_cos"] = float(best[i])
+        docs[i]["prune_best_element"] = elements[int(best_el[i])].get("id", "")
+        docs[i]["prune_stage1"] = i in keep
     out = sorted(keep, key=lambda i: -best[i])
-    return out, {"stage1_in": len(docs), "stage1_out": len(out)}
+    return out, {"stage1_in": len(docs), "stage1_out": len(out),
+                 "stage1_cut_cos": float(min(best[i] for i in keep)) if keep else None}
 
 
 def _batch_prompt(candidates: list[dict], elements: list[dict], batch: list[tuple[int, dict]]) -> str:
@@ -78,7 +83,7 @@ def _batch_prompt(candidates: list[dict], elements: list[dict], batch: list[tupl
 reading it in full would be worth an examiner's time for the invention below — an abstract
 cannot prove several elements, so do not penalise short or old records; ask whether the
 document plausibly discloses or teaches toward ANY element. Then list the element ids it
-appears to touch (may be empty).
+appears to touch (may be empty) and give a reason of at most 15 words.
 
 CANDIDATE INVENTIONS:
 {inv}
@@ -88,7 +93,7 @@ ELEMENTS:
 DOCUMENTS:
 {chr(10).join(rows)}
 
-Answer with JSON {{"verdicts": [{{"i": <document index>, "worth_reading": true|false, "elements": ["<element id>", ...]}}, ...]}} — one entry per document."""
+Answer with JSON {{"verdicts": [{{"i": <document index>, "worth_reading": true|false, "elements": ["<element id>", ...], "reason": "<=15 words"}}, ...]}} — one entry per document."""
 
 
 async def stage2_llm(candidates: list[dict], elements: list[dict], docs: list[dict], idxs: list[int],
@@ -98,7 +103,7 @@ async def stage2_llm(candidates: list[dict], elements: list[dict], docs: list[di
     if call is None:
         from app.llm import call_llm as call
     system = "You are a patent examiner screening search results. Output JSON only."
-    verdict: dict[int, tuple[bool, list[str]]] = {}
+    verdict: dict[int, tuple[bool, list[str], str]] = {}
     calls = 0
     for start in range(0, len(idxs), batch_size):
         batch = [(i, docs[i]) for i in idxs[start:start + batch_size]]
@@ -110,14 +115,16 @@ async def stage2_llm(candidates: list[dict], elements: list[dict], docs: list[di
             data = {}
         for v in (data.get("verdicts") or []):
             try:
-                verdict[int(v["i"])] = (bool(v.get("worth_reading")), [str(x) for x in (v.get("elements") or [])])
+                verdict[int(v["i"])] = (bool(v.get("worth_reading")), [str(x) for x in (v.get("elements") or [])],
+                                        str(v.get("reason") or "")[:160])
             except (KeyError, TypeError, ValueError):
                 continue
     kept = []
     for i in idxs:
-        ok, els = verdict.get(i, (False, []))
+        ok, els, why = verdict.get(i, (False, [], "no verdict returned"))
         docs[i]["prune_worth_reading"] = ok
         docs[i]["prune_elements"] = els
+        docs[i]["prune_reason"] = why
         if ok:
             kept.append(i)
     kept.sort(key=lambda i: (-len(docs[i].get("prune_elements") or []), -float(docs[i].get("prune_cos") or 0.0)))
