@@ -149,3 +149,100 @@ async def revise_checklist(job_id: str, req: ReviseRequest):
     _save_job(job)
 
     return {"checklist": revised, "count": len(revised)}
+
+
+# ─── Phase-level pause / edit / resume (graph gates) ──────────────────────
+#
+# GET   /jobs/{id}/state   → what the reviewer sees: paused phase, editable values, context
+# PATCH /jobs/{id}/state   → stage edits (whole-value replace of editable keys); nothing runs
+# POST  /jobs/{id}/resume  → {"action": "continue" | "rerun_phase", "prompt_overrides": {...}}
+
+from graph.gates import EDITABLE, PHASES, SHOWN  # noqa: E402
+
+
+@router.get("/jobs/{job_id}/state")
+async def get_job_state(job_id: str):
+    from app.main import _get_job
+
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    phase = job.get("paused_at") or ""
+    saved = job.get("_hitl_saved_state") or {}
+    pending = job.get("_pending_edits") or {}
+    values = {k: pending.get(k, saved.get(k)) for k in EDITABLE.get(phase, ()) if k in saved or k in pending}
+    context = {k: saved.get(k) for k in SHOWN.get(phase, ()) if k in saved}
+    if phase == "search":
+        context["queries"] = [q for r in (saved.get("search_stats") or {}).get("loop_rounds", []) for q in r.get("queries", [])]
+    return {"job_id": job_id, "status": job.get("status"), "phase": job.get("phase"), "paused_at": phase,
+            "pause_after": job.get("pause_after") or [], "editable": list(EDITABLE.get(phase, ())),
+            "values": values, "context": context, "pending_edits": sorted(pending),
+            "user_edits": job.get("user_edits") or [], "prompt_versions": job.get("prompt_versions") or {},
+            "phase_checkpoints": sorted((job.get("phase_checkpoints") or {}).keys())}
+
+
+@router.patch("/jobs/{job_id}/state")
+async def patch_job_state(job_id: str, edits: dict):
+    """Stage whole-value replacements for the paused phase's editable keys.
+    Applied by the gate on resume (never via update_state: reducer channels
+    would accumulate)."""
+    from app.main import _get_job, _save_job
+
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job.get("status") != "waiting_for_hitl":
+        raise HTTPException(400, "Job is not paused")
+    phase = job.get("paused_at") or ""
+    allowed = set(EDITABLE.get(phase, ()))
+    bad = sorted(set(edits) - allowed)
+    if bad:
+        raise HTTPException(400, f"not editable after '{phase}': {bad}; editable: {sorted(allowed)}")
+    staged = job.setdefault("_pending_edits", {})
+    staged.update(edits)
+    _save_job(job)
+    return {"job_id": job_id, "paused_at": phase, "pending_edits": sorted(staged)}
+
+
+class ResumeRequest(BaseModel):
+    action: str = "continue"          # continue | rerun_phase
+    prompt_overrides: dict | None = None
+    comment: str = ""
+
+
+@router.post("/jobs/{job_id}/resume")
+async def resume_job(job_id: str, req: ResumeRequest):
+    from app.main import _enqueue_job, _get_job, _save_job
+
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job.get("status") != "waiting_for_hitl":
+        raise HTTPException(400, "Job is not paused")
+    phase = job.get("paused_at") or ""
+    if req.prompt_overrides:
+        job.setdefault("prompt_overrides", {}).update(req.prompt_overrides)
+    if req.action == "rerun_phase":
+        if phase not in PHASES:
+            raise HTTPException(400, "nothing to rerun")
+        job["_replay_from"] = phase
+        job.pop("_pending_response", None)
+    elif req.action == "continue":
+        staged = job.pop("_pending_edits", None) or {}
+        if staged:
+            job["_pending_response"] = {"type": "edit", "args": staged}
+        elif req.comment:
+            job["_pending_response"] = {"type": "response", "args": req.comment}
+        else:
+            job["_pending_response"] = {"type": "accept", "args": None}
+    else:
+        raise HTTPException(400, "action must be continue or rerun_phase")
+    job.setdefault("hitl_history", []).append({"phase": phase, "action": req.action, "comment": req.comment,
+                                              "edited": sorted((job.get("_pending_response") or {}).get("args") or {})
+                                              if isinstance((job.get("_pending_response") or {}).get("args"), dict) else [],
+                                              "timestamp": datetime.now(timezone.utc).isoformat()})
+    job["hitl_pending"] = None
+    job["status"] = "queued"
+    _save_job(job)
+    _enqueue_job(job_id)
+    return {"job_id": job_id, "status": "resumed", "action": req.action, "from_phase": phase}
