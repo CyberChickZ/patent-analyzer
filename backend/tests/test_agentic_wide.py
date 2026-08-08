@@ -27,3 +27,13 @@ def test_wide_queries_orders_core_first_then_other_named_and_caps():
     assert [(q["candidate"], q["kind"]) for q in qs] == [
         ("inv1", "thing+place"), ("inv1", "thing"), ("inv2", "named"), ("inv2", "named+thing"), ("inv3", "named")]
     assert len({q["query"] for q in qs}) == 5
+
+
+def test_queries_record_facets_used_and_source_elements():
+    cand = {"id": "inv1", "elements": [
+        {"id": "inv1.e0", "facets": {"named": ["icg"], "thing": ["perfusion map"], "place": []}},
+        {"id": "inv1.e1", "facets": {"named": [], "thing": ["tissue perfusion"], "place": ["hindlimb"]}}]}
+    qs = candidate_queries(cand)
+    assert qs[0]["facets_used"] == {"named": ["icg"]} and qs[0]["elements"] == ["inv1.e0"]
+    assert qs[1]["facets_used"] == {"named": ["icg"], "thing": ["perfusion map", "tissue perfusion"]} and qs[1]["elements"] == ["inv1.e0", "inv1.e1"]
+    assert qs[2]["kind"] == "thing+place" and qs[2]["facets_used"]["place"] == ["hindlimb"]

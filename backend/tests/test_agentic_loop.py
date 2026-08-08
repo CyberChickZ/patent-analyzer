@@ -153,6 +153,7 @@ def test_expand_light_uses_narrow_lookup_beyond_the_head(monkeypatch):
     monkeypatch.setattr(E, "fetch_citations", fake_cits)
     out, info = asyncio.run(E.expand(["S1"], set(), max_cited=2000, before="20110101", light=True))
     assert light[0] == ["S1"] and heavy[0] == ["C0", "C1"] and sorted(light[1]) == ["C2", "C3", "C4"]
+    assert info["cited_by_seed"] == {"S1": ["C0", "C1", "C2", "C3", "C4"]}
     assert len(out) == 5 and info["cited_light"] == 3
     assert {c.pub_num: bool(c.abstract) for c in out} == {"C0": True, "C1": True, "C2": False, "C3": False, "C4": False}
 
@@ -190,4 +191,8 @@ def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
     assert seen["light"] and seen["max_cited"] == L.MAX_CITED_LIGHT and seen["before"] == "20110202"
     pubs = {c.pub_num for c in cands}
     assert "US7" in pubs and "US2099" not in pubs and stats["mode"] == "wide"
+    q0 = stats["rounds"][0]["queries"][0]
+    assert q0["n"] == 1 and len(q0["pubs"]) == 2 and q0["new"] == 2 and q0["facets_used"] == {"named": ["soluble adenylyl cyclase", "sac"]}
+    assert stats["rounds"][0]["queries"][1]["new"] == 1   # US2099 repeats, one fresh hit
+    assert stats["rounds"][0]["expanded_pubs"] == ["US7"]
     assert [c["id"] for c in stats["candidates"]] == ["inv1", "inv2"] and events == ["round_done"]

@@ -52,6 +52,7 @@ async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CIT
 
     cits = await fetch_citations(seeds)
     cited = Counter()
+    by_seed: dict[str, list[str]] = {}
     for s, c in cits.items():
         for x in c.get("cits", []):
             pub = _canon(x.get("cited", ""))
@@ -59,9 +60,14 @@ async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CIT
                 continue
             weight = 2 if "SEA" in (x.get("category") or "") else 1
             cited[pub] += weight
+            by_seed.setdefault(_canon(s), []).append(pub)
     info["cited_total"] = len(cited)
     new = [p for p, _ in cited.most_common() if p not in known and p not in meta][:max_cited]
     info["cited_new"] = len(new)
+    kept = set(new)
+    # which seed brought which kept document (ids only; the funnel joins them to gold)
+    info["cited_by_seed"] = {s: [p for p in dict.fromkeys(ps) if p in kept] for s, ps in by_seed.items()}
+    info["cited_by_seed"] = {s: ps for s, ps in info["cited_by_seed"].items() if ps}
     if not new:
         return [], info
     if light and len(new) > FULL_META_HEAD:

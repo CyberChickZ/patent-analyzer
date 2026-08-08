@@ -101,16 +101,23 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
     pool: dict[str, Candidate] = {}
     log = []
     seeds: list[str] = []
-    for q in queries:
+    for i, q in enumerate(queries, 1):
         hits, total, chan = await _search(q["query"], before, budget, num=100, scholar=True)
-        log.append({"candidate": q["candidate"], "kind": q["kind"], "query": q["query"][:200],
-                    "channel": chan, "total": total, "hits": len(hits)})
+        returned, new_keys = [], []
         for c in hits:
             c.raw.setdefault("loop", {})["candidate"] = q["candidate"]
             key = (c.pub_num or c.title).upper()
-            pool.setdefault(key, c)
+            returned.append(c.pub_num or c.title[:80])
+            if key not in pool:
+                pool[key] = c
+                new_keys.append(c.pub_num or c.title[:80])
             if c.pub_num and c.match_type == "Patent":
                 seeds.append(c.pub_num)
+        log.append({"n": i, "candidate": q["candidate"], "kind": q["kind"], "query": q["query"],
+                    "facets_used": q.get("facets_used", {}), "elements": q.get("elements", []),
+                    "channel": chan, "total": total, "hits": len(hits), "new": len(new_keys),
+                    "papers": sum(1 for c in hits if c.match_type != "Patent"),
+                    "pubs": returned, "new_pubs": new_keys})
     seeds = list(dict.fromkeys(seeds))
     expanded, info = await expand(seeds, set(pool), max_cited=MAX_CITED_LIGHT, before=cutoff, light=True) if seeds else ([], {})
     dropped = set(info.get("seeds_after_cutoff") or [])
@@ -123,6 +130,7 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
              "serpapi_calls": budget.serp_calls, "gp_blocked": budget.gp_blocked,
              "seeds": len(seeds), "seeds_after_cutoff": sorted(dropped), "expanded": len(expanded),
              "cited_total": info.get("cited_total", 0), "cited_light": info.get("cited_light", 0),
+             "cited_by_seed": info.get("cited_by_seed", {}), "expanded_pubs": sorted((c.pub_num or c.title).upper() for c in expanded),
              "pool_size": len(pool), "queries": log, "pool_pubs": sorted(pool), "seed_pubs": sorted(set(seeds) - dropped),
              "covered": [], "uncovered": [], "cpc_hint": next(iter(info.get("cpc_subclasses") or {}), None),
              "ts": datetime.now(timezone.utc).isoformat()}
