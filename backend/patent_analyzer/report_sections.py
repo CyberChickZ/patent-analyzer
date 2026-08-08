@@ -94,6 +94,7 @@ def loop_html(search_stats: dict | None) -> str:
                    f'<td>{r.get("seeds")}</td><td>+{r.get("expanded")}</td><td>{r.get("pool_size")}</td>'
                    f'<td>{len(r.get("covered") or [])}/{n}</td><td>{_e(r.get("cpc_hint") or "")}</td></tr>')
     out.append("</tbody></table>")
+    out.append(queries_html(search_stats))
     last = rounds[-1]
     unc = last.get("uncovered") or []
     if unc:
@@ -108,6 +109,63 @@ def loop_html(search_stats: dict | None) -> str:
     return "\n".join(out)
 
 
+_KIND_NOTE = {
+    "named": "the element's distinctive names only (chemical / organism / product names, acronym OR expansion)",
+    "named+thing": "distinctive names AND the 'what it is' forms",
+    "thing+place": "'what it is' forms AND 'where it operates' forms",
+    "thing": "'what it is' forms only",
+    "strict": "names ∧ thing ∧ place ∧ apparatus", "loose": "thing ∧ place", "core": "thing only",
+}
+
+
+def _query_explainer(q: dict) -> str:
+    fu = q.get("facets_used") or {}
+    parts = []
+    for k in ("named", "thing", "place", "apparatus"):
+        if fu.get(k):
+            parts.append(f"{k}: " + ", ".join(fu[k][:8]))
+    src = "; ".join(parts)
+    els = ", ".join(q.get("elements") or [])
+    note = _KIND_NOTE.get(q.get("kind") or q.get("mode") or "", "")
+    return " · ".join(x for x in (note, f"from elements {els}" if els else "", src) if x)
+
+
+def queries_html(search_stats: dict | None) -> str:
+    """Every query the loop issued: how it was built, what came back, what
+    survived to the final list. Google syntax: space = AND, OR, parentheses,
+    \"phrase\" = exact, unquoted words are stemmed; a form in its own
+    parentheses only has to co-occur in the document."""
+    rounds = (search_stats or {}).get("loop_rounds") or []
+    qs = [q for r in rounds for q in (r.get("queries") or [])]
+    if not qs:
+        return ""
+    fd = {d.get("pub_num"): d for d in (search_stats or {}).get("funnel_docs") or [] if d.get("pub_num")}
+    pruned = {p.get("pub_num") for p in (search_stats or {}).get("pruned") or []}
+    out = ['<div class="sec-b" style="margin-top:.6rem"><b>Every query</b> (space = AND, OR, "phrase" = exact; unquoted words are stemmed by Google; '
+           'a multi-word form in parentheses only has to co-occur in the document):</div>',
+           '<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>#</th><th>Kind</th><th>Query</th><th>Built from</th>'
+           '<th>Total on Google</th><th>Taken</th><th>New</th><th>Kept after screen</th><th>In final top-30</th></tr></thead><tbody>']
+    for i, q in enumerate(qs, 1):
+        pubs = q.get("pubs") or []
+        kept = sum(1 for p in pubs if p in pruned)
+        top = sum(1 for p in pubs if (fd.get(p) or {}).get("rank"))
+        out.append(f'<tr><td>{q.get("n") or i}</td><td>{_e(q.get("kind") or q.get("mode") or "")}</td>'
+                   f'<td><code>{_e((q.get("query") or "")[:220])}</code></td><td>{_e(_query_explainer(q))}</td>'
+                   f'<td>{q.get("total") if q.get("total") is not None else "?"}</td><td>{q.get("hits")}</td>'
+                   f'<td>{q.get("new") if q.get("new") is not None else "–"}</td><td>{kept if pubs else "–"}</td><td>{top if pubs else "–"}</td></tr>')
+    out.append("</tbody></table></div>")
+    r0 = rounds[0]
+    if r0.get("cited_total") is not None:
+        out.append(f'<div class="sec-note">Citation expansion: {r0.get("seeds")} seed patents → {r0.get("cited_total")} distinct cited documents, '
+                   f'{r0.get("expanded")} taken (most-cited first; priority date before the cutoff).</div>')
+    pr = (search_stats or {}).get("prune") or {}
+    if pr:
+        out.append(f'<div class="sec-note">Screen: pool {pr.get("pool")} → embedding shortlist {pr.get("stage1_out")} '
+                   f'(top-100 per element) → LLM read {pr.get("stage2_in")} abstracts in {pr.get("stage2_calls")} calls, '
+                   f'{pr.get("stage2_worth")} judged worth reading, {pr.get("stage2_out")} kept for full evaluation.</div>')
+    return "\n".join(out)
+
+
 def loop_md(search_stats: dict | None) -> list[str]:
     rounds = (search_stats or {}).get("loop_rounds") or []
     n = len((search_stats or {}).get("loop_elements") or [])
@@ -119,6 +177,16 @@ def loop_md(search_stats: dict | None) -> list[str]:
         lines.append(f"| {r.get('round')} | {r.get('n_queries')} | {r.get('gp_calls')} | {r.get('serpapi_calls')} | "
                      f"{r.get('seeds')} | +{r.get('expanded')} | {r.get('pool_size')} | {len(r.get('covered') or [])}/{n} |")
     lines.append("")
+    qs = [q for r in rounds for q in (r.get("queries") or [])]
+    if qs:
+        pruned = {p.get("pub_num") for p in (search_stats or {}).get("pruned") or []}
+        lines += ["| # | Kind | Query | Built from | Total | Taken | New | Kept after screen |", "|---|---|---|---|---|---|---|---|"]
+        for i, q in enumerate(qs, 1):
+            pubs = q.get("pubs") or []
+            lines.append(f"| {q.get('n') or i} | {q.get('kind') or q.get('mode') or ''} | `{(q.get('query') or '')[:160]}` | "
+                         f"{_query_explainer(q)} | {q.get('total') if q.get('total') is not None else '?'} | {q.get('hits')} | "
+                         f"{q.get('new') if q.get('new') is not None else '–'} | {sum(1 for p in pubs if p in pruned) if pubs else '–'} |")
+        lines.append("")
     return lines
 
 

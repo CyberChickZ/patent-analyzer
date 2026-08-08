@@ -39,3 +39,23 @@ def test_inject_after_summary_and_md_before_assessment():
     md = inject_md("## Invention Summary\n\nS\n\n## Novelty Assessment\n\nN\n", EXT, STATS, SR, CL)
     assert md.index("## Candidate Inventions") < md.index("## Novelty Assessment")
     assert "| 1 | 3 | 0 | 3 | 5 | +9 | 14 | 1/2 |" in "\n".join(loop_md(STATS))
+
+
+def test_every_query_table_explains_how_each_query_was_built():
+    from patent_analyzer.report_sections import loop_html, queries_html
+    stats = {"loop_rounds": [{"round": 1, "mode": "wide", "n_queries": 2, "gp_calls": 0, "serpapi_calls": 2, "seeds": 3, "expanded": 4,
+                              "cited_total": 40, "pool_size": 9, "covered": [], "uncovered": [], "queries": [
+                                  {"n": 1, "kind": "named", "query": '("indocyanine green" OR icg)', "facets_used": {"named": ["indocyanine green", "icg"]},
+                                   "elements": ["inv1.e1"], "channel": "serpapi_patents", "total": 3777, "hits": 100, "new": 100, "pubs": ["US1", "US2"]},
+                                  {"n": 2, "kind": "thing+place", "query": "((perfusion map)) hindlimb", "facets_used": {"thing": ["perfusion map"], "place": ["hindlimb"]},
+                                   "elements": ["inv1.e0", "inv1.e1"], "channel": "serpapi_patents", "total": 120000, "hits": 100, "new": 40, "pubs": ["US2", "US3"]}]}],
+             "loop_elements": [{"id": "inv1.e0", "text": "a"}, {"id": "inv1.e1", "text": "b"}],
+             "pruned": [{"pub_num": "US2"}], "funnel_docs": [{"pub_num": "US2", "rank": 3}],
+             "prune": {"pool": 9, "stage1_out": 5, "stage2_in": 5, "stage2_calls": 1, "stage2_worth": 2, "stage2_out": 1}}
+    h = queries_html(stats)
+    assert "indocyanine green" in h and "distinctive names only" in h and "from elements inv1.e1" in h
+    assert "<td>3777</td><td>100</td><td>100</td><td>1</td><td>1</td>" in h and "<td>120000</td><td>100</td><td>40</td><td>1</td><td>1</td>" in h
+    assert "3 seed patents → 40 distinct cited" in h and "LLM read 5 abstracts in 1 calls" in h
+    assert h in loop_html(stats)
+    md = "\n".join(loop_md(stats))
+    assert "| 1 | named | `(\"indocyanine green\" OR icg)` |" in md and "thing: perfusion map" in md
