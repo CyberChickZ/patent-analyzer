@@ -231,6 +231,8 @@ async def run_pipeline_one(key: str, g: dict) -> dict:
                          for d in p3.get("ranked_candidates", [])]
         rec["pool"] = (p3.get("search_stats") or {}).get("pool", [])
         rec["pruned"] = (p3.get("search_stats") or {}).get("pruned", [])
+        rec["funnel_docs"] = (p3.get("search_stats") or {}).get("funnel_docs", [])
+        rec["loop_elements"] = (p3.get("search_stats") or {}).get("loop_elements", [])
         rec["prune"] = (p3.get("search_stats") or {}).get("prune", {})
         rec["loop_mode"] = (p3.get("search_stats") or {}).get("loop_mode", "")
         rec["events"] = [e.get("message", "") for e in p3.get("events", [])
