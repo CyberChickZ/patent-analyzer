@@ -246,3 +246,61 @@ async def resume_job(job_id: str, req: ResumeRequest):
     _save_job(job)
     _enqueue_job(job_id)
     return {"job_id": job_id, "status": "resumed", "action": req.action, "from_phase": phase}
+
+
+# ─── Prompt registry ───────────────────────────────────────────────────────
+#
+# GET /prompts            → names, current version, version count
+# GET /prompts/{name}     → default text + every saved version
+# PUT /prompts/{name}     → {"text": ..., "by": ..., "make_current": true} → new version
+# PUT /prompts/{name}/current → {"version": n}
+
+from app import prompts as _prompts  # noqa: E402
+import app.llm  # noqa: E402,F401  (registers the default prompt templates)
+
+
+@router.get("/prompts")
+async def list_prompts():
+    out = []
+    for n in _prompts.names():
+        d = _prompts.describe(n)
+        out.append({"name": n, "current": d["current"], "n_versions": len(d["versions"])})
+    return out
+
+
+@router.get("/prompts/{name}")
+async def get_prompt(name: str):
+    try:
+        return _prompts.describe(name)
+    except KeyError:
+        raise HTTPException(404, f"unknown prompt {name}; known: {_prompts.names()}")
+
+
+class PromptPut(BaseModel):
+    text: str
+    by: str = ""
+    make_current: bool = True
+
+
+@router.put("/prompts/{name}")
+async def put_prompt(name: str, req: PromptPut):
+    if not req.text.strip():
+        raise HTTPException(400, "empty prompt")
+    try:
+        v = _prompts.put(name, req.text, by=req.by, make_current=req.make_current)
+    except KeyError:
+        raise HTTPException(404, f"unknown prompt {name}")
+    return {"name": name, "version": v, "current": _prompts.describe(name)["current"]}
+
+
+class PromptCurrent(BaseModel):
+    version: int
+
+
+@router.put("/prompts/{name}/current")
+async def set_prompt_current(name: str, req: PromptCurrent):
+    try:
+        _prompts.set_current(name, req.version)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    return {"name": name, "current": req.version}

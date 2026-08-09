@@ -21,6 +21,14 @@ def _save_to_gcs(job_id: str, blob_suffix: str, content: str, content_type: str)
         pass
 
 
+def _used_prompt_versions() -> dict:
+    try:
+        from app import prompts
+        return prompts.used_versions()
+    except Exception:
+        return {}
+
+
 async def report_node(state: GraphState) -> dict:
     """Phase 5: compile results, generate report, upload."""
     from patent_analyzer.report_generator import generate_html, generate_markdown
@@ -73,7 +81,7 @@ async def report_node(state: GraphState) -> dict:
         "extraction": state.get("extraction", {}),
         "eval_stats": state.get("eval_stats", {}),
         "user_edits": state.get("user_edits", []),           # reviewer changes at the phase gates
-        "prompt_versions": state.get("prompt_versions", {}),
+        "prompt_versions": {**_used_prompt_versions(), **(state.get("prompt_versions") or {})},
         "adjudication": state.get("adjudication") or (state.get("eval_stats") or {}).get("adjudication") or {},
         "evaluation": {
             "scoring_report": scoring_report,

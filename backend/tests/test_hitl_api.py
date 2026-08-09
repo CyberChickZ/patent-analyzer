@@ -52,3 +52,19 @@ def test_resume_rerun_phase_sets_replay_and_prompt_overrides(monkeypatch):
     r = c.post("/api/jobs/j1/resume", json={"action": "rerun_phase", "prompt_overrides": {"extract.elements": 3}})
     assert r.status_code == 200 and job["_replay_from"] == "extract" and job["prompt_overrides"] == {"extract.elements": 3}
     assert c.post("/api/jobs/j1/resume", json={"action": "continue"}).status_code == 400
+
+
+def test_prompt_endpoints_list_get_put(monkeypatch, tmp_path):
+    from app import prompts
+    monkeypatch.setattr(prompts, "PROMPT_DIR", tmp_path)
+    monkeypatch.setattr(prompts, "_store", None)
+    prompts._cache.clear()
+    c = _client(monkeypatch, _paused_job())
+    names = [p["name"] for p in c.get("/api/prompts").json()]
+    assert "extract.elements" in names and "search.facets" in names
+    r = c.put("/api/prompts/search.facets", json={"text": "NEW {listing} {summary}", "by": "harry"}).json()
+    assert r["version"] == 1 and r["current"] == 1
+    d = c.get("/api/prompts/search.facets").json()
+    assert d["current"] == 1 and d["versions"][0]["text"].startswith("NEW") and "{listing}" in d["default"]
+    assert c.put("/api/prompts/search.facets/current", json={"version": 0}).json()["current"] == 0
+    assert c.get("/api/prompts/nope").status_code == 404

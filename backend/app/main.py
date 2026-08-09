@@ -200,6 +200,8 @@ async def _run_langgraph_pipeline(job_id: str):
         mode = "start"
 
     print(f"[LANGGRAPH] job {job_id} mode={mode} pause_after={pause_after}")
+    from app import prompts as _prompts
+    _prompts.set_overrides(job.get("prompt_overrides") or {})
     job["status"] = "running"
     job["paused_at"] = ""
     job["hitl_pending"] = None
@@ -257,6 +259,7 @@ async def _run_langgraph_pipeline(job_id: str):
         except Exception:
             values = {}
         job["_hitl_saved_state"] = {k: values[k] for k in _SNAPSHOT_KEYS if k in values}
+        job.setdefault("prompt_versions", {}).update(_prompts.used_versions())
         job["status"] = "waiting_for_hitl"
         job["paused_at"] = phase
         # HumanInterrupt plus the legacy fields the current frontend form reads
@@ -279,6 +282,7 @@ async def _run_langgraph_pipeline(job_id: str):
     job["phase"] = final_state.get("phase", "phase5")
     if final_state.get("error"):
         job["error"] = final_state["error"]
+    job.setdefault("prompt_versions", {}).update(_prompts.used_versions())
     job.pop("_hitl_saved_state", None)
     _save_job(job)
 
