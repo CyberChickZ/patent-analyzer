@@ -107,8 +107,8 @@ def _checkpointer():
     restarts. The job record keeps a whitelist snapshot as the fallback."""
     global _checkpointer_singleton
     if _checkpointer_singleton is None:
-        from langgraph.checkpoint.memory import MemorySaver
-        _checkpointer_singleton = MemorySaver()
+        from patent_analyzer.checkpoint_store import make_checkpointer
+        _checkpointer_singleton = make_checkpointer()
     return _checkpointer_singleton
 
 
