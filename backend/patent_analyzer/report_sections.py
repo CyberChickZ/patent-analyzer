@@ -46,6 +46,8 @@ def extraction_html(extraction: dict | None) -> str:
             where = ", ".join(f"{k} {v}" for k, v in loc.items() if v not in (None, "", [])) if isinstance(loc, dict) else _e(loc)
             style = ' style="opacity:.55"' if e.get("unsupported") else ""
             flag = ' <span class="badge" style="background:#fee2e2;color:#991b1b">unsupported</span>' if e.get("unsupported") else ""
+            if e.get("edited_by_user"):
+                flag += ' <span class="badge" style="background:#fef3c7;color:#92400e">edited by reviewer</span>'
             out.append(f'<tr{style}><td>{_e(e.get("id", ""))}</td><td>{_e(e.get("text", ""))}{flag}</td>'
                        f'<td><q>{_e(e.get("evidence_quote", ""))}</q></td><td>{_e(where)}</td></tr>')
         out.append("</tbody></table></details>")
@@ -68,7 +70,7 @@ def extraction_md(extraction: dict | None) -> list[str]:
         for e in c.get("elements") or []:
             loc = e.get("evidence_loc") or {}
             where = ", ".join(f"{k} {v}" for k, v in loc.items() if v not in (None, "", [])) if isinstance(loc, dict) else str(loc)
-            tag = " _(unsupported)_" if e.get("unsupported") else ""
+            tag = (" _(unsupported)_" if e.get("unsupported") else "") + (" _(edited by reviewer)_" if e.get("edited_by_user") else "")
             lines.append(f"| {e.get('id', '')} | {e.get('text', '')}{tag} | {e.get('evidence_quote', '')} | {where} |")
         lines.append("")
     return lines

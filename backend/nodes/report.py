@@ -72,6 +72,8 @@ async def report_node(state: GraphState) -> dict:
         },
         "extraction": state.get("extraction", {}),
         "eval_stats": state.get("eval_stats", {}),
+        "user_edits": state.get("user_edits", []),           # reviewer changes at the phase gates
+        "prompt_versions": state.get("prompt_versions", {}),
         "adjudication": state.get("adjudication") or (state.get("eval_stats") or {}).get("adjudication") or {},
         "evaluation": {
             "scoring_report": scoring_report,
@@ -88,6 +90,11 @@ async def report_node(state: GraphState) -> dict:
     results_str = json.dumps(results, indent=2, ensure_ascii=False, default=str)
     (job_dir / "results.json").write_text(results_str)
     _save_to_gcs(job_id, "results.json", results_str, "application/json")
+    if state.get("user_edits"):
+        # reviewer changes alone, in the evals' element/doc vocabulary (future training / agreement data)
+        edits_str = json.dumps(state["user_edits"], indent=2, ensure_ascii=False, default=str)
+        (job_dir / "user_edits.json").write_text(edits_str)
+        _save_to_gcs(job_id, "user_edits.json", edits_str, "application/json")
 
     from patent_analyzer.report_sections import inject_html, inject_md
     html = inject_html(generate_html(results), results["extraction"], results["search"]["summary"],

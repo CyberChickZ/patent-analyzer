@@ -59,3 +59,11 @@ def test_every_query_table_explains_how_each_query_was_built():
     assert h in loop_html(stats)
     md = "\n".join(loop_md(stats))
     assert "| 1 | named | `(\"indocyanine green\" OR icg)` |" in md and "thing: perfusion map" in md
+
+
+def test_reviewer_edits_are_marked_in_extraction_sections():
+    from patent_analyzer.report_sections import extraction_md
+    import copy
+    ext = copy.deepcopy(EXT)
+    ext["candidate_inventions"][0]["elements"][0]["edited_by_user"] = True
+    assert "edited by reviewer" in extraction_html(ext) and "_(edited by reviewer)_" in "\n".join(extraction_md(ext))
