@@ -97,7 +97,10 @@ async def _get(client: httpx.AsyncClient, url: str, params: dict | None = None,
             resp = await client.get(url, params=params, headers=_headers(), timeout=TIMEOUT)
             if resp.status_code == 429:
                 last_err = "HTTP 429 (Semantic Scholar rate limited)"
-                # Anonymous rate limit is 100 req / 5min — back off generously
+                # Anonymous rate limit is 100 req / 5min — back off, but bounded
+                # (S2_429_MAX_RETRIES, default 1): a wide search has many queries
+                if i + 1 >= int(os.environ.get("S2_429_MAX_RETRIES", "1")):
+                    return None, last_err
                 await asyncio.sleep(5 + i * 10)
                 continue
             if resp.status_code == 404:

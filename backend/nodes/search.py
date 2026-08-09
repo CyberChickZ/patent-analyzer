@@ -161,9 +161,12 @@ async def search_node(state: GraphState) -> dict:
                 out.append(" ".join(names + things)[:200])
             if things and places:
                 out.append(" ".join(things + places)[:200])
-        return list(dict.fromkeys(q for q in out if q.strip()))[:9]
+        return list(dict.fromkeys(q for q in out if q.strip()))[:int(os.environ.get("PAPER_QUERIES_MAX", "5"))]
 
     async def run_semantic_scholar():
+        # S2 free tier 429s under bursts; each 429 costs up to 80 s of backoff in
+        # ch_ss._get, so the wide queries are capped (PAPER_QUERIES_MAX) and a
+        # rate-limited query is not retried here
         out, errs = [], []
         for q in _paper_queries():
             cands, err = await ch_ss.search(q, limit=50)
