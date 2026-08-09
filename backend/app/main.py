@@ -544,7 +544,7 @@ async def get_status(job_id: str, user: dict | None = Depends(optional_auth)):
     # Cross-instance reconciliation: if Phase 5 already wrote the report to GCS,
     # the pipeline finished on another Cloud Run instance — this instance's
     # in-memory view is stale. Trust the GCS artifact, not the heartbeat.
-    response = dict(job)
+    response = {k: v for k, v in job.items() if not k.startswith("_")}   # _hitl_saved_state etc. stay server-side
     if job.get("status") == "queued":
         pos = _queue_position(job_id)
         if pos is not None:
