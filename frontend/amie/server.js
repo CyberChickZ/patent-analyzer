@@ -243,6 +243,37 @@ app.post("/api/hitl-revise/:jobId", async (req, res) => {
   }
 });
 
+// Phase-level pause / edit / resume (graph gates)
+app.get("/api/jobs/:jobId/state", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(`/api/jobs/${encodeURIComponent(req.params.jobId)}/state`, { firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) {
+    console.error("Error in GET /api/jobs/:id/state:", e);
+    res.status(500).json({ error: "Proxy error" });
+  }
+});
+
+app.patch("/api/jobs/:jobId/state", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(`/api/jobs/${encodeURIComponent(req.params.jobId)}/state`, { method: "PATCH", data: req.body, firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) {
+    console.error("Error in PATCH /api/jobs/:id/state:", e);
+    res.status(500).json({ error: "Proxy error" });
+  }
+});
+
+app.post("/api/jobs/:jobId/resume", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(`/api/jobs/${encodeURIComponent(req.params.jobId)}/resume`, { method: "POST", data: req.body, firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) {
+    console.error("Error in POST /api/jobs/:id/resume:", e);
+    res.status(500).json({ error: "Proxy error" });
+  }
+});
+
 // Get report HTML
 app.get("/api/report/:jobId", async (req, res) => {
   try {

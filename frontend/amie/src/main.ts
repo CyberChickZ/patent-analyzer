@@ -734,9 +734,13 @@ async function mountPhasePanel(phasesEl: HTMLElement, jobId: string) {
   } else if (phase === "extract") {
     const cands: any[] = (v.extraction && v.extraction.candidate_inventions) || [];
     if (cands.length) {
-      body = cands.map((c: any) => `<h4>${esc(c.id)} · ${esc(c.level)} — ${esc((c.concept || "").slice(0, 160))}</h4>
-        <table class="tbl"><thead><tr><th>Element</th><th>Text</th><th>Evidence</th></tr></thead><tbody>` +
-        (c.elements || []).map((e: any) => `<tr><td>${esc(e.id)}</td><td>${esc(e.text)}</td><td class="hitl-quote">${esc((e.evidence_quote || "").slice(0, 160))}${e.unsupported ? " <em>(unsupported)</em>" : ""}</td></tr>`).join("") +
+      body = cands.map((c: any, ci: number) => `<h4>${esc(c.id)} · ${esc(c.level)} — ${esc((c.concept || "").slice(0, 160))}
+          <label class="hitl-hint"><input type="checkbox" class="hitl-keep-cand" data-ci="${ci}" checked> keep candidate</label></h4>
+        <table class="tbl"><thead><tr><th>Element</th><th>Text (editable)</th><th>Evidence</th><th>Keep</th></tr></thead><tbody>` +
+        (c.elements || []).map((e: any, ei: number) => `<tr><td>${esc(e.id)}</td>
+          <td><textarea class="hitl-el" data-ci="${ci}" data-ei="${ei}" rows="2">${esc(e.text)}</textarea></td>
+          <td class="hitl-quote">${esc((e.evidence_quote || "").slice(0, 160))}${e.unsupported ? " <em>(unsupported)</em>" : ""}</td>
+          <td><input type="checkbox" class="hitl-keep-el" data-ci="${ci}" data-ei="${ei}" checked></td></tr>`).join("") +
         `</tbody></table>`).join("");
     } else {
       const cl: any[] = v.checklist || [];
@@ -747,20 +751,20 @@ async function mountPhasePanel(phasesEl: HTMLElement, jobId: string) {
     const qs: any[] = (st.context && st.context.queries) || [];
     body = `<h4>Queries (${qs.length})</h4><table class="tbl"><thead><tr><th>#</th><th>Kind</th><th>Query</th><th>Total</th><th>Taken</th><th>New</th></tr></thead><tbody>` +
       qs.map((q: any, i: number) => `<tr><td>${q.n || i + 1}</td><td>${esc(q.kind || q.mode)}</td><td><code>${esc((q.query || "").slice(0, 160))}</code></td><td>${q.total ?? "?"}</td><td>${q.hits ?? ""}</td><td>${q.new ?? ""}</td></tr>`).join("") +
-      `</tbody></table><h4>Candidates going to evaluation (${ranked.length})</h4><table class="tbl"><thead><tr><th>#</th><th>Pub</th><th>Title</th><th>Sources</th></tr></thead><tbody>` +
-      ranked.map((d: any, i: number) => `<tr><td>${i + 1}</td><td>${esc(d.pub_num)}</td><td>${esc((d.title || "").slice(0, 110))}</td><td>${esc((d.sources || []).join(", "))}</td></tr>`).join("") + `</tbody></table>`;
+      `</tbody></table><h4>Candidates going to evaluation (${ranked.length}) — untick to drop</h4><table class="tbl"><thead><tr><th>#</th><th>Pub</th><th>Title</th><th>Sources</th><th>Keep</th></tr></thead><tbody>` +
+      ranked.map((d: any, i: number) => `<tr><td>${i + 1}</td><td>${esc(d.pub_num)}</td><td>${esc((d.title || "").slice(0, 110))}</td><td>${esc((d.sources || []).join(", "))}</td><td><input type="checkbox" class="hitl-keep-doc" data-i="${i}" checked></td></tr>`).join("") + `</tbody></table>`;
   } else if (phase === "evaluate") {
     const sr: any[] = v.scoring_report || [];
-    body = `<h4>Evaluated documents (${sr.length})</h4><table class="tbl"><thead><tr><th>#</th><th>Pub</th><th>Title</th><th>Score</th><th>Elements matched</th></tr></thead><tbody>` +
+    body = `<h4>Evaluated documents (${sr.length}) — untick to drop from the report</h4><table class="tbl"><thead><tr><th>#</th><th>Pub</th><th>Title</th><th>Score</th><th>Elements matched</th><th>Keep</th></tr></thead><tbody>` +
       sr.map((d: any, i: number) => {
         const cr = d.checklist_results || {};
         const n = Object.values(cr).filter((x: any) => (x && (x.score ?? (x.match ? 2 : 0))) > 0).length;
-        return `<tr><td>${i + 1}</td><td>${esc(d.pub_num)}</td><td>${esc((d.title || "").slice(0, 110))}</td><td>${esc(d.similarity_score ?? d.score ?? "")}</td><td>${n}/${Object.keys(cr).length}</td></tr>`;
+        return `<tr><td>${i + 1}</td><td>${esc(d.pub_num)}</td><td>${esc((d.title || "").slice(0, 110))}</td><td>${esc(d.similarity_score ?? d.score ?? "")}</td><td>${n}/${Object.keys(cr).length}</td><td><input type="checkbox" class="hitl-keep-doc" data-i="${i}" checked></td></tr>`;
       }).join("") + `</tbody></table>`;
   }
 
   div.innerHTML = `
-    <p class="hitl-prompt">Paused after <b>${esc(PAUSE_LABEL[phase] || phase)}</b>. This is what the next phase will receive.</p>
+    <p class="hitl-prompt">Paused after <b>${esc(PAUSE_LABEL[phase] || phase)}</b>. Edit below; what you leave is what the next phase receives. Edits are recorded in the report.</p>
     <div id="hitl-body">${body}</div>
     <div class="hitl-options">
       <button class="btn hitl-submit" id="hitl-continue">Continue</button>
@@ -770,10 +774,46 @@ async function mountPhasePanel(phasesEl: HTMLElement, jobId: string) {
   if (waitingRow) waitingRow.closest(".phase-block")!.after(div); else phasesEl.appendChild(div);
   div.scrollIntoView({ behavior: "smooth", block: "center" });
 
+  // collect the reviewer's edits as whole-value replacements of the phase's editable keys
+  function collectEdits(): Record<string, unknown> {
+    const edits: Record<string, unknown> = {};
+    if (phase === "extract" && v.extraction) {
+      const ext = JSON.parse(JSON.stringify(v.extraction));
+      const cands: any[] = ext.candidate_inventions || [];
+      let changed = false;
+      div.querySelectorAll<HTMLTextAreaElement>("textarea.hitl-el").forEach((ta) => {
+        const c = cands[+ta.dataset.ci!]; const e = c && c.elements[+ta.dataset.ei!];
+        if (e && ta.value.trim() !== e.text) { e.text = ta.value.trim(); changed = true; }
+      });
+      const dropEl = new Set<string>();
+      div.querySelectorAll<HTMLInputElement>("input.hitl-keep-el").forEach((cb) => { if (!cb.checked) dropEl.add(`${cb.dataset.ci}:${cb.dataset.ei}`); });
+      const dropCand = new Set<number>();
+      div.querySelectorAll<HTMLInputElement>("input.hitl-keep-cand").forEach((cb) => { if (!cb.checked) dropCand.add(+cb.dataset.ci!); });
+      if (dropEl.size || dropCand.size) {
+        changed = true;
+        ext.candidate_inventions = cands.map((c: any, ci: number) => ({ ...c, elements: (c.elements || []).filter((_: any, ei: number) => !dropEl.has(`${ci}:${ei}`)) }))
+          .filter((_: any, ci: number) => !dropCand.has(ci));
+      }
+      if (changed) edits.extraction = ext;
+    } else if (phase === "search" || phase === "evaluate") {
+      const key = phase === "search" ? "ranked_candidates" : "scoring_report";
+      const rows: any[] = v[key] || [];
+      const keep = new Set<number>();
+      div.querySelectorAll<HTMLInputElement>("input.hitl-keep-doc").forEach((cb) => { if (cb.checked) keep.add(+cb.dataset.i!); });
+      if (keep.size !== rows.length) edits[key] = rows.filter((_: any, i: number) => keep.has(i));
+    }
+    return edits;
+  }
+
   document.getElementById("hitl-continue")!.addEventListener("click", async () => {
     const btn = document.getElementById("hitl-continue") as HTMLButtonElement;
     btn.disabled = true; btn.textContent = "Resuming...";
     try {
+      const edits = collectEdits();
+      if (Object.keys(edits).length) {
+        const pr = await authFetch(`${API}/api/jobs/${jobId}/state`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(edits) });
+        if (!pr.ok) throw new Error(await pr.text());
+      }
       const r = await authFetch(`${API}/api/jobs/${jobId}/resume`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "continue" }) });
       if (!r.ok) throw new Error(await r.text());
       div.innerHTML = `<div class="hitl-resuming"><span class="badge badge-running">resuming</span> Continuing after ${esc(PAUSE_LABEL[phase] || phase)}...</div>`;
