@@ -23,6 +23,8 @@ from typing import Any, Callable
 
 from google import genai
 from google.genai import types
+
+from app import prompts
 from google.genai.errors import APIError
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
 
@@ -1694,18 +1696,7 @@ TOP MATCHES (sorted by overlap):
     )
 
 
-async def facet_elements(elements: list[dict], summary: str) -> dict[str, dict]:
-    """One call: for each element give search facets in Google Patents
-    vocabulary. Returns {element_id: {thing[], place[], apparatus[]}}.
-    Shape follows patent-search-pilot's measured query craft: 6-14 surface
-    forms per facet, two words max, no generic head nouns, vocabularies
-    from different communities. Full words, not truncated stems: Google
-    Patents stems unquoted keywords itself."""
-    if not elements:
-        return {}
-    listing = "\n".join(f'{e["id"]}: {e["text"]}' for e in elements)
-    system = "You write patent search facets. Output JSON only."
-    prompt = f"""For EACH element below, give four facets of search terms:
+SEARCH_FACETS_PROMPT = prompts.register_default("search.facets", """For EACH element below, give four facets of search terms:
   named     — 0-4 DISTINCTIVE NAMES that identify this element in this document, COPIED as written
               from the element text or the invention context: chemical / biological / material /
               organism / product / algorithm / protocol names. For an acronym give BOTH the acronym
@@ -1721,12 +1712,26 @@ the research term, the term a competitor in another field would use.
 NEVER use words so general they appear in every patent: device, member, element, portion, means, unit, system, method, apparatus, module, component, assembly.
 DROP THE HEAD NOUN: write "sound damping" not "sound damping device". Lowercase. No quotes inside terms.
 
-INVENTION CONTEXT: {summary[:4000]}
+INVENTION CONTEXT: {summary}
 
 ELEMENTS:
 {listing}
 
-JSON output: {{"facets": {{"<element id>": {{"named": [...], "thing": [...], "place": [...], "apparatus": [...]}}, ...}}}}"""
+JSON output: {{"facets": {{"<element id>": {{"named": [...], "thing": [...], "place": [...], "apparatus": [...]}}, ...}}}}""")
+
+
+async def facet_elements(elements: list[dict], summary: str) -> dict[str, dict]:
+    """One call: for each element give search facets in Google Patents
+    vocabulary. Returns {element_id: {thing[], place[], apparatus[]}}.
+    Shape follows patent-search-pilot's measured query craft: 6-14 surface
+    forms per facet, two words max, no generic head nouns, vocabularies
+    from different communities. Full words, not truncated stems: Google
+    Patents stems unquoted keywords itself."""
+    if not elements:
+        return {}
+    listing = "\n".join(f'{e["id"]}: {e["text"]}' for e in elements)
+    system = "You write patent search facets. Output JSON only."
+    prompt = prompts.render("search.facets", summary=summary[:4000], listing=listing)
     try:
         resp = await call_llm(system, prompt, thinking_budget=2048)
         m = re.search(r'\{.*\}', resp, re.DOTALL)
@@ -1749,6 +1754,63 @@ EXTRACTION_LEVELS = ("core", "component", "application")
 EXTRACTION_KINDS = ("structure", "step", "condition", "parameter")
 _EXTRACTION_DOC_CAP = 150_000
 FACET_FORMS_CAP = 10
+EXTRACT_ELEMENTS_PROMPT = prompts.register_default("extract.elements", """════ TASK ════
+For EACH candidate invention below, draft the independent claims and break the method
+claim into elements.
+
+CANDIDATES
+{cand_lines}
+{prefill_block}
+For each candidate output:
+  independent_claim_draft:
+    method — "A method of ..., comprising: ...; ...; and ..."  (one limitation per clause)
+    system — "A <apparatus/system/device> comprising: ...; ...; and ..."
+    Both claims must recite EVERY component and EVERY step the document presents as part
+    of the invention (typically 4-10 limitations), not a two-clause sketch.
+  primary_form — "system" when the contribution is an apparatus / device / composition /
+    structure (the document describes parts and how they are arranged), "method" when it is a
+    process. This is the claim the elements are cut from.
+  elements — the limitations of the PRIMARY claim, in order, one limitation per element:
+    id             — "<candidate id>.e0" for the preamble, then .e1, .e2, ...
+    text           — the limitation in claim language: one structure (with its configured-to
+                     qualifier) or one action. Concatenating the element texts must reproduce
+                     the primary claim.
+    evidence_quote — 10-40 words COPIED verbatim from the DOCUMENT that support this limitation
+    facets         — search vocabulary {{"thing": [...], "place": [...], "apparatus": [...]}},
+                     1-3 short lowercase stems each (thing = what it is; place = where / in
+                     what host it operates; apparatus = the concrete implementation term)
+    kind           — "structure" | "step" | "condition" | "parameter"
+  dependent_hints — 0-4 short refinements that could become dependent claims
+
+RULES
+- COPY the quote verbatim from the document. DO NOT paraphrase. DO NOT stitch words from
+  different sentences. If nothing in the document supports a limitation, leave
+  evidence_quote empty rather than inventing one.
+- One limitation per element. Do not merge two actions into one element; do not split one
+  action into two.
+- Use the document's own terms in element text; no "novel", "improved", "efficient".
+- In facets never use device/member/element/portion/means/unit/system/method/apparatus/
+  module/component; drop the head noun ("sound damp" not "sound damping device").
+- The preamble element (e0) names the subject ("A method of X" / "An apparatus for X") and
+  carries no limitation.
+{feedback_block}
+Output strictly this JSON, no preamble:
+{{"candidate_inventions": [
+  {{"id": "inv1",
+    "independent_claim_draft": {{"method": "...", "system": "..."}},
+    "primary_form": "system",
+    "elements": [
+      {{"id": "inv1.e0", "text": "A method of ...", "evidence_quote": "...",
+        "facets": {{"thing": ["..."], "place": ["..."], "apparatus": ["..."]}}, "kind": "structure"}}
+    ],
+    "dependent_hints": ["..."]}}
+]}}
+
+════ DOCUMENT ════
+```
+{document}
+```""")
+
 _FACET_BANNED = frozenset("device member element portion means unit system method apparatus module component assembly".split())
 
 _DOC_KIND_GUIDANCE = {
@@ -1881,62 +1943,8 @@ as given — same order, same count, same wording — adding only evidence_quote
 and kind for each. Do not rewrite, merge, or split them.
 {listing}
 """
-    prompt = f"""════ TASK ════
-For EACH candidate invention below, draft the independent claims and break the method
-claim into elements.
-
-CANDIDATES
-{cand_lines}
-{prefill_block}
-For each candidate output:
-  independent_claim_draft:
-    method — "A method of ..., comprising: ...; ...; and ..."  (one limitation per clause)
-    system — "A <apparatus/system/device> comprising: ...; ...; and ..."
-    Both claims must recite EVERY component and EVERY step the document presents as part
-    of the invention (typically 4-10 limitations), not a two-clause sketch.
-  primary_form — "system" when the contribution is an apparatus / device / composition /
-    structure (the document describes parts and how they are arranged), "method" when it is a
-    process. This is the claim the elements are cut from.
-  elements — the limitations of the PRIMARY claim, in order, one limitation per element:
-    id             — "<candidate id>.e0" for the preamble, then .e1, .e2, ...
-    text           — the limitation in claim language: one structure (with its configured-to
-                     qualifier) or one action. Concatenating the element texts must reproduce
-                     the primary claim.
-    evidence_quote — 10-40 words COPIED verbatim from the DOCUMENT that support this limitation
-    facets         — search vocabulary {{"thing": [...], "place": [...], "apparatus": [...]}},
-                     1-3 short lowercase stems each (thing = what it is; place = where / in
-                     what host it operates; apparatus = the concrete implementation term)
-    kind           — "structure" | "step" | "condition" | "parameter"
-  dependent_hints — 0-4 short refinements that could become dependent claims
-
-RULES
-- COPY the quote verbatim from the document. DO NOT paraphrase. DO NOT stitch words from
-  different sentences. If nothing in the document supports a limitation, leave
-  evidence_quote empty rather than inventing one.
-- One limitation per element. Do not merge two actions into one element; do not split one
-  action into two.
-- Use the document's own terms in element text; no "novel", "improved", "efficient".
-- In facets never use device/member/element/portion/means/unit/system/method/apparatus/
-  module/component; drop the head noun ("sound damp" not "sound damping device").
-- The preamble element (e0) names the subject ("A method of X" / "An apparatus for X") and
-  carries no limitation.
-{_feedback_block(feedback)}
-Output strictly this JSON, no preamble:
-{{"candidate_inventions": [
-  {{"id": "inv1",
-    "independent_claim_draft": {{"method": "...", "system": "..."}},
-    "primary_form": "system",
-    "elements": [
-      {{"id": "inv1.e0", "text": "A method of ...", "evidence_quote": "...",
-        "facets": {{"thing": ["..."], "place": ["..."], "apparatus": ["..."]}}, "kind": "structure"}}
-    ],
-    "dependent_hints": ["..."]}}
-]}}
-
-════ DOCUMENT ════
-```
-{(doc_text or "")[:_EXTRACTION_DOC_CAP]}
-```"""
+    prompt = prompts.render("extract.elements", cand_lines=cand_lines, prefill_block=prefill_block,
+                            feedback_block=_feedback_block(feedback), document=(doc_text or "")[:_EXTRACTION_DOC_CAP])
     resp = await call_llm(system, prompt, max_tokens=16384, thinking_budget=4096)
     data = _extraction_json(resp)
     if data is None:
