@@ -140,3 +140,28 @@ def test_claim_chart_allow_marks_unverified_cells_as_not_covered():
     assert cell["score"] == 2 and cell["n_verified"] == 0 and not cell["covered"]
     assert ch["uncovered"] == [E[1], E[3]] and ch["docs"][0]["n_covered"] == 1
     assert ch["rows"][2]["covered_by"] == ["B"]
+
+
+def test_explain_obviousness_feeds_the_rule_output_and_only_runs_for_103(monkeypatch):
+    import asyncio
+    import app.llm as llm
+    from patent_analyzer.adjudicate import claim_chart
+    seen = {}
+
+    async def _fake(system, user, **k):
+        seen["system"], seen["user"] = system, user
+        return "Reference 1 supplies the sensor and controller; reference 2 supplies the display.\n\nNothing cuts against it."
+    monkeypatch.setattr(llm, "call_llm", _fake)
+    docs = [_doc("US-1", E[:3]), _doc("US-2", E[2:])]
+    docs[0]["key_teachings"] = "a sensor-driven motor controller"
+    adj = adjudicate(E, docs)
+    ch = claim_chart(adj, E, docs)
+    out = asyncio.run(llm.explain_obviousness(adj, ch, "an invention", docs))
+    assert out.startswith("Reference 1 supplies")
+    u = seen["user"]
+    assert "may NOT change the determination" in u and adj["reason"] in u
+    assert "Reference 1: US-1" in u and "Reference 2: US-2" in u and "sensor-driven motor controller" in u
+    assert f"- {E[3]} [some verbatim text here]" in u and "(none — every element is disclosed" in u
+    seen.clear()
+    adj102 = adjudicate(E, [_doc("US-1", E)])
+    assert asyncio.run(llm.explain_obviousness(adj102, claim_chart(adj102, E, docs), "x", docs)) == "" and not seen

@@ -1696,6 +1696,77 @@ TOP MATCHES (sorted by overlap):
     )
 
 
+OBVIOUSNESS_EXPLAIN_PROMPT = prompts.register_default("report.obviousness_explain", """════ TASK ════
+A deterministic rule has already made the determination below from verified evidence. Your job is
+ONLY to write the examiner-style reasoning for it (MPEP 2143: "there must be some articulated
+reasoning with some rational underpinning"). You may NOT change the determination, add or remove
+references, or claim an element is disclosed when the chart says it is not.
+
+Write 2 short paragraphs of plain prose (no headings, no bullets, no preamble):
+
+1. Why these references, read together, could render the claim obvious: for each reference name the
+   elements it supplies (use the chart), then say whether combining them is "combining prior art
+   elements according to known methods to yield predictable results" (KSR rationale A) — same field,
+   same problem, no change in the elements' respective functions — or whether the gap elements would
+   need a routine modification. Be concrete: name the elements.
+
+2. What cuts against it: whether an articulated reason to combine is missing, whether any reference
+   teaches away or solves a different problem, and which uncovered element (if any) is more than a
+   routine modification. If nothing cuts against it, say so in one sentence.
+
+Never say the invention is or is not patentable / allowable / grantable — this is blocking-risk
+reasoning over the references at hand only.
+
+════ INPUT (rule output) ════
+DETERMINATION: {label_text}
+RULE REASON: {reason}
+
+INVENTION (summary):
+{summary}
+
+REFERENCES AND THE ELEMENTS EACH DISCLOSES (located verbatim quotes in brackets):
+{references}
+
+ELEMENTS NO REFERENCE DISCLOSES:
+{uncovered}""")
+
+
+async def explain_obviousness(adjudication: dict, chart: dict, invention_summary: str,
+                              docs_results: list[dict] | None = None) -> str:
+    """One call: prose reasoning for a §103 determination the rule already
+    made. Input is the rule output (references, per-element coverage,
+    gaps); the model cannot change the label. Returns "" when the label is
+    not "103" or the call fails."""
+    if not adjudication or adjudication.get("label") != "103" or not chart or not chart.get("rows"):
+        return ""
+    teach = {(d.get("pub_num") or d.get("title") or ""): (d.get("key_teachings") or d.get("rs_synopsis") or "")
+             for d in docs_results or [] if isinstance(d, dict)}
+    refs = []
+    for i, d in enumerate(chart["docs"]):
+        lines = [f"Reference {i + 1}: {d.get('pub_num') or ''} {d.get('title') or ''} "
+                 f"(discloses {d.get('n_covered', 0)}/{chart.get('n_elements', 0)} elements)"]
+        if teach.get(d.get("key")):
+            lines.append(f"  What it teaches: {teach[d['key']][:400]}")
+        for r in chart["rows"]:
+            c = r["cells"][i]
+            if c.get("covered"):
+                lines.append(f"  - {r['element']} [{c.get('quote', '')[:200]}]")
+        refs.append("\n".join(lines))
+    label_text = ("combination of the references below" if len(chart["docs"]) >= 2 and (adjudication.get("combo") or {}).get("docs")
+                  else "primary reference below plus a secondary reference or routine modification for the gaps")
+    prompt = prompts.render("report.obviousness_explain",
+                            label_text=f"blocking risk under §103 — {label_text}",
+                            reason=adjudication.get("reason", ""), summary=(invention_summary or "")[:3000],
+                            references="\n\n".join(refs) or "(none)",
+                            uncovered="\n".join(f"- {u}" for u in chart.get("uncovered") or []) or "(none — every element is disclosed by the set)")
+    system = ("You are a US patent examiner writing the reasoning section of an obviousness rejection. "
+              "Plain, specific prose; no legal conclusions about patentability.")
+    try:
+        return (await call_llm(system, prompt, max_tokens=1500)).strip()
+    except Exception:
+        return ""
+
+
 SEARCH_FACETS_PROMPT = prompts.register_default("search.facets", """For EACH element below, give four facets of search terms:
   named     — 0-4 DISTINCTIVE NAMES that identify this element in this document, COPIED as written
               from the element text or the invention context: chemical / biological / material /
