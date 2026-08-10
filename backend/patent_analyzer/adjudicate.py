@@ -156,3 +156,62 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
     return {"label": label, "risk": risk, "reason": reason, "n_elements": n, "needed": needed,
             "best_single": _key(best) if best else "", "best_coverage": best_cov,
             "per_doc_coverage": per_doc, "combo": combo, "params": params}
+
+
+def chart_columns(adj: dict, max_docs: int = 3) -> list[str]:
+    """Which documents the claim chart shows, in order: the references the
+    rule relied on (best single for "102" / partial "103", the greedy combo
+    for a combination "103"), then the next best by coverage, capped."""
+    per = adj.get("per_doc_coverage") or []
+    keys = [d.get("pub_num") or d.get("title") or "" for d in per]
+    combo = adj.get("combo") or {}
+    lead = list(combo.get("docs") or []) if adj.get("label") == "103" and len(combo.get("docs") or []) >= 2 else []
+    if adj.get("best_single") and adj["best_single"] not in lead:
+        lead.append(adj["best_single"])
+    cols = [k for k in lead if k in keys]
+    for k in keys:
+        if len(cols) >= max_docs:
+            break
+        if k and k not in cols:
+            cols.append(k)
+    return cols[:max_docs]
+
+
+def claim_chart(adj: dict, elements: list, docs_results: list[dict], max_docs: int = 3) -> dict:
+    """Examiner-style claim chart from the same evidence the rule used
+    (MPEP 2142: the teachings relied upon, per element, with where they
+    were found). rows = elements in order; columns = chart_columns(adj);
+    cell = {score, n_quotes, n_verified, covered, quote, analysis}."""
+    names = [_criterion(e) for e in elements if _criterion(e)]
+    p = adj.get("params") or {}
+    min_score, require_quotes = int(p.get("min_score", 1)), bool(p.get("require_quotes", True))
+    by_key = {}
+    for d in docs_results or []:
+        if isinstance(d, dict):
+            by_key.setdefault(d.get("pub_num") or d.get("publication_number") or d.get("title") or "", d)
+    per = {(d.get("pub_num") or d.get("title") or ""): d for d in adj.get("per_doc_coverage") or []}
+    cols = chart_columns(adj, max_docs)
+    docs = []
+    for k in cols:
+        src, cov = by_key.get(k) or {}, per.get(k) or {}
+        docs.append({"pub_num": src.get("pub_num") or cov.get("pub_num") or "", "title": src.get("title") or cov.get("title") or k,
+                     "key": k, "n_covered": cov.get("n_covered", 0), "coverage": cov.get("coverage", 0.0),
+                     "url": src.get("patent_link") or src.get("url") or "", "source": src.get("source") or cov.get("source") or ""})
+    rows = []
+    for name in names:
+        cells = []
+        for k in cols:
+            item = ((by_key.get(k) or {}).get("checklist_results") or {}).get(name) or {}
+            score = item.get("score")
+            if score is None:
+                score = 2 if item.get("match") else 0
+            qs = item.get("quote_checks") or []
+            vq = item.get("verified_quotes") or []
+            cells.append({"score": int(score) if isinstance(score, (int, float)) else 0,
+                          "n_quotes": len(qs) if qs else len(item.get("evidence_quotes") or []),
+                          "n_verified": len(vq), "covered": element_covered(item, min_score, require_quotes),
+                          "quote": (vq[0] if vq else (item.get("evidence_quote") or ""))[:300],
+                          "analysis": (item.get("analysis") or "")[:300]})
+        rows.append({"element": name, "cells": cells, "covered_by": [cols[i] for i, c in enumerate(cells) if c["covered"]]})
+    return {"docs": docs, "rows": rows, "n_elements": len(names),
+            "uncovered": [r["element"] for r in rows if not r["covered_by"]]}
