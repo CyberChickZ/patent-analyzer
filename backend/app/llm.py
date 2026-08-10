@@ -1851,16 +1851,7 @@ def _clean_facets(f) -> dict:
     return out
 
 
-async def extract_candidates(doc_text: str, summary: str, doc_kind: str = "paper") -> dict:
-    """A1 — ONE LLM CALL: list 1-4 candidate inventions from the full document.
-
-    Returns {"candidate_inventions": [{id, concept, level, cpc_pred}],
-             "no_invention_reason": None | str}
-    """
-    guidance = _DOC_KIND_GUIDANCE.get(doc_kind, _DOC_KIND_GUIDANCE["paper"])
-    system = ("You are a patent attorney identifying what in a technical document could be "
-              "claimed. Output JSON only.")
-    prompt = f"""════ TASK ════
+EXTRACT_CANDIDATES_PROMPT = prompts.register_default("extract.candidates", """════ TASK ════
 From the DOCUMENT below (use the SUMMARY only as orientation), list 1-4 candidate
 inventions — things that could each be the subject of an independent patent claim.
 Order them core first, then component, then application.
@@ -1885,12 +1876,25 @@ Output strictly this JSON, no preamble:
  "no_invention_reason": null}}
 
 ════ SUMMARY ════
-{(summary or "")[:4000]}
+{summary}
 
 ════ DOCUMENT ════
 ```
-{(doc_text or "")[:_EXTRACTION_DOC_CAP]}
-```"""
+{document}
+```""")
+
+
+async def extract_candidates(doc_text: str, summary: str, doc_kind: str = "paper") -> dict:
+    """A1 — ONE LLM CALL: list 1-4 candidate inventions from the full document.
+
+    Returns {"candidate_inventions": [{id, concept, level, cpc_pred}],
+             "no_invention_reason": None | str}
+    """
+    guidance = _DOC_KIND_GUIDANCE.get(doc_kind, _DOC_KIND_GUIDANCE["paper"])
+    system = ("You are a patent attorney identifying what in a technical document could be "
+              "claimed. Output JSON only.")
+    prompt = prompts.render("extract.candidates", doc_kind=doc_kind, guidance=guidance,
+                            summary=(summary or "")[:4000], document=(doc_text or "")[:_EXTRACTION_DOC_CAP])
     resp = await call_llm(system, prompt, thinking_budget=4096)
     data = _extraction_json(resp) or {}
     out = []

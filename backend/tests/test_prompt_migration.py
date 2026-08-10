@@ -38,3 +38,14 @@ def test_search_facets_template_matches_old_fstring():
     summary, listing = "S" * 5000, "e1: a\ne2: b"
     expected = eval(fs, {"summary": summary, "listing": listing})
     assert prompts.render("search.facets", summary=summary[:4000], listing=listing) == expected
+
+
+def test_extract_candidates_template_matches_old_fstring():
+    src = subprocess.run(["git", "show", f"{OLD_REV}:backend/app/llm.py"], capture_output=True, text=True, cwd=Path(__file__).parent.parent).stdout
+    i = src.index("async def extract_candidates")
+    i = src.index('    prompt = f"""', i)
+    j = src.index('"""', i + 20) + 3
+    fs = src[i:j][len("    prompt = "):]
+    doc_kind, guidance, summary, doc_text = "paper", llm._DOC_KIND_GUIDANCE["paper"], "S" * 5000, "D" * 20
+    expected = eval(fs, {"_EXTRACTION_DOC_CAP": llm._EXTRACTION_DOC_CAP, "doc_kind": doc_kind, "guidance": guidance, "summary": summary, "doc_text": doc_text})
+    assert prompts.render("extract.candidates", doc_kind=doc_kind, guidance=guidance, summary=summary[:4000], document=doc_text) == expected
