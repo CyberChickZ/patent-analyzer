@@ -50,11 +50,11 @@ def test_every_query_table_explains_how_each_query_was_built():
                                   {"n": 2, "kind": "thing+place", "query": "((perfusion map)) hindlimb", "facets_used": {"thing": ["perfusion map"], "place": ["hindlimb"]},
                                    "elements": ["inv1.e0", "inv1.e1"], "channel": "serpapi_patents", "total": 120000, "hits": 100, "new": 40, "pubs": ["US2", "US3"]}]}],
              "loop_elements": [{"id": "inv1.e0", "text": "a"}, {"id": "inv1.e1", "text": "b"}],
-             "pruned": [{"pub_num": "US2"}], "funnel_docs": [{"pub_num": "US2", "rank": 3}],
+             "pruned": [{"pub_num": "US2"}], "funnel_docs": [{"pub_num": "US2", "rank": 3, "elements": ["inv1.e1"]}],
              "prune": {"pool": 9, "stage1_out": 5, "stage2_in": 5, "stage2_calls": 1, "stage2_worth": 2, "stage2_out": 1}}
     h = queries_html(stats)
     assert "indocyanine green" in h and "distinctive names only" in h and "from elements inv1.e1" in h
-    assert "<td>3777</td><td>100</td><td>100</td><td>1</td><td>1</td>" in h and "<td>120000</td><td>100</td><td>40</td><td>1</td><td>1</td>" in h
+    assert "<td>3777</td><td>100</td><td>100</td><td>1</td><td>1</td><td>inv1.e1</td>" in h and "<td>120000</td><td>100</td><td>40</td><td>1</td><td>1</td>" in h
     assert "3 seed patents → 40 distinct cited" in h and "LLM read 5 abstracts in 1 calls" in h
     assert h in loop_html(stats)
     md = "\n".join(loop_md(stats))

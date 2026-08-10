@@ -146,15 +146,17 @@ def queries_html(search_stats: dict | None) -> str:
     out = ['<div class="sec-b" style="margin-top:.6rem"><b>Every query</b> (space = AND, OR, "phrase" = exact; unquoted words are stemmed by Google; '
            'a multi-word form in parentheses only has to co-occur in the document):</div>',
            '<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>#</th><th>Kind</th><th>Query</th><th>Built from</th>'
-           '<th>Total on Google</th><th>Taken</th><th>New</th><th>Kept after screen</th><th>In final top-30</th></tr></thead><tbody>']
+           '<th>Total on Google</th><th>Taken</th><th>New</th><th>Kept after screen</th><th>In final top-30</th><th>Elements its documents touch</th></tr></thead><tbody>']
     for i, q in enumerate(qs, 1):
         pubs = q.get("pubs") or []
         kept = sum(1 for p in pubs if p in pruned)
         top = sum(1 for p in pubs if (fd.get(p) or {}).get("rank"))
+        touched = sorted({e for p in pubs for e in ((fd.get(p) or {}).get("elements") or [])})
         out.append(f'<tr><td>{q.get("n") or i}</td><td>{_e(q.get("kind") or q.get("mode") or "")}</td>'
                    f'<td><code>{_e((q.get("query") or "")[:220])}</code></td><td>{_e(_query_explainer(q))}</td>'
                    f'<td>{q.get("total") if q.get("total") is not None else "?"}</td><td>{q.get("hits")}</td>'
-                   f'<td>{q.get("new") if q.get("new") is not None else "–"}</td><td>{kept if pubs else "–"}</td><td>{top if pubs else "–"}</td></tr>')
+                   f'<td>{q.get("new") if q.get("new") is not None else "–"}</td><td>{kept if pubs else "–"}</td><td>{top if pubs else "–"}</td>'
+                   f'<td>{_e(", ".join(touched)) if touched else "–"}</td></tr>')
     out.append("</tbody></table></div>")
     r0 = rounds[0]
     if r0.get("cited_total") is not None:
