@@ -102,17 +102,23 @@ async def stage2_llm(candidates: list[dict], elements: list[dict], docs: list[di
     ordered by (#elements touched, cosine)."""
     if call is None:
         from app.llm import call_llm as call
+    import asyncio
     system = "You are a patent examiner screening search results. Output JSON only."
     verdict: dict[int, tuple[bool, list[str], str]] = {}
-    calls = 0
-    for start in range(0, len(idxs), batch_size):
-        batch = [(i, docs[i]) for i in idxs[start:start + batch_size]]
-        calls += 1
-        try:
-            resp = await call(system, _batch_prompt(candidates, elements, batch), response_schema=SCREEN_SCHEMA)
-            data = json.loads(resp)
-        except Exception:
-            data = {}
+    batches = [[(i, docs[i]) for i in idxs[start:start + batch_size]] for start in range(0, len(idxs), batch_size)]
+    sem = asyncio.Semaphore(int(os.environ.get("PRUNE_CONCURRENCY", "4")))
+
+    async def _one(batch):
+        async with sem:
+            try:
+                resp = await call(system, _batch_prompt(candidates, elements, batch), response_schema=SCREEN_SCHEMA)
+                return json.loads(resp)
+            except Exception:
+                return {}
+
+    results = await asyncio.gather(*(_one(b) for b in batches))
+    calls = len(batches)
+    for data in results:
         for v in (data.get("verdicts") or []):
             try:
                 verdict[int(v["i"])] = (bool(v.get("worth_reading")), [str(x) for x in (v.get("elements") or [])],
