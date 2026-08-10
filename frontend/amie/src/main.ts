@@ -19,6 +19,8 @@ function pauseAfter(): string[] {
 const PAUSE_LABEL: Record<string, string> = { idca: "Invention Detection", extract: "Decomposition", search: "Prior Art Search", evaluate: "Deep Evaluation" };
 const PAUSE_AFTER_PHASE: Record<string, string> = { idca: "phase1", extract: "phase2", search: "phase3b", evaluate: "phase4" };
 
+const PHASE_PROMPTS: Record<string, string[]> = { extract: ["extract.elements"], search: ["search.facets"] };
+
 const PHASES = [
   { key: "phase1", label: "Invention Detection" },
   { key: "phase2", label: "Decomposition" },
@@ -763,11 +765,28 @@ async function mountPhasePanel(phasesEl: HTMLElement, jobId: string) {
       }).join("") + `</tbody></table>`;
   }
 
+  const promptNames: string[] = PHASE_PROMPTS[phase] || [];
+  let promptHtml = "";
+  for (const name of promptNames) {
+    try {
+      const pr = await authFetch(`${API}/api/prompts/${encodeURIComponent(name)}`);
+      if (!pr.ok) continue;
+      const pd = await pr.json();
+      const cur = pd.current ? (pd.versions.find((x: any) => x.v === pd.current) || {}).text : pd.default;
+      promptHtml += `<details class="hitl-prompt-box"><summary>Prompt <code>${esc(name)}</code> (version ${pd.current}, ${pd.versions.length} saved)</summary>
+        <textarea class="hitl-prompt-text" data-name="${esc(name)}" rows="14">${esc(cur)}</textarea>
+        <div><button class="btn hitl-save-prompt" data-name="${esc(name)}">Save as new version</button>
+        <span class="hitl-hint">Then "Rerun this phase" to see the new output before continuing.</span></div></details>`;
+    } catch { /* prompt registry unavailable */ }
+  }
+
   div.innerHTML = `
     <p class="hitl-prompt">Paused after <b>${esc(PAUSE_LABEL[phase] || phase)}</b>. Edit below; what you leave is what the next phase receives. Edits are recorded in the report.</p>
     <div id="hitl-body">${body}</div>
+    ${promptHtml}
     <div class="hitl-options">
       <button class="btn hitl-submit" id="hitl-continue">Continue</button>
+      ${promptNames.length ? '<button class="btn" id="hitl-rerun">Rerun this phase</button>' : ""}
       <span class="hitl-hint" id="hitl-msg"></span>
     </div>`;
   const waitingRow = phasesEl.querySelector(".hitl-waiting");
@@ -804,6 +823,34 @@ async function mountPhasePanel(phasesEl: HTMLElement, jobId: string) {
     }
     return edits;
   }
+
+  div.querySelectorAll<HTMLButtonElement>("button.hitl-save-prompt").forEach((b) => b.addEventListener("click", async () => {
+    const name = b.dataset.name!;
+    const ta = div.querySelector<HTMLTextAreaElement>(`textarea.hitl-prompt-text[data-name="${name}"]`)!;
+    b.disabled = true;
+    try {
+      const r = await authFetch(`${API}/api/prompts/${encodeURIComponent(name)}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: ta.value, by: "reviewer" }) });
+      if (!r.ok) throw new Error(await r.text());
+      const d = await r.json();
+      (document.getElementById("hitl-msg") as HTMLElement).textContent = `Saved ${name} as version ${d.version} (now current).`;
+    } catch (e) {
+      (document.getElementById("hitl-msg") as HTMLElement).textContent = `Save failed: ${e}`;
+    } finally { b.disabled = false; }
+  }));
+
+  const rerunBtn = document.getElementById("hitl-rerun") as HTMLButtonElement | null;
+  if (rerunBtn) rerunBtn.addEventListener("click", async () => {
+    rerunBtn.disabled = true; rerunBtn.textContent = "Rerunning...";
+    try {
+      const r = await authFetch(`${API}/api/jobs/${jobId}/resume`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "rerun_phase" }) });
+      if (!r.ok) throw new Error(await r.text());
+      div.innerHTML = `<div class="hitl-resuming"><span class="badge badge-running">rerunning</span> Rerunning ${esc(PAUSE_LABEL[phase] || phase)} with the current prompt versions; it will pause here again.</div>`;
+      hitlRendered = false;
+    } catch (e) {
+      rerunBtn.disabled = false; rerunBtn.textContent = "Rerun this phase";
+      (document.getElementById("hitl-msg") as HTMLElement).textContent = `Failed: ${e}`;
+    }
+  });
 
   document.getElementById("hitl-continue")!.addEventListener("click", async () => {
     const btn = document.getElementById("hitl-continue") as HTMLButtonElement;

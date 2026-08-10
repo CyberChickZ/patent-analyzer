@@ -274,6 +274,32 @@ app.post("/api/jobs/:jobId/resume", async (req, res) => {
   }
 });
 
+// Prompt registry
+app.get("/api/prompts", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(`/api/prompts`, { firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) { res.status(500).json({ error: "Proxy error" }); }
+});
+app.get("/api/prompts/:name", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(`/api/prompts/${encodeURIComponent(req.params.name)}`, { firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) { res.status(500).json({ error: "Proxy error" }); }
+});
+app.put("/api/prompts/:name", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(`/api/prompts/${encodeURIComponent(req.params.name)}`, { method: "PUT", data: req.body, firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) { res.status(500).json({ error: "Proxy error" }); }
+});
+app.put("/api/prompts/:name/current", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(`/api/prompts/${encodeURIComponent(req.params.name)}/current`, { method: "PUT", data: req.body, firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) { res.status(500).json({ error: "Proxy error" }); }
+});
+
 // Get report HTML
 app.get("/api/report/:jobId", async (req, res) => {
   try {
