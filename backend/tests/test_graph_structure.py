@@ -136,3 +136,16 @@ def test_entry_mid_pipeline_runs_only_the_tail():
     out = asyncio.run(g.ainvoke({"events": [], "pause_after": [],
                                  "extraction": {"candidate_inventions": [{"id": "inv1", "elements": [{"id": "inv1.e0", "text": "kept", "edited_by_user": True}]}]}}))
     assert calls == ["search", "evaluate", "report"] and out["overall_summary"] == "elements=kept*"
+
+
+def test_rerun_phase_replays_from_the_checkpoint_before_it_and_pauses_again():
+    import asyncio
+    from langgraph.checkpoint.memory import MemorySaver
+    calls = []
+    g = build_graph(checkpointer=MemorySaver(), nodes=_fake_nodes(calls))
+    cfg = {"configurable": {"thread_id": "t2"}}
+    asyncio.run(g.ainvoke({"events": [], "pause_after": ["extract"]}, cfg))
+    before = next(s for s in g.get_state_history(cfg) if s.next == ("ssr",))
+    cid = before.config["configurable"]["checkpoint_id"]
+    out = asyncio.run(g.ainvoke(None, {"configurable": {"thread_id": "t2", "checkpoint_id": cid}}))
+    assert calls == ["idca", "ssr", "ssr"] and "__interrupt__" in out
