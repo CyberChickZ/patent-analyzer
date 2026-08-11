@@ -101,14 +101,16 @@ def test_reduce_eval_emits_adjudication_without_touching_scores(monkeypatch):
     import app.llm as llm
     from graph.eval_subgraph import reduce_eval
 
-    async def _no_llm(*a, **k):
-        return ""
-    monkeypatch.setattr(llm, "generate_overall_summary", _no_llm)
-    monkeypatch.setattr(llm, "generate_combination_analysis", _no_llm)
+    async def _boom(*a, **k):
+        raise AssertionError("reduce_eval must not call the LLM")
+    monkeypatch.setattr(llm, "call_llm", _boom)
+    monkeypatch.setattr(llm, "generate_overall_summary", _boom)
+    monkeypatch.setattr(llm, "generate_combination_analysis", _boom)
     checklist = [{"criterion": e, "weight": 0.25} for e in E]
-    state = {"checklist": checklist, "summary": "s", "eval_results": [_doc("US-1", E)]}
+    state = {"checklist": checklist, "summary": "s", "eval_results": [_doc("US-1", E), _doc("US-2", E[:2])]}
     out = asyncio.run(reduce_eval(state))
-    assert out["adjudication"]["label"] == "102"
+    assert out["adjudication"]["label"] == "102" and out["adjudication"]["basis"] == "single"
+    assert out["overall_summary"] == "" and out["combination_analysis"] == ""   # legacy keys kept, no LLM
     assert out["eval_stats"]["adjudication"]["risk"] == "blocking"
     assert out["novelty_score"] == 0.0 and out["risk_level"] == out["risk_level"]
     assert out["scoring_report"][0]["similarity_score"] == 1.0

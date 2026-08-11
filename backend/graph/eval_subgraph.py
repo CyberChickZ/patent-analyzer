@@ -127,14 +127,15 @@ async def eval_single_doc(input: SingleDocInput) -> dict:
 
 
 async def reduce_eval(state: EvalState) -> dict:
-    """Merge all eval results, compute scores, generate summary."""
-    from app.llm import generate_combination_analysis, generate_overall_summary
+    """Merge all eval results, compute per-doc coverage scores, run the
+    rule-based determination. The old LLM novelty summary / combination
+    analysis are no longer generated (the report renders the rule verdict
+    and, for §103, one explanation call made in the report node); their
+    keys stay in the state as empty strings so results.json keeps its shape."""
     from patent_analyzer.scorer import classify_risk
 
     eval_results = state.get("eval_results", [])
     checklist = state.get("checklist", [])
-    summary = state.get("summary", "")
-    personas = state.get("personas", {})
 
     # Filter source duplicates
     scoring_report = [r for r in eval_results if not r.get("is_source_duplicate")]
@@ -163,23 +164,7 @@ async def reduce_eval(state: EvalState) -> dict:
     top_score = scoring_report[0].get("similarity_score", 0) if scoring_report else 0
     risk_level = classify_risk(top_score)
 
-    # §103 combination analysis
-    combination_analysis = ""
-    if len(scoring_report) >= 2:
-        try:
-            combination_analysis = await generate_combination_analysis(
-                summary, scoring_report[:5], persona=personas.get("summary")) or ""
-        except Exception:
-            pass
-
-    # Overall summary
-    overall_summary = ""
-    if scoring_report:
-        try:
-            overall_summary = await generate_overall_summary(
-                summary, scoring_report[:10], persona=personas.get("summary"))
-        except Exception as e:
-            overall_summary = f"(Summary generation failed: {e})"
+    combination_analysis, overall_summary = "", ""   # legacy keys, no longer LLM-generated
 
     quote_stats = {"docs_verified": 0, "quotes": 0, "verified": 0, "downgraded": 0}
     for r in scoring_report:
@@ -189,7 +174,8 @@ async def reduce_eval(state: EvalState) -> dict:
             for k in ("quotes", "verified", "downgraded"):
                 quote_stats[k] += int(qv.get(k, 0))
 
-    # Rule-based prior-art determination over the verified coverage (novelty_score / risk_level untouched)
+    # Rule-based prior-art determination over the verified coverage (novelty_score / risk_level kept in the state for
+    # results.json compatibility; the report no longer shows them)
     # single_partial_103=0.7: a primary reference covering >=70% of the elements is flagged as §103-pattern risk
     # (PANORAMA App. C.5.3 rule a; H2 eval: macro-F1 .413 -> .450, blocking recall .29 -> .55 on examiner labels)
     from patent_analyzer.adjudicate import adjudicate
