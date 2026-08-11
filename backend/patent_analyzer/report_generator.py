@@ -1077,6 +1077,8 @@ async function submitFeedback(){{
 
 
 def generate_markdown(data: dict) -> str:
+    from patent_analyzer.report_sections import determination_label, determination_md
+
     if data.get("implied_invention"):
         return _generate_implied_markdown(data)
 
@@ -1095,20 +1097,23 @@ def generate_markdown(data: dict) -> str:
 
     checklist = phase2.get("checklist", [])
     scoring_report = evaluation.get("scoring_report", [])
-    overall_summary = evaluation.get("summary", "")
-    stats = evaluation.get("stats", {})
-    risk_level = stats.get("risk_level", "unknown")
-    top_score = stats.get("top_score", 0)
+    adjudication = data.get("adjudication") or {}
+    coverage_of = {(d.get("pub_num") or d.get("title") or ""): d for d in adjudication.get("per_doc_coverage") or []}
+    n_elements = adjudication.get("n_elements") or 0
 
     total_patents = search.get("summary", {}).get("total_patents", 0)
     total_papers = search.get("summary", {}).get("total_papers", 0)
 
     exact_find = [m for m in scoring_report if m.get("is_self_match")]
     non_self = [m for m in scoring_report if not m.get("is_self_match")]
-    hits_docs = [m for m in non_self if (m.get("similarity_score", 0) or 0) > 0]
+
+    def _cov(m: dict) -> int:
+        return (coverage_of.get(m.get("pub_num") or m.get("title") or "") or {}).get("n_covered", 0)
+    hits_docs = sorted([m for m in non_self if (m.get("similarity_score", 0) or 0) > 0 or _cov(m) > 0],
+                       key=lambda x: (_cov(x), x.get("similarity_score", 0) or 0), reverse=True)
 
     lines = []
-    lines.append(f"# Patent Novelty Report: {source_title}")
+    lines.append(f"# Prior Art Search Report: {source_title}")
     lines.append("")
     lines.append(f"**Generated:** {gen_at}  ")
     lines.append(f"**Category:** {invention_type} · **Type:** {doc_mode}  ")
@@ -1116,7 +1121,8 @@ def generate_markdown(data: dict) -> str:
         lines.append(f"**Fields:** {', '.join(fields_map)}  ")
     if cpc:
         lines.append(f"**CPC:** {cpc}  ")
-    lines.append(f"**Risk Level:** {risk_level} · **Top Score:** {top_score:.2%}  ")
+    if adjudication.get("n_elements"):
+        lines.append(f"**Determination:** {determination_label(adjudication)}  ")
     lines.append(f"**Prior Art Found:** {total_patents} patents, {total_papers} papers  ")
     lines.append("")
 
@@ -1128,16 +1134,12 @@ def generate_markdown(data: dict) -> str:
             lines.append(f"- ⚠ {dp}")
         lines.append("")
 
+    lines += determination_md(adjudication, adjudication.get("claim_chart"), adjudication.get("obviousness_explanation") or "")
+
     lines.append("## Invention Summary")
     lines.append("")
     lines.append(summary_text)
     lines.append("")
-
-    if overall_summary:
-        lines.append("## Novelty Assessment")
-        lines.append("")
-        lines.append(overall_summary)
-        lines.append("")
 
     if checklist:
         lines.append("## Evaluation Criteria")
@@ -1162,32 +1164,18 @@ def generate_markdown(data: dict) -> str:
     if hits_docs:
         lines.append("## Prior Art Matches (Final Reference Table)")
         lines.append("")
-        has_css = any(m.get("css") is not None for m in hits_docs)
-        if has_css:
-            lines.append("| # | Title | Type | CSS | EWSS | RS Synopsis |")
-            lines.append("|---|-------|------|-----|------|-------------|")
-        else:
-            lines.append("| # | Title | Type | Matched | Score |")
-            lines.append("|---|-------|------|---------|-------|")
+        lines.append("| # | Title | Type | Elements disclosed (quote located) |")
+        lines.append("|---|-------|------|-----------------------------------|")
         for i, m in enumerate(hits_docs, 1):
             title = m.get("title", "Unknown")[:80]
             mtype = m.get("manuscript_type", "Doc")
-            if has_css:
-                css_v = m.get("css", 0) or 0
-                ewss_v = m.get("ewss", 0) or 0
-                rs_syn = (m.get("rs_synopsis", "") or "")[:100]
-                lines.append(
-                    f"| {i} | {title} | {mtype} | "
-                    f"{css_v:.0%} | {ewss_v:.0%} | {rs_syn} |")
+            if n_elements:
+                cell = f"{_cov(m)}/{n_elements}"
             else:
                 evals = m.get("similarity_categories", m.get("evaluations", {}))
-                hit_count = sum(1 for ev in (evals or {}).values()
-                               if isinstance(ev, dict) and ev.get("match"))
-                total = len(evals) if evals else len(checklist)
-                score = hit_count / total if total > 0 else 0
-                lines.append(
-                    f"| {i} | {title} | {mtype} | "
-                    f"{hit_count}/{total} | {score:.0%} |")
+                hit_count = sum(1 for ev in (evals or {}).values() if isinstance(ev, dict) and (ev.get("score") or 0) > 0 or (isinstance(ev, dict) and ev.get("match")))
+                cell = f"{hit_count}/{len(evals) if evals else len(checklist)} scored"
+            lines.append(f"| {i} | {title} | {mtype} | {cell} |")
         lines.append("")
 
         lines.append("### Detailed Evaluations")
@@ -1197,14 +1185,12 @@ def generate_markdown(data: dict) -> str:
             url = m.get("url", "")
             mtype = m.get("manuscript_type", "Document")
             evals = m.get("similarity_categories", m.get("evaluations", {}))
-            css_v = m.get("css", 0) or 0
-            ewss_v = m.get("ewss", 0) or 0
             lines.append(f"#### {title}")
             if url:
                 lines.append(f"**URL:** {url}  ")
             lines.append(f"**Type:** {mtype}")
-            if css_v or ewss_v:
-                lines.append(f"**CSS:** {css_v:.0%} · **EWSS:** {ewss_v:.0%}")
+            if n_elements:
+                lines.append(f"**Elements disclosed (quote located):** {_cov(m)}/{n_elements}")
             lines.append("")
             for req, ev in (evals or {}).items():
                 if not isinstance(ev, dict):
@@ -1221,7 +1207,7 @@ def generate_markdown(data: dict) -> str:
             lines.append("")
 
     lines.append("---")
-    lines.append("*Report generated by Patent Novelty Analyzer*")
+    lines.append("*Report generated by Prior Art Search*")
     return "\n".join(lines)
 
 
@@ -1264,7 +1250,7 @@ def _generate_implied_markdown(data: dict) -> str:
         "results, or system designs.",
         "",
         "---",
-        "*Report generated by Patent Novelty Analyzer*",
+        "*Report generated by Prior Art Search*",
     ]
     return "\n".join(lines)
 

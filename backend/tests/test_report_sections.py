@@ -162,3 +162,25 @@ def test_generate_html_leads_with_the_determination_and_drops_the_old_novelty_ch
     # no adjudication (e.g. Absent -> Report): page still renders, no determination block
     h0 = generate_html(_results(E, docs, {}, None))
     assert 'class="sec det-sec"' not in h0 and "Invention Summary" in h0
+
+
+def test_generate_markdown_leads_with_the_determination_and_drops_scores():
+    from patent_analyzer.adjudicate import adjudicate, claim_chart
+    from patent_analyzer.report_generator import generate_markdown
+    from patent_analyzer.report_sections import inject_md
+    E = ["a lens", "a mirror", "a sensor", "a housing"]
+    d = _docs(E)
+    docs = [d("US-A", E)]
+    adj = adjudicate(E, docs)
+    md = generate_markdown(_results(E, docs, adj, claim_chart(adj, E, docs)))
+    assert md.startswith("# Prior Art Search Report: T")
+    assert "**Determination:** Blocking risk (§102)" in md
+    assert md.index("## Prior-Art Determination") < md.index("## Invention Summary") < md.index("## Evaluation Criteria")
+    assert "| 1 | Title US-A | Doc | 4/4 |" in md and "**Elements disclosed (quote located):** 4/4" in md
+    low = md.lower()
+    for gone in ("risk level", "top score", "css", "ewss", "novelty", "old llm", "old combo"):
+        assert gone not in low, gone
+    # injected sections land before Evaluation Criteria and the determination is not duplicated
+    out = inject_md(md, EXT, STATS, SR, CL, adj)
+    assert out.count("## Prior-Art Determination") == 1
+    assert out.index("## Candidate Inventions") < out.index("## Evaluation Criteria")
