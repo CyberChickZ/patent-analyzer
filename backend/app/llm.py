@@ -56,10 +56,13 @@ def _emit(system: str, user: str, response: str, thoughts: str = ""):
 def get_client() -> genai.Client:
     global _client
     if _client is None:
+        # Vertex DSQ guidance: "we recommend using the global endpoint. Unlike a
+        # regional endpoint ... the global endpoint dynamically routes your
+        # requests to the region with the most available capacity" (VERTEX_LOCATION)
         _client = genai.Client(
             vertexai=True,
             project=GC_PROJECT,
-            location="us-west1",
+            location=os.getenv("VERTEX_LOCATION", "global"),
         )
     return _client
 
@@ -109,8 +112,28 @@ def _extract_text_and_thoughts(resp) -> tuple[str, str]:
     return text, thoughts
 
 
+_LLM_RPM = int(os.getenv("LLM_RPM", "40"))
+_llm_gate = None
+
+
+async def _smooth() -> None:
+    """Shared per-minute gate across every process on this machine/instance."""
+    global _llm_gate
+    if _llm_gate is None:
+        from patent_analyzer.runtime_state import MinuteGate
+        _llm_gate = MinuteGate(f"vertex:{MODEL}", _LLM_RPM)
+    try:
+        waited = await _llm_gate.wait()
+        if waited:
+            print(f"[LLM] smoothed: waited {waited:.1f}s for a slot ({_LLM_RPM}/min)")
+    except Exception:
+        pass
+
+
 def _is_retryable(exc: BaseException) -> bool:
     if isinstance(exc, APIError) and exc.code in (429, 503, 500):
+        # DSQ 429 = "temporary high contention for a specific shared resource", not a fixed quota
+        print(f"[LLM] {exc.code} from Vertex: {str(getattr(exc, 'message', exc))[:300]}")
         return True
     name = type(exc).__name__
     return any(k in name for k in ("Timeout", "ServiceUnavailable", "ResourceExhausted"))
@@ -134,6 +157,7 @@ async def call_llm(
 ) -> str:
     client = get_client()
     config = _build_config(system, max_tokens, thinking_budget, response_schema)
+    await _smooth()
     resp = await client.aio.models.generate_content(
         model=MODEL,
         contents=[types.Part.from_text(text=user)],
@@ -209,6 +233,7 @@ async def call_llm_with_pdfs(
 
     client = get_client()
     config = _build_config(system, max_tokens, thinking_budget, response_schema)
+    await _smooth()
     resp = await client.aio.models.generate_content(
         model=MODEL,
         contents=parts,
@@ -591,6 +616,121 @@ Output strictly this JSON, no preamble:
         "summary":          resp[:2000],
     }
 
+
+
+# ── IDCA: structured Doc JSON (the single text layer downstream) ──
+#
+# How others represent a parsed paper (sources checked 2026-09-18):
+# - GROBID, https://grobid.readthedocs.io/en/latest/Introduction/ : "Full text extraction and
+#   structuring from PDF articles, including a model for the overall document segmentation and
+#   models for the structuring of the text body (paragraph, section titles, reference and footnote
+#   callouts, figures, tables, ...)"; TEI output = header (title/abstract) + body of <div><head>/<p>
+#   + <figure> + <formula> + bibliography. Its JSON export has "separate sections for bibliographic
+#   metadata, body text, figures and tables, and references" (Grobid-service.md).
+# - MinerU content_list.json, https://opendatalab.github.io/MinerU/reference/output_files/ :
+#   "stores all readable content blocks in reading order as a flat structure"; headings are text
+#   blocks with `text_level: 1/2/...`, figures carry `img_caption: [..]`, formulas are
+#   `{"type": "equation", "text": "$$...$$", "text_format": "latex"}`.
+# - Gemini structured output, https://ai.google.dev/gemini-api/docs/structured-output :
+#   "generate responses that adhere to a provided JSON Schema"; "Very large or deeply nested
+#   schemas may be rejected"; "always validate values in your application".
+# Hence: a FLAT section list with `level` (MinerU style, no recursive schema), figures and
+# equations as separate lists (GROBID style), enforced via response_schema and validated here.
+
+DOC_JSON_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "title": {"type": "STRING"},
+        "abstract": {"type": "STRING"},
+        "sections": {"type": "ARRAY", "items": {
+            "type": "OBJECT",
+            "properties": {"heading": {"type": "STRING"}, "level": {"type": "INTEGER"},
+                           "paragraphs": {"type": "ARRAY", "items": {"type": "STRING"}}},
+            "required": ["heading", "level", "paragraphs"]}},
+        "figures": {"type": "ARRAY", "items": {
+            "type": "OBJECT", "properties": {"label": {"type": "STRING"}, "caption": {"type": "STRING"}},
+            "required": ["label", "caption"]}},
+        "equations": {"type": "ARRAY", "items": {
+            "type": "OBJECT", "properties": {"label": {"type": "STRING"}, "latex": {"type": "STRING"}},
+            "required": ["label", "latex"]}},
+        "references_count": {"type": "INTEGER"},
+    },
+    "required": ["title", "abstract", "sections", "figures", "equations", "references_count"],
+}
+
+_DOC_JSON_MAX_TOKENS = 65535
+
+DOC_JSON_PROMPT = prompts.register_default("idca.docjson", """════ TASK ════
+Transcribe the attached document into structured JSON. This is a TRANSCRIPTION, not a summary:
+every body paragraph must be copied VERBATIM, in reading order, nothing dropped or shortened.
+
+Rules:
+- title: the document title. abstract: the abstract text (empty string if none).
+- sections: one entry per heading, in reading order, FLAT (no nesting). level = 1 for a top-level
+  heading ("3 Method"), 2 for a subsection ("3.2 Loss"), 3 for a sub-subsection. Keep the heading
+  text as printed (with its number). Text before the first heading goes into a section with
+  heading "" and level 1. Do NOT emit the reference list as a section.
+- paragraphs: the section's body paragraphs, verbatim, one string each. Join lines broken by the
+  page layout; remove hyphenation at line ends; drop running headers/footers and page numbers.
+  Keep inline math as LaTeX ($...$). Do NOT put figure captions or table contents in paragraphs.
+- figures: every figure/table caption: label ("Figure 1", "Table 2"), caption text verbatim.
+- equations: every numbered display equation: label ("1", "2", ...), latex.
+- references_count: number of entries in the reference list (0 if none).
+{extra}""")
+
+
+def _clean_doc_json(d: dict) -> dict:
+    """Coerce a model response to the Doc JSON contract (drop empties, fix types)."""
+    sections = []
+    for sec in d.get("sections") or []:
+        if not isinstance(sec, dict):
+            continue
+        paras = [" ".join(str(x).split()) for x in (sec.get("paragraphs") or []) if str(x or "").strip()]
+        heading = " ".join(str(sec.get("heading") or "").split())
+        if not paras and not heading:
+            continue
+        try:
+            level = max(1, min(4, int(sec.get("level") or 1)))
+        except (TypeError, ValueError):
+            level = 1
+        sections.append({"heading": heading, "level": level, "paragraphs": paras})
+    figures = [{"label": " ".join(str(f.get("label") or "").split()), "caption": " ".join(str(f.get("caption") or "").split())}
+               for f in (d.get("figures") or []) if isinstance(f, dict) and str(f.get("caption") or "").strip()]
+    equations = [{"label": " ".join(str(e.get("label") or "").split()), "latex": str(e.get("latex") or "").strip()}
+                 for e in (d.get("equations") or []) if isinstance(e, dict) and str(e.get("latex") or "").strip()]
+    try:
+        refs = max(0, int(d.get("references_count") or 0))
+    except (TypeError, ValueError):
+        refs = 0
+    return {"title": " ".join(str(d.get("title") or "").split()),
+            "abstract": " ".join(str(d.get("abstract") or "").split()),
+            "sections": sections, "figures": figures, "equations": equations, "references_count": refs}
+
+
+async def build_doc_json(document_text: str, source_pdf_path: str | None = None) -> dict | None:
+    """ONE LLM CALL (JSON mode): the document as Doc JSON
+    {title, abstract, sections:[{heading, level, paragraphs}], figures:[{label, caption}],
+     equations:[{label, latex}], references_count}. The PDF goes to Gemini natively
+    (layout, captions, math); a text input is sent as-is. None when the call or the
+    parse fails — the caller keeps the fitz/plain text as the fallback text layer.
+    Independent of detect_and_summarize_invention so that prompt (and its cache key)
+    is untouched."""
+    system = ("You are a document transcription engine. Reproduce the document's text faithfully "
+              "into the requested JSON structure. Output JSON only.")
+    if source_pdf_path and Path(source_pdf_path).exists():
+        prompt = prompts.render("idca.docjson", extra="")
+        resp = await call_llm_with_pdfs(system, prompt, [source_pdf_path], max_tokens=_DOC_JSON_MAX_TOKENS,
+                                        response_schema=DOC_JSON_SCHEMA)
+    else:
+        prompt = prompts.render("idca.docjson", extra=f"\n════ DOCUMENT TEXT ════\n```\n{(document_text or '')[:_EXTRACTION_DOC_CAP]}\n```")
+        resp = await call_llm(system, prompt, max_tokens=_DOC_JSON_MAX_TOKENS, response_schema=DOC_JSON_SCHEMA)
+    data = _extraction_json(resp)
+    if not data:
+        return None
+    doc = _clean_doc_json(data)
+    if not doc["sections"] and not doc["abstract"]:
+        return None
+    return doc
 
 
 # ════════════════════════════════════════════════════════════

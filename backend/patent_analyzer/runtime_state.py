@@ -80,3 +80,39 @@ class MonthlyQuota:
         gap = self.cap - self.used()
         if gap > 0:
             kv().incr(_NS, self._key(), by=gap)
+
+
+class MinuteGate:
+    """Cross-process request smoothing: at most `per_minute` takes per wall-clock
+    minute for `name`, counted in the shared KV (sqlite locally, Firestore on
+    Cloud Run). Vertex DSQ docs: "Avoid sending requests in sharp, second-level
+    spikes ... Distributing your API calls more evenly helps the system manage
+    your load predictably." Callers `await gate.wait()` before each request."""
+
+    def __init__(self, name: str, per_minute: int):
+        self.name, self.per_minute = name, per_minute
+
+    def _key(self, now: datetime | None = None) -> str:
+        now = now or datetime.now(timezone.utc)
+        return f"gate:{self.name}:{now.strftime('%Y%m%d%H%M')}"
+
+    def take(self) -> float:
+        """Reserve one slot now; returns seconds to sleep first (0 = go)."""
+        if self.per_minute <= 0:
+            return 0.0
+        now = datetime.now(timezone.utc)
+        n = kv().incr(_NS, self._key(now))
+        if n <= self.per_minute:
+            return 0.0
+        kv().incr(_NS, self._key(now), by=-1)
+        return 60.0 - now.second - now.microsecond / 1e6 + 0.05
+
+    async def wait(self) -> float:
+        import asyncio
+        waited = 0.0
+        while True:
+            s = self.take()
+            if s <= 0:
+                return waited
+            await asyncio.sleep(s)
+            waited += s
