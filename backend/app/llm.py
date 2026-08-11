@@ -175,6 +175,7 @@ async def call_llm_with_pdfs(
     max_tokens: int = MAX_TOKENS,
     thinking_budget: int = 0,
     image_parts: list[bytes] | None = None,
+    response_schema: dict | None = None,
 ) -> str:
     """Send one or more PDFs as native multi-modal parts to Gemini.
 
@@ -182,6 +183,7 @@ async def call_llm_with_pdfs(
     extraction, no truncation. If a file exceeds Vertex's inline cap (~20MB),
     it falls back to text extraction for THAT file only (others still go as PDF)
     and prefixes a [fallback_text] marker so the LLM knows the input was lossy.
+    response_schema switches on JSON mode exactly as in call_llm.
     """
     parts: list[Any] = []
     for p in pdf_paths:
@@ -206,7 +208,7 @@ async def call_llm_with_pdfs(
     parts.append(types.Part.from_text(text=user))
 
     client = get_client()
-    config = _build_config(system, max_tokens, thinking_budget)
+    config = _build_config(system, max_tokens, thinking_budget, response_schema)
     resp = await client.aio.models.generate_content(
         model=MODEL,
         contents=parts,
