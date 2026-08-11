@@ -125,3 +125,40 @@ def test_determination_three_verdict_wordings():
     h = determination_html(adj, claim_chart(adj, E, none))
     assert "No blocking art found" in h and "Why no blocking art:" in h and "a sensor; a housing" in h
     assert "§103 combination relied on" not in h and "grant" not in h.split("not a prediction")[0].lower().replace("not a prediction of grant", "")
+
+
+def _results(E, docs, adj, chart, explanation=""):
+    adj = dict(adj, claim_chart=chart, obviousness_explanation=explanation)
+    return {"job_id": "t", "source_title": "T", "phase1": {"summary": "S", "doc_mode": "paper", "invention_type": "Process"},
+            "phase2": {"checklist": [{"criterion": e, "weight": 0.25} for e in E]},
+            "search": {"summary": {"total_patents": 3, "total_papers": 0}}, "adjudication": adj,
+            "evaluation": {"scoring_report": [dict(d, similarity_score=0.3, ewss=0.3, css=0.1, similarity_categories=d["checklist_results"])
+                                              for d in docs],
+                           "summary": "OLD LLM NOVELTY TEXT", "combination_analysis": "OLD COMBO TEXT",
+                           "stats": {"top_score": 0.3, "risk_level": "medium"}}}
+
+
+def test_generate_html_leads_with_the_determination_and_drops_the_old_novelty_chain():
+    from patent_analyzer.adjudicate import adjudicate, claim_chart
+    from patent_analyzer.report_generator import generate_html
+    E = ["a lens", "a mirror", "a sensor", "a housing"]
+    d = _docs(E)
+    docs = [d("US-A", E[:3]), d("US-B", E[3:])]
+    adj = adjudicate(E, docs)
+    ch = claim_chart(adj, E, docs)
+    h = generate_html(_results(E, docs, adj, ch, "Because.\n\nNothing cuts against it."))
+    assert h.index('class="sec det-sec"') < h.index("Invention Summary")
+    assert "Obviousness risk (§103)" in h and "<p>Because.</p>" in h and 'class="tbl claim-chart"' in h
+    low = h.lower()
+    for gone in ("innovation landscape", "novelty score", "novelty assessment", "combination analysis", "ewss", "css=",
+                 "old llm novelty text", "old combo text"):
+        assert gone not in low, gone
+    # card badge = verified coverage from the rule, tooltip says so
+    assert 'title="3/4 elements disclosed with a located verbatim quote">75%</span>' in h
+    assert 'title="1/4 elements disclosed with a located verbatim quote">25%</span>' in h
+    assert h.index("US-A") < h.index("US-B")            # ordered by verified coverage
+    # the export script reads the determination, not the removed section
+    assert ".det-sec .det-verdict" in h and ".eval-sec" not in h
+    # no adjudication (e.g. Absent -> Report): page still renders, no determination block
+    h0 = generate_html(_results(E, docs, {}, None))
+    assert 'class="sec det-sec"' not in h0 and "Invention Summary" in h0

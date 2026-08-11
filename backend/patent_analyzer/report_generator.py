@@ -301,6 +301,8 @@ _NO_PDF_ICON_SVG = (
 
 
 def generate_html(data: dict) -> str:
+    from patent_analyzer.report_sections import determination_html
+
     # Implied invention: abbreviated report
     if data.get("implied_invention"):
         return _generate_implied_html(data)
@@ -322,22 +324,11 @@ def generate_html(data: dict) -> str:
     search_channels = search.get("channels", {})
 
     scoring_report = evaluation.get("scoring_report", [])
-    overall_summary = evaluation.get("summary", "")
-    combination_analysis = evaluation.get("combination_analysis", "")
-
-    # Strip LLM preamble ("Of course. Here is...", "Sure!", etc.)
-    if overall_summary:
-        overall_summary = re.sub(
-            r'^(?:Of course[.!]?\s*|Sure[.!]?\s*|Certainly[.!]?\s*|Here is\s+)',
-            '', overall_summary, flags=re.IGNORECASE).lstrip()
-        # Strip stray "framed for the faculty inventor" type meta-text in first line
-        first_nl = overall_summary.find('\n')
-        if first_nl > 0 and first_nl < 200:
-            first_line = overall_summary[:first_nl].lower()
-            if 'faculty inventor' in first_line or 'novelty assessment for' in first_line or 'here is a' in first_line:
-                overall_summary = overall_summary[first_nl:].lstrip()
-        # Convert *** to --- (markdown horizontal rule)
-        overall_summary = overall_summary.replace('***', '---')
+    # Verdict comes from the deterministic rule (patent_analyzer.adjudicate); the LLM novelty summary,
+    # combination analysis and per-axis "Innovation Landscape" are no longer rendered.
+    adjudication = data.get("adjudication") or {}
+    coverage_of = {(d.get("pub_num") or d.get("title") or ""): d for d in adjudication.get("per_doc_coverage") or []}
+    n_elements = adjudication.get("n_elements") or 0
 
     generated_at = data.get("generated_at", datetime.now(timezone.utc).isoformat())
     source_filename = data.get("source_filename", "")
@@ -346,107 +337,12 @@ def generate_html(data: dict) -> str:
 
     exact_find = [m for m in scoring_report if m.get("is_self_match")]
     non_self = [m for m in scoring_report if not m.get("is_self_match")]
+    def _cov(m: dict) -> int:
+        return (coverage_of.get(m.get("pub_num") or m.get("title") or "") or {}).get("n_covered", 0)
     hits_docs = sorted(
-        [m for m in non_self if (m.get("similarity_score", 0) or 0) > 0],
-        key=lambda x: x.get("similarity_score", 0), reverse=True)
-    no_hits_docs = [m for m in non_self if (m.get("similarity_score", 0) or 0) == 0]
-
-    # Build per-increment (per-axis) coverage view
-    axes_map = {}  # axis_name -> {items: [...], total_weight: float, covered_by: {}}
-    for item in checklist:
-        axis = item.get("axis", "General") if isinstance(item, dict) else "General"
-        if axis not in axes_map:
-            axes_map[axis] = {"items": [], "total_weight": 0, "covered_by": {}}
-        axes_map[axis]["items"].append(item)
-        axes_map[axis]["total_weight"] += item.get("weight", 0) if isinstance(item, dict) else 0
-
-    # For each axis, find which documents cover which items
-    for m in hits_docs:
-        evals = m.get("similarity_categories", m.get("evaluations", {}))
-        if not evals:
-            continue
-        m_title = m.get("title", "Unknown")
-        for req_key, ev in evals.items():
-            if not isinstance(ev, dict):
-                continue
-            score_val = ev.get("score", 0)
-            if score_val >= 1:  # Partial or Present
-                idx_match = re.match(r'^(?:item\s*)?(\d+)', str(req_key), re.IGNORECASE)
-                if idx_match:
-                    cl_idx = int(idx_match.group(1)) - 1
-                    if 0 <= cl_idx < len(checklist):
-                        cl_item = checklist[cl_idx]
-                        axis = cl_item.get("axis", "General") if isinstance(cl_item, dict) else "General"
-                        item_id = cl_item.get("id", f"c{cl_idx+1}") if isinstance(cl_item, dict) else f"c{cl_idx+1}"
-                        if axis in axes_map:
-                            if item_id not in axes_map[axis]["covered_by"]:
-                                axes_map[axis]["covered_by"][item_id] = []
-                            axes_map[axis]["covered_by"][item_id].append({
-                                "title": m_title,
-                                "score": score_val,
-                            })
-
-    # Determine coverage status per axis
-    for axis, info in axes_map.items():
-        total_items = len(info["items"])
-        covered_items = len(info["covered_by"])
-        if covered_items == 0:
-            info["status"] = "novel"
-            info["status_label"] = "Novel"
-            info["status_color"] = "#16a34a"
-            info["status_bg"] = "#dcfce7"
-        elif covered_items < total_items:
-            info["status"] = "partial"
-            info["status_label"] = "Partially covered"
-            info["status_color"] = "#d97706"
-            info["status_bg"] = "#fef3c7"
-        else:
-            info["status"] = "covered"
-            info["status_label"] = "Covered"
-            info["status_color"] = "#dc2626"
-            info["status_bg"] = "#fef2f2"
-
-    # Build increment coverage HTML
-    increment_html = ""
-    for axis, info in axes_map.items():
-        total_items = len(info["items"])
-        covered_items = len(info["covered_by"])
-        weight_pct = info["total_weight"]
-
-        items_detail = ""
-        for item in info["items"]:
-            item_id = item.get("id", "?") if isinstance(item, dict) else "?"
-            criterion = esc(item.get("criterion", "") if isinstance(item, dict) else str(item))[:120]
-            covers = info["covered_by"].get(item_id, [])
-            if covers:
-                best = max(covers, key=lambda c: c["score"])
-                cover_label = (
-                    f'<span style="color:#dc2626;font-size:0.78rem"> &mdash; {len(covers)} doc(s), '
-                    f'closest: {esc(best["title"][:50])}</span>'
-                )
-            else:
-                cover_label = '<span style="color:#16a34a;font-size:0.78rem"> &mdash; no match found</span>'
-            items_detail += (
-                f'<div style="margin:0.2rem 0;font-size:0.82rem;color:var(--text2)">'
-                f'{esc(str(item_id))}. {criterion}{cover_label}</div>'
-            )
-
-        increment_html += (
-            f'<div style="border:1px solid var(--border);border-radius:8px;'
-            f'padding:0.8rem 1rem;margin:0.5rem 0;background:var(--card)">'
-            f'<div style="display:flex;justify-content:space-between;align-items:center">'
-            f'<div style="font-weight:600;font-size:0.9rem">{esc(axis)}</div>'
-            f'<div style="display:flex;gap:0.5rem;align-items:center">'
-            f'<span style="font-size:0.75rem;color:var(--text2)">{weight_pct:.0%} weight</span>'
-            f'<span style="font-size:0.75rem;padding:0.15rem 0.5rem;border-radius:99px;'
-            f'background:{info["status_bg"]};color:{info["status_color"]};font-weight:600">'
-            f'{info["status_label"]}</span>'
-            f'</div></div>'
-            f'<div style="font-size:0.8rem;color:var(--text2);margin-top:0.3rem">'
-            f'{covered_items}/{total_items} elements found in existing literature</div>'
-            f'<div style="margin-top:0.4rem">{items_detail}</div>'
-            f'</div>'
-        )
+        [m for m in non_self if (m.get("similarity_score", 0) or 0) > 0 or _cov(m) > 0],
+        key=lambda x: (_cov(x), x.get("similarity_score", 0) or 0), reverse=True)
+    no_hits_docs = [m for m in non_self if m not in hits_docs]
 
     def build_card(m: dict, idx: int) -> str:
         title = esc(m.get("title", "Unknown"))
@@ -521,13 +417,13 @@ def generate_html(data: dict) -> str:
 
         hit_count = len(matched) + len(partial)
         total = len(evals) if evals else len(checklist)
-        css_val = m.get("css", 0) or 0
-        ewss_val = m.get("ewss", 0) or 0
-        adj_ewss = m.get("adjusted_ewss", ewss_val) or ewss_val
-        ewss_denom = m.get("ewss_denom_count", 0)
-        score_num = adj_ewss if adj_ewss else (
-            hit_count / total if total > 0 else 0)
-        low_sample = ewss_denom > 0 and ewss_denom < 3
+        cov = coverage_of.get(m.get("pub_num") or m.get("title") or "")
+        if cov and n_elements:
+            score_num = cov.get("n_covered", 0) / n_elements
+            score_tip = f"{cov.get('n_covered', 0)}/{n_elements} elements disclosed with a located verbatim quote"
+        else:
+            score_num = hit_count / total if total > 0 else 0
+            score_tip = f"{hit_count}/{total} checklist items scored Present or Partial"
 
         hover_html = ""
         if matched or partial:
@@ -632,7 +528,7 @@ def generate_html(data: dict) -> str:
     <div class="card-right">
       {download_btn}
       <button class="md-btn" onclick="event.stopPropagation();showMd(this.closest(\'.card\'))" title="View as Markdown">MD</button>
-      {f'<span class="hit-pct" style="color:{score_color(score_num)}" title="Overlap {score_num:.0%} (CSS={css_val:.0%}, EWSS={ewss_val:.0%}){" (low sample: " + str(ewss_denom) + " criteria)" if low_sample else ""}">{score_num:.0%}{"*" if low_sample else ""}</span>' if hit_count > 0 else '<span class="no-badge">&mdash;</span>'}
+      {f'<span class="hit-pct" style="color:{score_color(score_num)}" title="{esc(score_tip)}">{score_num:.0%}</span>' if hit_count > 0 or score_num > 0 else '<span class="no-badge">&mdash;</span>'}
     </div>
   </div>
   {hover_html}
@@ -764,7 +660,11 @@ h5.md-heading{{font-size:0.88rem;font-weight:600}}
 .sum-para{{margin-bottom:0.6rem;line-height:1.7;color:var(--text);font-size:0.9rem}}
 
 /* Evaluation summary */
-.eval-sec{{border-left:3px solid var(--accent)}}
+.det-sec{{border-left:3px solid var(--accent)}}
+.tbl{{border-collapse:collapse;width:100%;font-size:0.82rem;margin:0.5rem 0}}
+.tbl th,.tbl td{{border:1px solid var(--border);padding:0.3rem 0.5rem;text-align:left;vertical-align:top}}
+.tbl th{{background:#f1f5f9;font-weight:600}}
+.badge{{display:inline-block;font-size:0.72rem;padding:0.1rem 0.5rem;border-radius:99px;font-weight:600;text-transform:uppercase;letter-spacing:.02em}}
 .eval-para{{margin-bottom:0.6rem;line-height:1.75;color:var(--text);font-size:0.9rem}}
 
 /* Keyword highlight */
@@ -939,16 +839,12 @@ a.card-title:hover{{color:var(--accent);text-decoration:underline}}
     'application beyond an abstract idea.</div>'
 ]) if invention_type in ("Process",) and cpc_subclass.startswith("G06") else ""}
 
-<div class="sec">
+{determination_html(adjudication, adjudication.get("claim_chart"), adjudication.get("obviousness_explanation") or "")}
+
+<div class="sec summary-sec">
   <div class="sec-t">Invention Summary</div>
   <div class="sec-b">{format_summary(summary_text)}</div>
 </div>
-
-{f'<div class="sec eval-sec"><div class="sec-t sec-t-lg">Novelty Assessment</div><div class="sec-b">{render_markdown(overall_summary)}</div></div>' if overall_summary else ''}
-
-{f'<div class="sec" style="border-left:3px solid #f59e0b"><div class="sec-t sec-t-lg">Combination Analysis</div><div class="sec-note">Assessment of whether combining elements from the references above could reproduce this invention.</div><div class="sec-b">{render_markdown(combination_analysis)}</div></div>' if combination_analysis else ''}
-
-{f'<div class="sec"><div class="sec-t sec-t-lg">Innovation Landscape</div><div class="sec-note">Each innovation axis represents a technical dimension where this manuscript makes a design choice. Status shows whether existing literature covers that choice.</div>{increment_html}</div>' if increment_html else ''}
 
 <div class="sec checklist-sec">
   <div class="sec-t sec-t-lg">Evaluation Checklist <span class="sec-count">{len(checklist)} items</span></div>
@@ -1092,11 +988,10 @@ function dlReportMd(mode){{
 function buildFullMd(mode){{
   let out='# Prior Art Search Report\\n\\n';
   // Invention summary
-  const sumSec=document.querySelector('.sec .sec-b');
+  const detSec=document.querySelector('.det-sec .det-verdict');
+  if(detSec)out+='## Prior-Art Determination\\n\\n'+detSec.textContent.trim()+'\\n\\n';
+  const sumSec=document.querySelector('.summary-sec .sec-b');
   if(sumSec)out+='## Invention Summary\\n\\n'+sumSec.textContent.trim()+'\\n\\n';
-  // Eval summary
-  const evalSec=document.querySelector('.eval-sec .sec-b');
-  if(evalSec)out+='## Novelty Assessment\\n\\n'+evalSec.textContent.trim()+'\\n\\n';
   // Checklist
   const clItems=document.querySelectorAll('.cl-item');
   if(clItems.length){{
