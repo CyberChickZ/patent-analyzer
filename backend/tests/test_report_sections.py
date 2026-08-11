@@ -67,3 +67,61 @@ def test_reviewer_edits_are_marked_in_extraction_sections():
     ext = copy.deepcopy(EXT)
     ext["candidate_inventions"][0]["elements"][0]["edited_by_user"] = True
     assert "edited by reviewer" in extraction_html(ext) and "_(edited by reviewer)_" in "\n".join(extraction_md(ext))
+
+
+def _docs(E):
+    def d(pub, covered, unquoted=()):
+        cr = {}
+        for e in E:
+            if e in covered:
+                cr[e] = {"score": 2, "verified_quotes": ["verbatim " + e], "quote_checks": [{"quote": "verbatim " + e, "verified": True}],
+                         "analysis": "found"}
+            elif e in unquoted:
+                cr[e] = {"score": 1, "verified_quotes": [], "quote_checks": [{"quote": "made up", "verified": False}]}
+            else:
+                cr[e] = {"score": 0}
+        return {"pub_num": pub, "title": "Title " + pub, "checklist_results": cr, "patent_link": f"https://x/{pub}"}
+    return d
+
+
+def test_determination_claim_chart_rows_columns_and_cells():
+    from patent_analyzer.adjudicate import adjudicate, claim_chart
+    from patent_analyzer.report_sections import claim_chart_html, determination_html, determination_md
+    E = ["a lens", "a mirror", "a sensor", "a housing"]
+    d = _docs(E)
+    docs = [d("US-A", E[:3], unquoted=[E[3]]), d("US-B", E[3:]), d("US-C", E[:1])]
+    adj = adjudicate(E, docs)
+    ch = claim_chart(adj, E, docs)
+    h = claim_chart_html(ch)
+    assert h.count("<tr>") == 1 + len(E)                                   # header + one row per element
+    assert h.count("<th>") + h.count("<th ") == 1 + 3 and 'href="https://x/US-A"' in h        # element + 3 reference columns, linked
+    assert "US-A</a><br>" in h and "3/4 elements" in h and "1/4 elements" in h
+    rows = h.split("<tbody>")[1].split("</tr>")
+    assert "Present · 1✓" in rows[0] and 'title="verbatim a lens"' in rows[0]           # covered cell shows the located quote
+    assert "Partial · quote not located" in rows[3] and "#fef3c7" in rows[3]           # scored but unverified: amber, not counted
+    assert rows[3].count("Present · 1✓") == 1                                          # only US-B discloses the housing
+    full = determination_html(adj, ch, "")
+    assert "Obviousness risk (§103)" in full and "US-A</a> — 3/4 elements: a lens; a mirror; a sensor" in full
+    assert "US-B</a> — 1/4 elements: a housing" in full and "US-C" not in full.split("§103 combination relied on")[1].split("</ul>")[0]
+    md = "\n".join(determination_md(adj, ch))
+    assert "| a housing | Partial (quote not located) | Present 1✓ | – |" in md
+
+
+def test_determination_three_verdict_wordings():
+    from patent_analyzer.adjudicate import adjudicate, claim_chart
+    from patent_analyzer.report_sections import determination_html
+    E = ["a lens", "a mirror", "a sensor", "a housing"]
+    d = _docs(E)
+    one = [d("US-A", E)]
+    adj = adjudicate(E, one)
+    h = determination_html(adj, claim_chart(adj, E, one))
+    assert "Blocking risk (§102)" in h and "Anticipating reference:" in h and "US-A</a> discloses all 4 elements" in h
+    part = [d("US-A", E[:3])]
+    adj = adjudicate(E, part, single_partial_103=0.7)
+    h = determination_html(adj, claim_chart(adj, E, part), "Routine.")
+    assert "primary reference discloses most elements" in h and "Not disclosed by any reference" in h and "a housing" in h and "<p>Routine.</p>" in h
+    none = [d("US-A", E[:1]), d("US-B", E[1:2])]
+    adj = adjudicate(E, none, single_partial_103=0.7)
+    h = determination_html(adj, claim_chart(adj, E, none))
+    assert "No blocking art found" in h and "Why no blocking art:" in h and "a sensor; a housing" in h
+    assert "§103 combination relied on" not in h and "grant" not in h.split("not a prediction")[0].lower().replace("not a prediction of grant", "")

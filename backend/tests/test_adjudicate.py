@@ -71,19 +71,29 @@ def test_greedy_cover_prefers_fewest_docs_and_caps_combo():
 
 
 def test_report_section_states_blocking_risk_only():
-    from patent_analyzer.report_sections import adjudication_html, adjudication_md, inject_html, inject_md
-    adj = adjudicate(E, [_doc("US-1", E[:3]), _doc("US-2", E[2:])])
-    html = adjudication_html(adj)
-    md = "\n".join(adjudication_md(adj))
-    assert "Prior-Art Determination" in html and "US-1 + US-2" in html and "blocking" in html
-    assert "combination blocking risk" in md and "4/4" in md
+    from patent_analyzer.adjudicate import claim_chart
+    from patent_analyzer.report_sections import determination_html, determination_md, inject_html, inject_md
+    docs = [_doc("US-1", E[:3]), _doc("US-2", E[2:])]
+    adj = adjudicate(E, docs)
+    ch = claim_chart(adj, E, docs)
+    html = determination_html(adj, ch, "Because.\n\nNothing cuts against it.")
+    md = "\n".join(determination_md(adj, ch, "Because."))
+    assert "Prior-Art Determination" in html and "Obviousness risk (§103)" in html and "blocking" in html
+    assert "US-1</a>" not in html and "US-1 — 3/4 elements" in html and "US-2 — 2/4 elements" in html   # no url: plain names
+    assert "<p>Because.</p><p>Nothing cuts against it.</p>" in html
+    assert "Obviousness risk (§103)" in md and "US-1 (3/4)" in md and "US-2 (2/4)" in md and "Because." in md
     for text in (html, md):
-        assert "grantable" not in text.lower() and "would be granted" not in text.lower()
-    assert adjudication_html(None) == "" and adjudication_md({}) == []
+        low = text.lower()
+        assert "grantable" not in low and "would be granted" not in low and "patentable" not in low
+        assert "novelty score" not in low and "innovation landscape" not in low
+    assert determination_html(None) == "" and determination_md({}) == []
     base = '<div class="sec"><div class="sec-t">Invention Summary</div><div class="sec-b">S</div>\n</div>'
     assert "Prior-Art Determination" in inject_html(base, None, None, None, None, adj)
-    out = inject_md("## Invention Summary\n\nS\n\n## Novelty Assessment\n\nN\n", None, None, None, None, adj)
-    assert out.index("Prior-Art Determination") < out.index("## Novelty Assessment")
+    already = base + determination_html(adj, ch)
+    assert inject_html(already, None, None, None, None, adj).count("Prior-Art Determination") == 1
+    out = inject_md("## Invention Summary\n\nS\n\n## Evaluation Criteria\n\nN\n", None, None, None, None, adj)
+    assert out.index("Prior-Art Determination") < out.index("## Evaluation Criteria")
+    assert "## Prior-Art Determination" in inject_md("## Invention Summary\n\nS\n\n## Novelty Assessment\n", None, None, None, None, adj)
 
 
 def test_reduce_eval_emits_adjudication_without_touching_scores(monkeypatch):
