@@ -75,7 +75,8 @@ def greedy_cover(elements: list[str], doc_sets: list[tuple[str, set[str]]], need
 def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
                allow_missing: int = 0, max_combo: int = 3, min_score: int = 1,
                require_quotes: bool = True, single_partial_103: float | None = None) -> dict:
-    """Return {label, risk, reason, n_elements, needed, per_doc_coverage, combo, params}.
+    """Return {label, basis, risk, reason, n_elements, needed, per_doc_coverage, combo, params}.
+    basis: "single" (102) | "combination" (103, union) | "primary_partial" (103, one reference >= single_partial_103) | "none".
 
     min_cover: fraction of elements a document (or the union) must cover.
     allow_missing: absolute number of elements that may be missing; the
@@ -89,7 +90,7 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
               "min_score": min_score, "require_quotes": require_quotes,
               "single_partial_103": single_partial_103}
     if n == 0:
-        return {"label": "ALLOW", "risk": "related", "reason": "no elements to compare",
+        return {"label": "ALLOW", "basis": "none", "risk": "related", "reason": "no elements to compare",
                 "n_elements": 0, "needed": 0, "best_single": "", "best_coverage": 0.0,
                 "per_doc_coverage": [], "combo": None, "params": params}
 
@@ -127,20 +128,20 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
     } if combo_docs else None
 
     if best and best["n_covered"] >= needed:
-        label = "102"
+        label, basis = "102", "single"
         reason = (f"{_key(best)} covers {best['n_covered']}/{n} elements with verified quotes "
                   f"(needed {needed}); a single reference disclosing each element is anticipation (MPEP 2131).")
     elif combo and len(combo_docs) >= 2 and combo["n_covered"] >= needed:
-        label = "103"
+        label, basis = "103", "combination"
         reason = (f"no single document reaches {needed}/{n}; {' + '.join(combo_docs)} together cover "
                   f"{combo['n_covered']}/{n} — every element is known, combination risk under §103 (MPEP 2143 A).")
     elif single_partial_103 is not None and best and best_cov >= single_partial_103:
-        label = "103"
+        label, basis = "103", "primary_partial"
         reason = (f"{_key(best)} alone covers {best['n_covered']}/{n} elements ({best_cov:.0%} >= {single_partial_103:.0%}); "
                   f"the remaining {n - best['n_covered']} would need only a secondary reference or a routine modification "
                   f"— primary-reference combination risk under §103 (MPEP 2143).")
     else:
-        label = "ALLOW"
+        label, basis = "ALLOW", "none"
         missing = combo["missing"] if combo else names
         reason = (f"best single coverage {best_cov:.0%}; union of {len(combo_docs)} documents covers "
                   f"{combo['n_covered'] if combo else 0}/{n}; {len(missing)} element(s) have no verified disclosure "
@@ -153,7 +154,7 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
     else:
         risk = "related"
 
-    return {"label": label, "risk": risk, "reason": reason, "n_elements": n, "needed": needed,
+    return {"label": label, "basis": basis, "risk": risk, "reason": reason, "n_elements": n, "needed": needed,
             "best_single": _key(best) if best else "", "best_coverage": best_cov,
             "per_doc_coverage": per_doc, "combo": combo, "params": params}
 

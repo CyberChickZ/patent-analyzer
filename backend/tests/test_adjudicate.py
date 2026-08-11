@@ -165,3 +165,10 @@ def test_explain_obviousness_feeds_the_rule_output_and_only_runs_for_103(monkeyp
     seen.clear()
     adj102 = adjudicate(E, [_doc("US-1", E)])
     assert asyncio.run(llm.explain_obviousness(adj102, claim_chart(adj102, E, docs), "x", docs)) == "" and not seen
+
+
+def test_basis_names_which_rule_fired():
+    assert adjudicate(E, [_doc("A", E)])["basis"] == "single"
+    assert adjudicate(E, [_doc("A", E[:3]), _doc("B", E[2:])])["basis"] == "combination"
+    assert adjudicate(E, [_doc("A", E[:3])], single_partial_103=0.7)["basis"] == "primary_partial"
+    assert adjudicate(E, [_doc("A", E[:1])])["basis"] == "none" and adjudicate([], [])["basis"] == "none"
