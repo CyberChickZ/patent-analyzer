@@ -1626,7 +1626,7 @@ Output strictly this JSON:
 }}
 
 ════ ORIGINAL INPUT THE PHASE SAW ════
-{original_input[:20000]}
+{original_input[:_EXTRACTION_DOC_CAP]}
 
 ════ OUTPUT TO REVIEW ════
 {output_to_review[:8000]}{extra_block}""",
@@ -1710,7 +1710,7 @@ follows from the SOURCE DOCUMENT. Output strict JSON:
     else:
         resp = await call_llm(
             system,
-            f"════ SOURCE DOCUMENT ════\n```\n{source_text[:20000]}\n```"
+            f"════ SOURCE DOCUMENT ════\n```\n{source_text[:_EXTRACTION_DOC_CAP]}\n```"
             f"\n\n{user_prompt}",
         )
     m = re.search(r'\{.*\}', resp, re.DOTALL)
