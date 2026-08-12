@@ -27,7 +27,8 @@ _CLAIM_SPLIT = re.compile(r"(?m)^\s*(?=\d+\s*\.\s)")
 _DEPENDENT = re.compile(r"\b(?:of|according to|as claimed in|as recited in|as defined in|as in)\s+(?:any\s+(?:one\s+)?of\s+)?claims?\s+\d", re.I)
 _INPUT_MODE_KIND = {
     "academic_paper": "paper", "technical_report": "paper", "informal_description": "disclosure",
-    "patent_draft": "patent_draft", "claim_text": "patent_draft", "manuscript": "manuscript",
+    "disclosure": "disclosure", "patent_draft": "patent_draft", "claim_text": "patent_draft",
+    "manuscript": "manuscript",
 }
 
 
@@ -35,6 +36,7 @@ class ExtractionState(TypedDict, total=False):
     # input from parent
     summary: str
     document_text: str
+    doc_json: dict | None
     input_local_path: str
     input_mode: str
     doc_type: str
@@ -63,10 +65,28 @@ def _event(kind: str, message: str) -> dict:
     return {"ts": datetime.now(timezone.utc).isoformat(), "phase": "phase2", "kind": kind, "message": message}
 
 
+def raw_file_text(state: ExtractionState) -> str:
+    """The input file's own text (fitz for PDFs) — the fallback layer."""
+    path = state.get("input_local_path") or ""
+    if not path or not Path(path).exists():
+        return ""
+    try:
+        if path.endswith(".pdf"):
+            from app.llm import _EXTRACTION_DOC_CAP, _extract_pdf_text
+            return _extract_pdf_text(path, max_pages=80, max_chars=_EXTRACTION_DOC_CAP)
+        return Path(path).read_text(errors="ignore")
+    except Exception:
+        return ""
+
+
 def resolve_doc_text(state: ExtractionState) -> str:
-    """Full document text: the input file when present (state.document_text is
-    truncated to 20k chars by idca_node), else state.document_text."""
+    """The text layer. With a Doc JSON, state.document_text is its rendered
+    marker text and is used as-is (what the model reads = what is verified).
+    Without one, the input file's text when it is longer than
+    state.document_text (legacy 20k truncation), else state.document_text."""
     text = state.get("document_text") or ""
+    if state.get("doc_json"):
+        return text
     path = state.get("input_local_path") or ""
     if path and Path(path).exists():
         try:
@@ -167,31 +187,57 @@ def _claim_ratio(elements: list[dict], method_claim: str) -> float | None:
     return round(SequenceMatcher(None, joined, normalize(method_claim), autojunk=False).ratio(), 4)
 
 
-def verify_extraction(raw: dict, text: str, doc_kind: str, no_invention_reason=None) -> tuple[dict, list[dict], dict]:
+def _headings_by_path(doc_json: dict | None) -> dict[str, str]:
+    if not doc_json:
+        return {}
+    from patent_analyzer.adapters.docjson import iter_doc_json_paragraphs
+    return {path: heading for path, heading, _, _ in iter_doc_json_paragraphs(doc_json)}
+
+
+def verify_extraction(raw: dict, text: str, doc_kind: str, no_invention_reason=None,
+                      doc_json: dict | None = None, fallback_text: str = "") -> tuple[dict, list[dict], dict]:
     """A3 (pure): snap every quote, mark unsupported, measure element/claim
-    agreement. Returns (extraction, checklist, errors)."""
+    agreement. `text` is the text layer (rendered Doc JSON when `doc_json` is
+    given: evidence_loc then carries section path + heading + paragraph and
+    source="doc_json"); a quote missing there is tried in `fallback_text` (the
+    raw file text) and, when found, located with source="fallback_text" and no
+    section. Returns (extraction, checklist, errors) with errors.doc_json_hits /
+    fallback_hits."""
     from evals.extraction_errors import snap_quote
     from patent_analyzer.adapters.paper import locate_marker
 
     has_markers = "[S" in text and re.search(r"\[S[\d.]+\.P\d+\]", text) is not None
+    headings = _headings_by_path(doc_json)
     cands = []
-    n_el = n_unsup = 0
+    n_el = n_unsup = n_doc = n_fb = 0
     ratios = []
     for c in raw.get("candidate_inventions") or []:
         elements = []
         for e in c.get("elements") or []:
             e = dict(e)
-            found, loc = snap_quote(e.get("evidence_quote") or "", text)
+            quote = e.get("evidence_quote") or ""
+            found, loc = snap_quote(quote, text)
             if found:
                 span = loc.get("char") if loc else None
                 pos = locate_marker(text, span[0]) if (has_markers and span) else {"section": None, "para": None}
                 e["evidence_loc"] = {"section": pos["section"], "para": pos["para"], "char": span,
                                      "method": loc.get("method"), "sim": loc.get("sim")}
+                if doc_json:
+                    e["evidence_loc"]["heading"] = headings.get(pos["section"] or "", "") or None
+                    e["evidence_loc"]["source"] = "doc_json"
+                    n_doc += 1
                 e["unsupported"] = False
             else:
-                e["evidence_loc"] = None
-                e["unsupported"] = True
-                n_unsup += 1
+                found, loc = snap_quote(quote, fallback_text) if fallback_text else (False, None)
+                if found:
+                    e["evidence_loc"] = {"section": None, "para": None, "char": loc.get("char") if loc else None,
+                                         "method": loc.get("method"), "sim": loc.get("sim"), "source": "fallback_text"}
+                    e["unsupported"] = False
+                    n_fb += 1
+                else:
+                    e["evidence_loc"] = None
+                    e["unsupported"] = True
+                    n_unsup += 1
             n_el += 1
             elements.append(e)
         form = c.get("primary_form") or "method"
@@ -209,6 +255,7 @@ def verify_extraction(raw: dict, text: str, doc_kind: str, no_invention_reason=N
     errors = {"n_elements": n_el, "n_unsupported": n_unsup,
               "quote_survival": round(1 - n_unsup / n_el, 4) if n_el else None,
               "claim_ratio_min": min(ratios) if ratios else None,
+              "doc_json_hits": n_doc if doc_json else None, "fallback_hits": n_fb if doc_json else None,
               "per_candidate": {c["id"]: {"n": len(c["elements"]),
                                           "unsupported": sum(e["unsupported"] for e in c["elements"]),
                                           "claim_ratio": c["claim_ratio"]} for c in cands}}
@@ -216,12 +263,15 @@ def verify_extraction(raw: dict, text: str, doc_kind: str, no_invention_reason=N
 
 
 async def verify_node(state: ExtractionState) -> dict:
+    doc_json = state.get("doc_json") or None
     extraction, checklist, errors = verify_extraction(
         state.get("raw_extraction") or {}, state["full_text"], state.get("doc_kind", "paper"),
-        state.get("no_invention_reason"))
+        state.get("no_invention_reason"), doc_json=doc_json, fallback_text=raw_file_text(state) if doc_json else "")
     errors["llm_calls"] = state.get("llm_calls", 0)
     msg = (f"{errors['n_elements']} elements, {errors['n_unsupported']} unsupported quotes, "
            f"checklist={len(checklist)}, claim_ratio_min={errors['claim_ratio_min']}")
+    if doc_json:
+        msg += f", located in Doc JSON: {errors['doc_json_hits']}, in raw text only: {errors['fallback_hits']}"
     return {"extraction": extraction, "checklist": checklist, "errors": errors, "events": [_event("verified", msg)]}
 
 

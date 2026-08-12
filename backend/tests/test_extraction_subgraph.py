@@ -177,3 +177,36 @@ def test_should_retry_elements():
     assert should_retry_elements({"self_check_ok": True, "retry_count": 1}) == END
     assert should_retry_elements({"self_check_ok": False, "retry_count": 1}) == "elements"
     assert should_retry_elements({"self_check_ok": False, "retry_count": 2}) == END
+
+
+def test_doc_json_layer_locates_with_heading_and_falls_back_to_raw_file(tmp_path, monkeypatch):
+    from patent_analyzer.adapters.docjson import render_doc_json
+    doc_json = {"title": "Widget alignment", "abstract": "",
+                "sections": [{"heading": "1 Method", "level": 1, "paragraphs": [
+                    "The offset network predicts a translation from the widget image.",
+                    "Training uses an L1 loss between predicted and measured offsets."]}],
+                "figures": [], "equations": [], "references_count": 0}
+    rendered = render_doc_json(doc_json)
+    raw = tmp_path / "in.txt"      # the raw file has one sentence Gemini dropped from the Doc JSON
+    raw.write_text(rendered.replace("[S1.P1] ", "").replace("[S1.P2] ", "")
+                   + "\nThe predicted translation is applied to the widget before printing.\n")
+    elements = {"candidate_inventions": [{
+        **ELEMENTS["candidate_inventions"][0],
+        "elements": ELEMENTS["candidate_inventions"][0]["elements"][:2] + [
+            {"id": "inv1.e2", "text": "applying the predicted translation to the widget before printing",
+             "evidence_quote": "The predicted translation is applied to the widget before printing",
+             "facets": {"thing": [], "place": [], "apparatus": []}, "kind": "step"}]}]}
+    calls = []
+    _patch(monkeypatch, calls, elements=elements)
+    out = asyncio.run(build_extraction_subgraph().ainvoke(
+        {"summary": "S", "document_text": rendered, "doc_json": doc_json, "input_local_path": str(raw),
+         "input_mode": "manuscript"}))
+    assert calls[0][1] == "manuscript" and calls[0][2] == rendered      # A1 read the rendered layer, not the file
+    e0, e1, e2 = out["extraction"]["candidate_inventions"][0]["elements"]
+    assert e1["evidence_loc"]["section"] == "S1" and e1["evidence_loc"]["para"] == 1
+    assert e1["evidence_loc"]["heading"] == "1 Method" and e1["evidence_loc"]["source"] == "doc_json"
+    assert not e2["unsupported"] and e2["evidence_loc"]["source"] == "fallback_text"
+    assert e2["evidence_loc"]["section"] is None and e2["evidence_loc"]["char"]
+    err = out["errors"]
+    assert err["doc_json_hits"] == 2 and err["fallback_hits"] == 1 and err["n_unsupported"] == 0
+    assert "located in Doc JSON: 2" in next(e["message"] for e in out["events"] if e["kind"] == "verified")
