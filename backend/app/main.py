@@ -192,6 +192,7 @@ async def _run_langgraph_pipeline(job_id: str):
             "pause_after": pause_after,
             "evolve": bool(job.get("evolve", False)),
             "notify_email": job.get("notify_email", ""),
+            "input_mode": _input_mode(job.get("input_mode")),
             "status": "running",
             "phase": "phase1",
             "events": [],
@@ -401,6 +402,15 @@ async def healthz():
     return {"status": "ok", "version": "0.3.0"}
 
 
+INPUT_MODES = ("academic_paper", "manuscript", "disclosure", "patent_draft")
+
+
+def _input_mode(value) -> str:
+    """Explicit input type from the upload form; "" (or "auto") = let IDCA detect."""
+    v = str(value or "").strip().lower()
+    return v if v in INPUT_MODES else ""
+
+
 @app.post("/analyze")
 async def start_analysis(
     file: UploadFile = File(...),
@@ -408,6 +418,7 @@ async def start_analysis(
     notify_email: str = Form(""),
     hitl_enabled: bool = Form(False),
     pause_after: str = Form(""),
+    input_mode: str = Form(""),
     user: dict = Depends(require_auth),
 ):
     job_id = str(uuid.uuid4())[:8]
@@ -431,6 +442,7 @@ async def start_analysis(
         "evolve": bool(evolve),
         "hitl_enabled": bool(hitl_enabled),
         "pause_after": [x.strip() for x in (pause_after or "").split(",") if x.strip()],
+        "input_mode": _input_mode(input_mode),
         "notify_email": notify_email or "",
         "submitted_by": user.get("email", ""),
     }
@@ -525,6 +537,7 @@ async def start_analysis_from_gcs(
         "hitl_enabled": bool(payload.get("hitl_enabled", False)),
         "pause_after": [x.strip() for x in str(payload.get("pause_after") or "").split(",") if x.strip()]
                        if not isinstance(payload.get("pause_after"), list) else list(payload.get("pause_after")),
+        "input_mode": _input_mode(payload.get("input_mode")),
         "notify_email": payload.get("notify_email", ""),
         "submitted_by": user.get("email", ""),
     }
