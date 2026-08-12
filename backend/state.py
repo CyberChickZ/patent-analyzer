@@ -59,7 +59,13 @@ class GraphState(TypedDict, total=False):
     source_title: str
     source_arxiv_id: str
     source_doi: str
-    document_text: str        # first N chars for non-PDF inputs
+    document_text: str        # text layer read by extraction / self_check: Doc JSON rendered with
+                              # [S<path>.P<n>] markers (adapters.docjson), else fitz / plain text
+    doc_json: dict | None     # IDCA Gemini transcription {title, abstract, sections[{heading, level,
+                              # paragraphs}], figures[{label, caption}], equations[{label, latex}],
+                              # references_count}; None when the call failed
+    doc_json_stats: dict      # {sections, paragraphs, figures, equations, references_count, chars,
+                              # source: gemini|none, fallback_paragraphs}
     status_determination: str # "Present" | "Implied" | "Absent"
     doc_type: str
     input_mode: str
