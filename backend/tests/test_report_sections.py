@@ -184,3 +184,41 @@ def test_generate_markdown_leads_with_the_determination_and_drops_scores():
     out = inject_md(md, EXT, STATS, SR, CL, adj)
     assert out.count("## Prior-Art Determination") == 1
     assert out.index("## Candidate Inventions") < out.index("## Evaluation Criteria")
+
+
+def test_report_node_builds_chart_and_calls_the_explanation_only_for_103(monkeypatch, tmp_path):
+    import asyncio
+    import json
+    import app.llm as llm
+    from nodes import report as report_mod
+    from patent_analyzer.adjudicate import adjudicate
+    calls = []
+
+    async def _fake(system, user, **k):
+        calls.append(user)
+        return "Reasoning paragraph."
+    monkeypatch.setattr(llm, "call_llm", _fake)
+    monkeypatch.setattr(report_mod, "_save_to_gcs", lambda *a, **k: None)
+    E = ["a lens", "a mirror", "a sensor", "a housing"]
+    d = _docs(E)
+    docs = [d("US-A", E[:3]), d("US-B", E[3:])]
+    adj = adjudicate(E, docs)
+    state = {"job_id": "j1", "output_dir": str(tmp_path), "summary": "S", "checklist": [{"criterion": e} for e in E],
+             "scoring_report": docs, "eval_stats": {"adjudication": adj}, "overall_summary": "", "combination_analysis": ""}
+    out = asyncio.run(report_mod.report_node(state))
+    assert out["status"] == "completed" and len(calls) == 1 and "Reference 1: US-A" in calls[0]
+    res = json.loads((tmp_path / "results.json").read_text())
+    assert res["adjudication"]["label"] == "103" and res["adjudication"]["obviousness_explanation"] == "Reasoning paragraph."
+    assert [x["pub_num"] for x in res["adjudication"]["claim_chart"]["docs"]] == ["US-A", "US-B"]
+    assert set(res["evaluation"]) >= {"summary", "combination_analysis", "stats"}     # legacy keys kept
+    html = (tmp_path / "report.html").read_text()
+    assert html.count('class="sec det-sec"') == 1 and "<p>Reasoning paragraph.</p>" in html
+    assert "Innovation Landscape" not in html and "novelty score" not in html.lower()
+    md = (tmp_path / "report.md").read_text()
+    assert md.count("## Prior-Art Determination") == 1 and "Reasoning paragraph." in md
+    # §102: no LLM call at all
+    calls.clear()
+    adj = adjudicate(E, [d("US-A", E)])
+    state.update(scoring_report=[d("US-A", E)], eval_stats={"adjudication": adj}, output_dir=str(tmp_path / "b"))
+    asyncio.run(report_mod.report_node(state))
+    assert calls == [] and json.loads((tmp_path / "b" / "results.json").read_text())["adjudication"]["obviousness_explanation"] == ""

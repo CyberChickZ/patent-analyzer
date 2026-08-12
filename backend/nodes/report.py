@@ -29,6 +29,29 @@ def _used_prompt_versions() -> dict:
         return {}
 
 
+async def _determination(state: GraphState, checklist: list, scoring_report: list, _event) -> dict:
+    """Rule verdict from Phase 4 (+ claim chart) and, for a §103 verdict only, one LLM call that
+    writes the reasoning from the rule output. The label is never touched here."""
+    adj = state.get("adjudication") or (state.get("eval_stats") or {}).get("adjudication") or {}
+    if not adj or not adj.get("n_elements"):
+        return adj or {}
+    from patent_analyzer.adjudicate import claim_chart
+    adj = dict(adj)
+    adj["claim_chart"] = claim_chart(adj, checklist, scoring_report)
+    adj["obviousness_explanation"] = ""
+    if adj.get("label") == "103":
+        try:
+            from app.llm import explain_obviousness
+            _event("llm", "Writing the §103 reasoning from the rule output (one call)")
+            adj["obviousness_explanation"] = await explain_obviousness(
+                adj, adj["claim_chart"], state.get("summary", ""), scoring_report)
+        except Exception as e:
+            _event("warn", f"§103 explanation skipped: {e}")
+    _event("info", f"Determination: {adj.get('label')} ({adj.get('basis', '')}) — chart columns "
+                   f"{[d.get('pub_num') or d.get('title') for d in adj['claim_chart']['docs']]}")
+    return adj
+
+
 async def report_node(state: GraphState) -> dict:
     """Phase 5: compile results, generate report, upload."""
     from patent_analyzer.report_generator import generate_html, generate_markdown
@@ -49,6 +72,9 @@ async def report_node(state: GraphState) -> dict:
 
     scoring_report = state.get("scoring_report", [])
     top_score = scoring_report[0].get("similarity_score", 0) if scoring_report else 0
+    checklist = state.get("checklist", [])
+
+    adjudication = await _determination(state, checklist, scoring_report, _event)
 
     results = {
         "job_id": job_id,
@@ -82,7 +108,7 @@ async def report_node(state: GraphState) -> dict:
         "eval_stats": state.get("eval_stats", {}),
         "user_edits": state.get("user_edits", []),           # reviewer changes at the phase gates
         "prompt_versions": {**_used_prompt_versions(), **(state.get("prompt_versions") or {})},
-        "adjudication": state.get("adjudication") or (state.get("eval_stats") or {}).get("adjudication") or {},
+        "adjudication": adjudication,
         "evaluation": {
             "scoring_report": scoring_report,
             "summary": state.get("overall_summary", ""),
@@ -105,13 +131,14 @@ async def report_node(state: GraphState) -> dict:
         _save_to_gcs(job_id, "user_edits.json", edits_str, "application/json")
 
     from patent_analyzer.report_sections import inject_html, inject_md
+    # generate_html/markdown render the determination themselves (top of the report); inject_* add the other sections
     html = inject_html(generate_html(results), results["extraction"], results["search"]["summary"],
-                       scoring_report, state.get("checklist", []), results["adjudication"])
+                       scoring_report, checklist)
     (job_dir / "report.html").write_text(html, encoding="utf-8")
     _save_to_gcs(job_id, "report.html", html, "text/html")
 
     md = inject_md(generate_markdown(results), results["extraction"], results["search"]["summary"],
-                   scoring_report, state.get("checklist", []), results["adjudication"])
+                   scoring_report, checklist)
     (job_dir / "report.md").write_text(md, encoding="utf-8")
     _save_to_gcs(job_id, "report.md", md, "text/markdown")
 
