@@ -94,6 +94,7 @@ async def report_node(state: GraphState) -> dict:
             "summary": state.get("summary", ""),
             "invention_type": state.get("category", ""),
             "reasoning": state.get("reasoning", ""),
+            "doc_json_stats": state.get("doc_json_stats", {}),
         },
         "phase2": {
             "checklist": state.get("checklist", []),
@@ -124,6 +125,9 @@ async def report_node(state: GraphState) -> dict:
     results_str = json.dumps(results, indent=2, ensure_ascii=False, default=str)
     (job_dir / "results.json").write_text(results_str)
     _save_to_gcs(job_id, "results.json", results_str, "application/json")
+    if state.get("doc_json"):
+        # the Gemini transcription the text layer was rendered from (for coverage checks against the PDF)
+        (job_dir / "doc_json.json").write_text(json.dumps(state["doc_json"], indent=1, ensure_ascii=False))
     if state.get("user_edits"):
         # reviewer changes alone, in the evals' element/doc vocabulary (future training / agreement data)
         edits_str = json.dumps(state["user_edits"], indent=2, ensure_ascii=False, default=str)
