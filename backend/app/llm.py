@@ -32,6 +32,14 @@ GC_PROJECT = os.getenv("GC_PROJECT", "aime-hello-world")
 MODEL = os.getenv("LLM_MODEL", "gemini-2.5-pro")
 MAX_TOKENS = 8192
 
+# Per-stage override: LLM_MODEL_<STAGE> (extract / screen / eval / idca); unset → MODEL.
+STAGES = ("extract", "screen", "eval", "idca")
+
+
+def stage_model(stage: str) -> str:
+    """Model id for a pipeline stage: LLM_MODEL_<STAGE> if set, else the global MODEL."""
+    return os.getenv(f"LLM_MODEL_{stage.upper()}") or MODEL
+
 _client: genai.Client | None = None
 
 # Hook so the pipeline can observe every LLM call (system, user, response, thoughts)
