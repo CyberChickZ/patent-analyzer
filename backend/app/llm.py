@@ -75,8 +75,38 @@ def get_client() -> genai.Client:
     return _client
 
 
+# Gemini 3 dropped the numeric budget: "The raw numeric thinking_budget parameter is
+# no longer supported across all Gemini 3 models. Use the thinking_level string enum
+# instead." (models/guides/gemini-3-5-flash). MINIMAL is rejected by 3.7/3.8 Flash and
+# 3.x Pro ("thinking_level=\"MINIMAL\" is not available for 3.8 Flash"), so budget 0
+# maps to LOW there.
+_NO_MINIMAL = ("gemini-3.7-", "gemini-3.8-", "gemini-3-pro", "gemini-3.1-pro")
+
+
+def _is_gemini3(model: str) -> bool:
+    m = re.match(r"gemini-(\d+)", model or "")
+    return bool(m) and int(m.group(1)) >= 3
+
+
+def _thinking_level(model: str, thinking_budget: int) -> str:
+    """Budget → level for Gemini 3 (LLM_THINKING_LEVEL overrides): 0 → MINIMAL/LOW,
+    ≤2048 → LOW, ≤4096 → MEDIUM, else HIGH."""
+    forced = os.getenv("LLM_THINKING_LEVEL")
+    if forced:
+        return forced.upper()
+    if thinking_budget <= 0:
+        return "LOW" if model.startswith(_NO_MINIMAL) else "MINIMAL"
+    if thinking_budget <= 2048:
+        return "LOW"
+    if thinking_budget <= 4096:
+        return "MEDIUM"
+    return "HIGH"
+
+
 def _build_config(system: str, max_tokens: int, thinking_budget: int,
-                  response_schema: dict | None = None) -> types.GenerateContentConfig:
+                  response_schema: dict | None = None,
+                  model: str | None = None) -> types.GenerateContentConfig:
+    model = model or MODEL
     config = types.GenerateContentConfig(
         system_instruction=system,
         max_output_tokens=max_tokens,
@@ -85,15 +115,20 @@ def _build_config(system: str, max_tokens: int, thinking_budget: int,
         # JSON mode: the model can only emit an instance of the schema
         config.response_mime_type = "application/json"
         config.response_schema = response_schema
-    if thinking_budget > 0:
-        try:
+    try:
+        if _is_gemini3(model):
+            config.thinking_config = types.ThinkingConfig(
+                thinking_level=_thinking_level(model, thinking_budget),
+                include_thoughts=True,
+            )
+        elif thinking_budget > 0:
             config.thinking_config = types.ThinkingConfig(
                 thinking_budget=thinking_budget,
                 include_thoughts=True,
             )
-        except Exception:
-            # SDK version may not support ThinkingConfig — fall back silently
-            pass
+    except Exception:
+        # SDK version may not support ThinkingConfig — fall back silently
+        pass
     return config
 
 
