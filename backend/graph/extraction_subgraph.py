@@ -140,10 +140,12 @@ async def candidates_node(state: ExtractionState) -> dict:
 
     text = resolve_doc_text(state)
     kind = doc_kind_of(state)
-    if is_claim_mode(state, text):
-        cands, prefill = claim_prefill(text)
+    # claim text is already structured: the raw file (not the rendered Doc JSON) decides claim mode
+    claim_text = raw_file_text(state) if state.get("doc_json") else text
+    if is_claim_mode(state, claim_text):
+        cands, prefill = claim_prefill(claim_text)
         if cands:
-            return {"full_text": text, "doc_kind": "patent_draft", "candidates": cands, "claim_prefill": prefill,
+            return {"full_text": claim_text, "doc_kind": "patent_draft", "candidates": cands, "claim_prefill": prefill,
                     "no_invention_reason": None, "retry_count": 0, "llm_calls": 0,
                     "events": [_event("info", f"Claim mode: {len(cands)} independent claims prefilled")]}
     res = await extract_candidates(text, state.get("summary", ""), kind)

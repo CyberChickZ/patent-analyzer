@@ -210,3 +210,19 @@ def test_doc_json_layer_locates_with_heading_and_falls_back_to_raw_file(tmp_path
     err = out["errors"]
     assert err["doc_json_hits"] == 2 and err["fallback_hits"] == 1 and err["n_unsupported"] == 0
     assert "located in Doc JSON: 2" in next(e["message"] for e in out["events"] if e["kind"] == "verified")
+
+
+def test_claim_mode_is_decided_on_the_raw_file_not_the_rendered_doc_json(tmp_path, monkeypatch):
+    claims = ("1. A method of aligning a widget, comprising: predicting a translation from a widget image; "
+              "and applying the translation before printing.\n\n2. The method of claim 1, wherein the translation is learned.\n")
+    raw = tmp_path / "claims.txt"
+    raw.write_text(claims)
+    doc_json = {"title": "", "abstract": "", "sections": [{"heading": "Claims", "level": 1, "paragraphs": claims.split("\n\n")}],
+                "figures": [], "equations": [], "references_count": 0}
+    from patent_analyzer.adapters.docjson import render_doc_json
+    calls = []
+    _patch(monkeypatch, calls)
+    out = asyncio.run(build_extraction_subgraph().ainvoke(
+        {"summary": "S", "document_text": render_doc_json(doc_json), "doc_json": doc_json, "input_local_path": str(raw)}))
+    assert calls[0][0] == "A2" and calls[0][1]           # no A1 call: prefilled from the independent claim
+    assert out["doc_kind"] == "patent_draft" and out["full_text"] == claims
