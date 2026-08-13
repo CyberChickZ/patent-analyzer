@@ -16,6 +16,10 @@ function pauseAfter(): string[] {
   return Array.from(document.querySelectorAll<HTMLInputElement>("input.pauseAfter:checked")).map((c) => c.value);
 }
 
+function inputMode(): string {
+  return (document.getElementById("inputMode") as HTMLSelectElement | null)?.value || "";
+}
+
 const PAUSE_LABEL: Record<string, string> = { idca: "Invention Detection", extract: "Decomposition", search: "Prior Art Search", evaluate: "Deep Evaluation" };
 const PAUSE_AFTER_PHASE: Record<string, string> = { idca: "phase1", extract: "phase2", search: "phase3b", evaluate: "phase4" };
 
@@ -49,6 +53,17 @@ root.innerHTML = `
       <input type="file" id="fileIn" accept=".pdf,.txt,.md">
     </div>
     <div class="fname" id="fname"></div>
+    <div class="email-row" id="mode-row">
+      <label class="email-toggle" for="inputMode"><span>Input type</span></label>
+      <select id="inputMode" class="email-input" style="flex:0 1 auto;min-width:220px">
+        <option value="">Auto-detect</option>
+        <option value="academic_paper">Academic paper (published)</option>
+        <option value="manuscript">Manuscript (draft, no related work)</option>
+        <option value="disclosure">Invention disclosure (Core Idea / Novelty / How It Works)</option>
+        <option value="patent_draft">Patent draft / claims</option>
+      </select>
+      <span class="hitl-hint">— tells the analysis where to look for the invention</span>
+    </div>
     <div class="email-row" id="email-row">
       <label class="email-toggle">
         <input type="checkbox" id="emailCheck">
@@ -262,6 +277,7 @@ async function startAnalysis() {
           notify_email: notifyEmail,
           pause_after: pauseAfter(),
           hitl_enabled: pauseAfter().length > 0,
+          input_mode: inputMode(),
         }),
       });
       if (!analyzeResp.ok) {
@@ -278,6 +294,7 @@ async function startAnalysis() {
       const pa = pauseAfter();
       if (notifyEmail) fd.append("notify_email", notifyEmail);
       if (pa.length) { fd.append("pause_after", pa.join(",")); fd.append("hitl_enabled", "true"); }
+      if (inputMode()) fd.append("input_mode", inputMode());
       const resp = await authFetch(`${API}/api/analyze`, { method: "POST", body: fd });
       if (!resp.ok) {
         const errText = await resp.text();
