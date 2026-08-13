@@ -156,19 +156,39 @@ def _extract_text_and_thoughts(resp) -> tuple[str, str]:
 
 
 _LLM_RPM = int(os.getenv("LLM_RPM", "40"))
-_llm_gate = None
+_llm_gates: dict = {}
+
+# Per-model meter (prompt / output / thought tokens, calls, 429s) — read by evals for cost.
+usage: dict[str, dict[str, int]] = {}
 
 
-async def _smooth() -> None:
-    """Shared per-minute gate across every process on this machine/instance."""
-    global _llm_gate
-    if _llm_gate is None:
+def _meter(model: str) -> dict[str, int]:
+    return usage.setdefault(model, {"calls": 0, "prompt_tokens": 0, "output_tokens": 0,
+                                    "thought_tokens": 0, "errors_429": 0})
+
+
+def _record_usage(model: str, resp) -> None:
+    m = _meter(model)
+    m["calls"] += 1
+    um = getattr(resp, "usage_metadata", None)
+    if um is None:
+        return
+    m["prompt_tokens"] += int(getattr(um, "prompt_token_count", 0) or 0)
+    m["output_tokens"] += int(getattr(um, "candidates_token_count", 0) or 0)
+    m["thought_tokens"] += int(getattr(um, "thoughts_token_count", 0) or 0)
+
+
+async def _smooth(model: str | None = None) -> None:
+    """Shared per-minute gate across every process on this machine/instance, one per model."""
+    model = model or MODEL
+    gate = _llm_gates.get(model)
+    if gate is None:
         from patent_analyzer.runtime_state import MinuteGate
-        _llm_gate = MinuteGate(f"vertex:{MODEL}", _LLM_RPM)
+        gate = _llm_gates[model] = MinuteGate(f"vertex:{model}", _LLM_RPM)
     try:
-        waited = await _llm_gate.wait()
+        waited = await gate.wait()
         if waited:
-            print(f"[LLM] smoothed: waited {waited:.1f}s for a slot ({_LLM_RPM}/min)")
+            print(f"[LLM] smoothed: waited {waited:.1f}s for a slot ({_LLM_RPM}/min, {model})")
     except Exception:
         pass
 
@@ -177,6 +197,8 @@ def _is_retryable(exc: BaseException) -> bool:
     if isinstance(exc, APIError) and exc.code in (429, 503, 500):
         # DSQ 429 = "temporary high contention for a specific shared resource", not a fixed quota
         print(f"[LLM] {exc.code} from Vertex: {str(getattr(exc, 'message', exc))[:300]}")
+        if exc.code == 429:
+            _meter(_current_model.get() or MODEL)["errors_429"] += 1
         return True
     name = type(exc).__name__
     return any(k in name for k in ("Timeout", "ServiceUnavailable", "ResourceExhausted"))
@@ -190,6 +212,10 @@ _retry_decorator = retry(
 )
 
 
+# Model of the in-flight call, so the retry predicate can attribute a 429 to it.
+_current_model: contextvars.ContextVar[str | None] = contextvars.ContextVar("_current_model", default=None)
+
+
 @_retry_decorator
 async def call_llm(
     system: str,
@@ -197,15 +223,20 @@ async def call_llm(
     max_tokens: int = MAX_TOKENS,
     thinking_budget: int = 0,
     response_schema: dict | None = None,
+    model: str | None = None,
 ) -> str:
+    """model=None → the global MODEL; stages pass stage_model(<stage>)."""
+    model = model or MODEL
+    _current_model.set(model)
     client = get_client()
-    config = _build_config(system, max_tokens, thinking_budget, response_schema)
-    await _smooth()
+    config = _build_config(system, max_tokens, thinking_budget, response_schema, model=model)
+    await _smooth(model)
     resp = await client.aio.models.generate_content(
-        model=MODEL,
+        model=model,
         contents=[types.Part.from_text(text=user)],
         config=config,
     )
+    _record_usage(model, resp)
     text, thoughts = _extract_text_and_thoughts(resp)
     if text.startswith("```"):
         text = text.split("```", 2)[1].strip()
