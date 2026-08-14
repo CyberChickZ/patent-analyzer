@@ -106,7 +106,7 @@ async def stage2_llm(candidates: list[dict], elements: list[dict], docs: list[di
     system = "You are a patent examiner screening search results. Output JSON only."
     verdict: dict[int, tuple[bool, list[str], str]] = {}
     batches = [[(i, docs[i]) for i in idxs[start:start + batch_size]] for start in range(0, len(idxs), batch_size)]
-    sem = asyncio.Semaphore(int(os.environ.get("PRUNE_CONCURRENCY", "2")))
+    sem = asyncio.Semaphore(int(os.environ.get("PRUNE_CONCURRENCY", "4")))
 
     async def _one(batch):
         async with sem:

@@ -244,21 +244,27 @@ async def search_node(state: GraphState) -> dict:
         ("arxiv", run_arxiv),
         ("bigquery_patents", run_bigquery_patents),
     ]
-    gathered = await asyncio.gather(
-        *(spec[1]() for spec in channel_specs),
-        return_exceptions=True,
-    )
+    import time as _time
+
+    async def _timed(name, fn):
+        t0 = _time.monotonic()
+        try:
+            return await fn(), _time.monotonic() - t0
+        except Exception as exc:
+            return exc, _time.monotonic() - t0
+
+    gathered = await asyncio.gather(*(_timed(n, f) for n, f in channel_specs))
 
     channel_results: dict[str, list] = {}
-    for (name, _), result in zip(channel_specs, gathered):
+    for (name, _), (result, secs) in zip(channel_specs, gathered):
         if isinstance(result, Exception):
-            _event("channel_crashed", f"{name}: {type(result).__name__}: {result}")
+            _event("channel_crashed", f"{name}: {type(result).__name__}: {result}", {"channel": name, "seconds": round(secs, 1)})
             channel_results[name] = []
             continue
         cands, errs = result
         channel_results[name] = cands
-        _event("channel_done", f"{name}: {len(cands)} raw candidates",
-               {"channel": name, "n": len(cands), "errors": errs[:5]})
+        _event("channel_done", f"{name}: {len(cands)} raw candidates in {secs:.0f}s",
+               {"channel": name, "n": len(cands), "seconds": round(secs, 1), "errors": errs[:5]})
         for e in errs:
             if any(k in str(e.get("error", "")) for k in ("blocked", "429", "budget", "Sorry")):
                 _event("channel_limited", f"{name}: {str(e.get('error', ''))[:120]}")
@@ -351,7 +357,9 @@ async def search_node(state: GraphState) -> dict:
     if os.environ.get("PRUNE", "1") == "1" and loop_stats.get("mode") == "wide" and loop_stats.get("elements"):
         try:
             from patent_analyzer.agentic.prune import prune as _prune
+            _t0 = _time.monotonic()
             pruned_docs, prune_stats = await _prune(loop_stats.get("candidates") or [], loop_stats["elements"], all_docs)
+            prune_stats["seconds"] = round(_time.monotonic() - _t0, 1)
             _event("prune_done", f"prune: pool {prune_stats.get('pool')} → embed {prune_stats.get('stage1_out')} "
                                  f"→ llm {prune_stats.get('stage2_worth')} worth reading, kept {len(pruned_docs)} "
                                  f"({prune_stats.get('stage2_calls')} calls)", prune_stats)
