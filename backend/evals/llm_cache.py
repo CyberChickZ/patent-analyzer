@@ -38,38 +38,47 @@ def install():
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     real_text, real_pdfs = llm.call_llm, llm.call_llm_with_pdfs
 
-    async def cached_text(system, user, max_tokens=llm.MAX_TOKENS, thinking_budget=0, response_schema=None):
+    async def cached_text(system, user, max_tokens=llm.MAX_TOKENS, thinking_budget=0, response_schema=None,
+                          model=None):
+        # keyed on the model actually called (per-stage override), so switching a stage's
+        # model never replays another model's answers; default-model keys are unchanged
+        model = model or llm.MODEL
         # schema-less calls keep their historical key (cached IDCA / extraction stay valid)
         extra = [json.dumps(response_schema, sort_keys=True)] if response_schema else []
-        p = CACHE_DIR / (_key("text", llm.MODEL, system, user, max_tokens, thinking_budget, *extra) + ".json")
+        p = CACHE_DIR / (_key("text", model, system, user, max_tokens, thinking_budget, *extra) + ".json")
         if p.exists():
             stats["hits"] += 1
             return json.loads(p.read_text())["text"]
-        out = await real_text(system, user, max_tokens, thinking_budget, response_schema=response_schema)
+        out = await real_text(system, user, max_tokens, thinking_budget, response_schema=response_schema,
+                              model=model)
         stats["misses"] += 1
         stats["chars_in"] += len(system) + len(user)
         stats["chars_out"] += len(out)
-        p.write_text(json.dumps({"text": out}))
+        p.write_text(json.dumps({"text": out, "model": model}))
         return out
 
     async def cached_pdfs(system, user, pdf_paths, max_tokens=llm.MAX_TOKENS,
-                          thinking_budget=0, image_parts=None):
+                          thinking_budget=0, image_parts=None, response_schema=None, model=None):
+        model = model or llm.MODEL
         shas = [_file_sha(x) for x in pdf_paths]
         img = [hashlib.sha1(b).hexdigest() for b in (image_parts or [])]
-        p = CACHE_DIR / (_key("pdfs", llm.MODEL, system, user, shas, img, max_tokens, thinking_budget) + ".json")
+        extra = [json.dumps(response_schema, sort_keys=True)] if response_schema else []
+        p = CACHE_DIR / (_key("pdfs", model, system, user, shas, img, max_tokens, thinking_budget, *extra) + ".json")
         if p.exists():
             stats["hits"] += 1
             return json.loads(p.read_text())["text"]
-        out = await real_pdfs(system, user, pdf_paths, max_tokens, thinking_budget, image_parts)
+        out = await real_pdfs(system, user, pdf_paths, max_tokens, thinking_budget, image_parts,
+                              response_schema=response_schema, model=model)
         stats["misses"] += 1
         stats["chars_in"] += len(system) + len(user)
         stats["chars_out"] += len(out)
-        p.write_text(json.dumps({"text": out}))
+        p.write_text(json.dumps({"text": out, "model": model}))
         return out
 
     llm.call_llm = cached_text
     llm.call_llm_with_pdfs = cached_pdfs
-    llm.call_llm_with_pdf = lambda s, u, path, m=llm.MAX_TOKENS, t=0: cached_pdfs(s, u, [path], m, t)
+    llm.call_llm_with_pdf = (lambda s, u, path, m=llm.MAX_TOKENS, t=0, model=None:
+                             cached_pdfs(s, u, [path], m, t, model=model))
 
 
 def summary() -> str:
