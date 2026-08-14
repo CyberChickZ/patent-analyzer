@@ -252,13 +252,14 @@ async def call_llm_with_pdf(
     pdf_path: str,
     max_tokens: int = MAX_TOKENS,
     thinking_budget: int = 0,
+    model: str | None = None,
 ) -> str:
     """Send a single PDF as a native multi-modal part to Gemini (no truncation).
 
     Only used for bulk initial screening where text extraction is acceptable.
     For deep eval use call_llm_with_pdfs which supports multiple files.
     """
-    return await call_llm_with_pdfs(system, user, [pdf_path], max_tokens, thinking_budget)
+    return await call_llm_with_pdfs(system, user, [pdf_path], max_tokens, thinking_budget, model=model)
 
 
 # Vertex AI inline-bytes cap is ~20MB per request. Pad for safety.
@@ -274,6 +275,7 @@ async def call_llm_with_pdfs(
     thinking_budget: int = 0,
     image_parts: list[bytes] | None = None,
     response_schema: dict | None = None,
+    model: str | None = None,
 ) -> str:
     """Send one or more PDFs as native multi-modal parts to Gemini.
 
@@ -305,14 +307,17 @@ async def call_llm_with_pdfs(
         parts.append(types.Part.from_bytes(data=img_data, mime_type="image/png"))
     parts.append(types.Part.from_text(text=user))
 
+    model = model or MODEL
+    _current_model.set(model)
     client = get_client()
-    config = _build_config(system, max_tokens, thinking_budget, response_schema)
-    await _smooth()
+    config = _build_config(system, max_tokens, thinking_budget, response_schema, model=model)
+    await _smooth(model)
     resp = await client.aio.models.generate_content(
-        model=MODEL,
+        model=model,
         contents=parts,
         config=config,
     )
+    _record_usage(model, resp)
     text, thoughts = _extract_text_and_thoughts(resp)
     if text.startswith("```"):
         text = text.split("```", 2)[1].strip()
