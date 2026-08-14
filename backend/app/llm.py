@@ -1785,12 +1785,13 @@ follows from the SOURCE DOCUMENT. Output strict JSON:
 }}"""
     if source_pdf_path and Path(source_pdf_path).exists():
         resp = await call_llm_with_pdfs(
-            system, user_prompt, [source_pdf_path])
+            system, user_prompt, [source_pdf_path], model=stage_model("extract"))
     else:
         resp = await call_llm(
             system,
             f"════ SOURCE DOCUMENT ════\n```\n{source_text[:_EXTRACTION_DOC_CAP]}\n```"
             f"\n\n{user_prompt}",
+            model=stage_model("extract"),
         )
     m = re.search(r'\{.*\}', resp, re.DOTALL)
     if m:
@@ -2187,7 +2188,7 @@ async def extract_candidates(doc_text: str, summary: str, doc_kind: str = "paper
               "claimed. Output JSON only.")
     prompt = prompts.render("extract.candidates", doc_kind=doc_kind, guidance=guidance,
                             summary=(summary or "")[:4000], document=(doc_text or "")[:_EXTRACTION_DOC_CAP])
-    resp = await call_llm(system, prompt, thinking_budget=4096)
+    resp = await call_llm(system, prompt, thinking_budget=4096, model=stage_model("extract"))
     data = _extraction_json(resp) or {}
     out = []
     for i, c in enumerate((data.get("candidate_inventions") or [])[:4]):
@@ -2241,7 +2242,7 @@ and kind for each. Do not rewrite, merge, or split them.
 """
     prompt = prompts.render("extract.elements", cand_lines=cand_lines, prefill_block=prefill_block,
                             feedback_block=_feedback_block(feedback), document=(doc_text or "")[:_EXTRACTION_DOC_CAP])
-    resp = await call_llm(system, prompt, max_tokens=16384, thinking_budget=4096)
+    resp = await call_llm(system, prompt, max_tokens=16384, thinking_budget=4096, model=stage_model("extract"))
     data = _extraction_json(resp)
     if data is None:
         return {"candidate_inventions": [], "error": "A2 response could not be parsed"}

@@ -9,9 +9,9 @@ import app.llm as llm
 
 
 def _patch(monkeypatch, reply, seen: dict):
-    async def fake_call_llm(system, user, max_tokens=llm.MAX_TOKENS, thinking_budget=0):
+    async def fake_call_llm(system, user, max_tokens=llm.MAX_TOKENS, thinking_budget=0, model=None):
         seen["system"], seen["user"] = system, user
-        seen["thinking_budget"], seen["max_tokens"] = thinking_budget, max_tokens
+        seen["thinking_budget"], seen["max_tokens"], seen["model"] = thinking_budget, max_tokens, model
         return reply if isinstance(reply, str) else json.dumps(reply)
     monkeypatch.setattr(llm, "call_llm", fake_call_llm)
 
