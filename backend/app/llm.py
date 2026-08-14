@@ -650,13 +650,15 @@ Output strictly this JSON, no preamble:
 }}"""
     if source_pdf_path and Path(source_pdf_path).exists():
         resp = await call_llm_with_pdfs(
-            system, task_prompt, [source_pdf_path], thinking_budget=4096)
+            system, task_prompt, [source_pdf_path], thinking_budget=4096,
+            model=stage_model("idca"))
     else:
         resp = await call_llm(
             system,
             f"{task_prompt}\n\n════ DOCUMENT TEXT ════\n"
             f"```\n{document_text}\n```",
             thinking_budget=4096,
+            model=stage_model("idca"),
         )
     m = re.search(r'\{.*\}', resp, re.DOTALL)
     if m:
