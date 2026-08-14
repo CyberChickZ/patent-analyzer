@@ -101,7 +101,12 @@ async def stage2_llm(candidates: list[dict], elements: list[dict], docs: list[di
     """LLM screen over the stage-1 survivors. Returns indices kept (≤keep),
     ordered by (#elements touched, cosine)."""
     if call is None:
-        from app.llm import call_llm as call
+        from app import llm as _llm
+        _model = _llm.stage_model("screen")
+
+        async def call(system, user, response_schema=None):
+            # looked up at call time so evals/llm_cache.install() still wraps it
+            return await _llm.call_llm(system, user, response_schema=response_schema, model=_model)
     import asyncio
     system = "You are a patent examiner screening search results. Output JSON only."
     verdict: dict[int, tuple[bool, list[str], str]] = {}
