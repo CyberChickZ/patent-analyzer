@@ -155,7 +155,7 @@ def _extract_text_and_thoughts(resp) -> tuple[str, str]:
     return text, thoughts
 
 
-_LLM_RPM = int(os.getenv("LLM_RPM", "40"))
+_LLM_RPM = int(os.getenv("LLM_RPM", "120"))   # smoothing only; DSQ has no fixed RPM (12-way burst test: 0 × 429)
 _llm_gates: dict = {}
 
 # Per-model meter (prompt / output / thought tokens, calls, 429s) — read by evals for cost.
@@ -1408,7 +1408,8 @@ JSON output:
     try:
         resp = await call_llm_with_pdfs(
             system, prompt, pdfs, thinking_budget=8192,
-            image_parts=[img for _, img in fig_pages] or None)
+            image_parts=[img for _, img in fig_pages] or None,
+            model=stage_model("eval"))
         m = re.search(r'\{.*\}', resp, re.DOTALL)
         if m:
             result = json.loads(m.group())
@@ -1532,7 +1533,7 @@ JSON output:
   {output_schema}
 }}"""
     try:
-        resp = await call_llm(system, prompt, thinking_budget=4096)
+        resp = await call_llm(system, prompt, thinking_budget=4096, model=stage_model("eval"))
         m = re.search(r'\{.*\}', resp, re.DOTALL)
         if m:
             result = json.loads(m.group())
