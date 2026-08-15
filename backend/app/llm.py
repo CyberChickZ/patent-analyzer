@@ -18,6 +18,7 @@ import contextvars
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -164,12 +165,13 @@ usage: dict[str, dict[str, int]] = {}
 
 def _meter(model: str) -> dict[str, int]:
     return usage.setdefault(model, {"calls": 0, "prompt_tokens": 0, "output_tokens": 0,
-                                    "thought_tokens": 0, "errors_429": 0})
+                                    "thought_tokens": 0, "errors_429": 0, "seconds": 0.0})
 
 
-def _record_usage(model: str, resp) -> None:
+def _record_usage(model: str, resp, seconds: float = 0.0) -> None:
     m = _meter(model)
     m["calls"] += 1
+    m["seconds"] += seconds
     um = getattr(resp, "usage_metadata", None)
     if um is None:
         return
@@ -231,12 +233,13 @@ async def call_llm(
     client = get_client()
     config = _build_config(system, max_tokens, thinking_budget, response_schema, model=model)
     await _smooth(model)
+    t0 = time.monotonic()
     resp = await client.aio.models.generate_content(
         model=model,
         contents=[types.Part.from_text(text=user)],
         config=config,
     )
-    _record_usage(model, resp)
+    _record_usage(model, resp, time.monotonic() - t0)
     text, thoughts = _extract_text_and_thoughts(resp)
     if text.startswith("```"):
         text = text.split("```", 2)[1].strip()
@@ -312,12 +315,13 @@ async def call_llm_with_pdfs(
     client = get_client()
     config = _build_config(system, max_tokens, thinking_budget, response_schema, model=model)
     await _smooth(model)
+    t0 = time.monotonic()
     resp = await client.aio.models.generate_content(
         model=model,
         contents=parts,
         config=config,
     )
-    _record_usage(model, resp)
+    _record_usage(model, resp, time.monotonic() - t0)
     text, thoughts = _extract_text_and_thoughts(resp)
     if text.startswith("```"):
         text = text.split("```", 2)[1].strip()
