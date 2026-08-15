@@ -164,7 +164,7 @@ def chart_columns(adj: dict, max_docs: int = 3) -> list[str]:
     rule relied on (best single for "102" / partial "103", the greedy combo
     for a combination "103"), then the next best by coverage, capped."""
     per = adj.get("per_doc_coverage") or []
-    keys = [d.get("pub_num") or d.get("title") or "" for d in per]
+    keys = [d.get("pub_num") or d.get("title") or "" for d in per if d.get("n_covered", 0) > 0]   # a 0/n column says nothing
     combo = adj.get("combo") or {}
     lead = list(combo.get("docs") or []) if adj.get("label") == "103" and len(combo.get("docs") or []) >= 2 else []
     if adj.get("best_single") and adj["best_single"] not in lead:

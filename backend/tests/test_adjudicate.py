@@ -152,6 +152,11 @@ def test_claim_chart_allow_marks_unverified_cells_as_not_covered():
     assert cell["score"] == 2 and cell["n_verified"] == 0 and not cell["covered"]
     assert ch["uncovered"] == [E[1], E[3]] and ch["docs"][0]["n_covered"] == 1
     assert ch["rows"][2]["covered_by"] == ["B"]
+    # references that disclose nothing are not chart columns
+    adj, ch = _chart([_doc("A", E[:1]), _doc("Z", []), _doc("Y", [])])
+    assert [d["key"] for d in ch["docs"]] == ["A"]
+    adj, ch = _chart([_doc("Z", [])])
+    assert ch["docs"] == [] and ch["rows"][0]["cells"] == [] and ch["uncovered"] == E
 
 
 def test_explain_obviousness_feeds_the_rule_output_and_only_runs_for_103(monkeypatch):
