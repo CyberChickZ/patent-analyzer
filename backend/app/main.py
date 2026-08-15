@@ -288,6 +288,33 @@ async def _run_langgraph_pipeline(job_id: str):
     _save_job(job)
 
 
+async def _pipeline_worker():
+    """Single worker that processes pipeline jobs sequentially."""
+    while True:
+        job_id = await _pipeline_queue.get()
+        try:
+            if job_id in _pending_jobs:
+                _pending_jobs.remove(job_id)
+            _active_pipelines.add(job_id)
+            await _run_langgraph_pipeline(job_id)
+        except Exception as exc:
+            import traceback
+            print(f"[PIPELINE WORKER] job {job_id} crashed: {exc}\n{traceback.format_exc()}")
+            job = jobs.get(job_id)
+            if job and job.get("status") != "completed":
+                job["status"] = "error"
+                job["error"] = f"Pipeline worker crash: {exc}"
+                _save_job(job)
+        finally:
+            _active_pipelines.discard(job_id)
+            _pipeline_queue.task_done()
+
+
+@app.on_event("startup")
+async def _start_pipeline_worker():
+    asyncio.create_task(_pipeline_worker())
+
+
 def _next_node(phase: str) -> str:
     order = ["idca", "ssr", "search", "evaluate", "report"]
     node = PHASE_NODE.get(phase, "ssr")
