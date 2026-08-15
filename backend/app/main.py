@@ -310,9 +310,16 @@ async def _pipeline_worker():
             _pipeline_queue.task_done()
 
 
+_worker_task = None
+
+
 @app.on_event("startup")
 async def _start_pipeline_worker():
-    asyncio.create_task(_pipeline_worker())
+    # keep a reference: "a task disappearing mid-execution" when only a weak
+    # reference exists (asyncio docs, create_task) — seen once: a job stayed
+    # queued for 10 min with the worker gone
+    global _worker_task
+    _worker_task = asyncio.create_task(_pipeline_worker())
 
 
 def _next_node(phase: str) -> str:
