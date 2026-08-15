@@ -7,6 +7,14 @@ import re
 from pathlib import Path
 
 
+def model_tag() -> str:
+    """Run-file suffix when a stage model is overridden (LLM_MODEL_<STAGE>), so runs of
+    different models never share a cached run file. Empty for the default model."""
+    parts = [f"{st}-{os.getenv(f'LLM_MODEL_{st.upper()}')}" for st in ("extract", "screen", "eval", "idca")
+             if os.getenv(f"LLM_MODEL_{st.upper()}")]
+    return ("_" + "+".join(parts)) if parts else ""
+
+
 def load_env_yaml(path: Path | None = None, override: bool = False) -> list[str]:
     """Load backend/.env.yaml (the Cloud Run env file: `KEY: "value"` lines)
     into os.environ for local evals; existing variables win unless override.

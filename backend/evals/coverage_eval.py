@@ -52,7 +52,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from common import breakdown_features, disclosed_features, format_cited, load_app, load_fixture
+from common import breakdown_features, disclosed_features, format_cited, load_app, load_fixture, model_tag
 
 RUN_DIR = Path(__file__).parent.parent / "eval_data" / "runs" / "s4"
 _PARA = re.compile(r"\[(\d{4})\]")
@@ -135,7 +135,7 @@ async def run_one(app: str, checklist_kind: str, doc_mode: str) -> dict:
     from app.llm import evaluate_single_document_text
     from patent_analyzer.quote_verify import verify_checklist_results
 
-    out_path = RUN_DIR / f"{app}_{checklist_kind}_{doc_mode}.json"
+    out_path = RUN_DIR / f"{app}_{checklist_kind}_{doc_mode}{model_tag()}.json"
     if out_path.exists():
         return json.loads(out_path.read_text())
 
@@ -165,7 +165,7 @@ async def run_one_multi(app: str, checklist_kind: str) -> dict:
     done per quote at scoring time by quote_predictions()."""
     from eval_prompts import evaluate_multi_quote
 
-    out_path = RUN_DIR / f"{app}_{checklist_kind}_full_text_multi.json"
+    out_path = RUN_DIR / f"{app}_{checklist_kind}_full_text_multi{model_tag()}.json"
     if out_path.exists():
         return json.loads(out_path.read_text())
 
@@ -240,7 +240,7 @@ async def run_one_pdf(app: str, checklist_kind: str) -> dict | None:
     applied at scoring time so verifier variants can be compared."""
     from app.llm import evaluate_single_document
 
-    out_path = RUN_DIR / f"{app}_{checklist_kind}_pdf.json"
+    out_path = RUN_DIR / f"{app}_{checklist_kind}_pdf{model_tag()}.json"
     if out_path.exists():
         return json.loads(out_path.read_text())
 

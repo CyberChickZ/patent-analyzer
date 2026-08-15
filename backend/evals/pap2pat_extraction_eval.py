@@ -34,6 +34,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
+from common import model_tag
 from extraction_errors import classify_errors
 from extraction_eval import embed, greedy_match
 
@@ -117,7 +118,7 @@ async def run_pair(pair: dict, extractor: str, data: Path) -> dict:
     import llm_cache
 
     key = pair["pair_id"]
-    out_path = RUN_DIR / f"{key}_{extractor}.json"
+    out_path = RUN_DIR / f"{key}_{extractor}{model_tag()}.json"
     if out_path.exists():
         return json.loads(out_path.read_text())
     idca_text, marker_text = paper_texts(key, data)

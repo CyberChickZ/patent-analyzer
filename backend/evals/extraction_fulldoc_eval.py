@@ -28,7 +28,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from common import examiner_features, load_app, load_fixture, render_doc
+from common import examiner_features, load_app, load_fixture, model_tag, render_doc
 from extraction_errors import classify_errors, error_rates
 from extraction_eval import embed, greedy_match
 
@@ -53,7 +53,7 @@ async def run_stage1(app: str, with_claims: bool, extractor: str = "ssr", max_li
 
     mode = "with_claims" if with_claims else "desc_only"
     suffix = "" if extractor == "ssr" else f"_{extractor}"
-    out_path = RUN_DIR / f"{app}_{mode}{suffix}.json"
+    out_path = RUN_DIR / f"{app}_{mode}{suffix}{model_tag()}.json"
     if out_path.exists():
         return json.loads(out_path.read_text())
     if max_live_calls is not None and _live_calls() >= max_live_calls:
