@@ -1991,7 +1991,7 @@ async def explain_obviousness(adjudication: dict, chart: dict, invention_summary
     system = ("You are a US patent examiner writing the reasoning section of an obviousness rejection. "
               "Plain, specific prose; no legal conclusions about patentability.")
     try:
-        return (await call_llm(system, prompt, max_tokens=1500)).strip()
+        return (await call_llm(system, prompt)).strip()   # default max_tokens: thinking tokens count against it on 2.5-pro
     except Exception:
         return ""
 
