@@ -55,3 +55,21 @@ def test_minute_gate_counts_across_instances_and_reports_wait():
     wait = a.take()
     assert 0 < wait <= 60.1
     assert MinuteGate("t", 0).take() == 0.0
+
+
+def test_serial_lock_spaces_requests_by_cooldown_across_instances(tmp_path, monkeypatch):
+    import asyncio, time
+    monkeypatch.setenv("LOCK_DIR", str(tmp_path))
+    from patent_analyzer.runtime_state import SerialLock
+
+    async def go():
+        t = []
+        async def one():
+            async with SerialLock("x", 0.3):
+                t.append(time.time())
+                await asyncio.sleep(0.05)
+        await asyncio.gather(one(), one(), one())
+        return sorted(t)
+    ts = asyncio.run(go())
+    gaps = [b - a for a, b in zip(ts, ts[1:])]
+    assert all(g >= 0.3 for g in gaps), gaps

@@ -28,21 +28,15 @@ DEFAULT_FIELDS = "paperId,title,abstract,year,authors,externalIds,openAccessPdf,
 TIMEOUT = 30.0
 
 # Throttle: anonymous = 100 req/5min ≈ 1 req/3s; with key ≈ 1 req/s
-_last_request_time: float = 0.0
-_throttle_lock = asyncio.Lock()
 MIN_INTERVAL_ANON = 3.5
-MIN_INTERVAL_KEYED = 1.1
+MIN_INTERVAL_KEYED = 1.0
 
 
-async def _throttle():
-    global _last_request_time
-    interval = MIN_INTERVAL_KEYED if _api_key() else MIN_INTERVAL_ANON
-    async with _throttle_lock:
-        now = asyncio.get_event_loop().time()
-        wait = interval - (now - _last_request_time)
-        if wait > 0:
-            await asyncio.sleep(wait)
-        _last_request_time = asyncio.get_event_loop().time()
+def _serial():
+    """One in-flight S2 request machine-wide, ≥ MIN_INTERVAL after the previous
+    one finished (API key terms: 1 request/second across all endpoints)."""
+    from ..runtime_state import SerialLock
+    return SerialLock("semantic_scholar", MIN_INTERVAL_KEYED if _api_key() else MIN_INTERVAL_ANON)
 
 
 def _api_key() -> str | None:
@@ -93,8 +87,8 @@ async def _get(client: httpx.AsyncClient, url: str, params: dict | None = None,
     last_err: str | None = None
     for i in range(attempts):
         try:
-            await _throttle()
-            resp = await client.get(url, params=params, headers=_headers(), timeout=TIMEOUT)
+            async with _serial():
+                resp = await client.get(url, params=params, headers=_headers(), timeout=TIMEOUT)
             if resp.status_code == 429:
                 last_err = "HTTP 429 (Semantic Scholar rate limited)"
                 # Anonymous rate limit is 100 req / 5min — back off, but bounded
@@ -205,14 +199,14 @@ async def batch(paper_ids: list[str]) -> tuple[list[Candidate], str | None]:
         return [], "empty id list"
     async with httpx.AsyncClient() as client:
         try:
-            await _throttle()
-            resp = await client.post(
-                f"{API_BASE}/paper/batch",
-                params={"fields": DEFAULT_FIELDS},
-                json={"ids": paper_ids},
-                headers=_headers(),
-                timeout=TIMEOUT,
-            )
+            async with _serial():
+                resp = await client.post(
+                    f"{API_BASE}/paper/batch",
+                    params={"fields": DEFAULT_FIELDS},
+                    json={"ids": paper_ids},
+                    headers=_headers(),
+                    timeout=TIMEOUT,
+                )
             if resp.status_code >= 400:
                 return [], f"HTTP {resp.status_code} ({resp.text[:200]})"
             data = resp.json()

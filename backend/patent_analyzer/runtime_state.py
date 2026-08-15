@@ -116,3 +116,54 @@ class MinuteGate:
                 return waited
             await asyncio.sleep(s)
             waited += s
+
+
+class SerialLock:
+    """Cross-process mutex + cooldown for a source whose limit is "1 request
+    per second across all endpoints" (Semantic Scholar API key terms): a
+    request holds the lock from send to response; after release no process
+    may take it again for `cooldown_s`. flock on a file in LOCK_DIR, the
+    release time kept next to it. Use: `async with SerialLock("s2", 1.0):`."""
+
+    def __init__(self, name: str, cooldown_s: float = 1.0):
+        import os
+        from pathlib import Path
+        self.name, self.cooldown_s = name, cooldown_s
+        d = Path(os.environ.get("LOCK_DIR", "/tmp/amie_locks"))
+        d.mkdir(parents=True, exist_ok=True)
+        self._lock_path, self._ts_path = d / f"{name}.lock", d / f"{name}.last"
+        self._fh = None
+
+    def _acquire_blocking(self) -> float:
+        import fcntl
+        import time
+        self._fh = open(self._lock_path, "a+")
+        fcntl.flock(self._fh, fcntl.LOCK_EX)
+        try:
+            last = float(self._ts_path.read_text() or 0)
+        except Exception:
+            last = 0.0
+        wait = self.cooldown_s - (time.time() - last)
+        if wait > 0:
+            time.sleep(wait)
+        return max(wait, 0.0)
+
+    def _release_blocking(self) -> None:
+        import fcntl
+        import time
+        try:
+            self._ts_path.write_text(repr(time.time()))
+        finally:
+            fcntl.flock(self._fh, fcntl.LOCK_UN)
+            self._fh.close()
+            self._fh = None
+
+    async def __aenter__(self):
+        import asyncio
+        self.waited = await asyncio.to_thread(self._acquire_blocking)
+        return self
+
+    async def __aexit__(self, *exc):
+        import asyncio
+        await asyncio.to_thread(self._release_blocking)
+        return False
