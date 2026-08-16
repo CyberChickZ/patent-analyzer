@@ -242,6 +242,10 @@ async def gate_screen(model: str, tag: str) -> dict:
         fd = rec.get("funnel_docs") or []
         if not g or not fd or not rec.get("extraction"):
             continue
+        per_paper = RUN_DIR / f"screen_{model}_{tag}_{rec['key']}.json"
+        if per_paper.exists():
+            rows.append(json.loads(per_paper.read_text()))
+            continue
         s1 = sorted([d for d in fd if d.get("stage1")], key=lambda d: -float(d.get("cos") or 0))
         abstracts = await _abstracts(rec["key"], s1)
         docs = []
@@ -270,6 +274,9 @@ async def gate_screen(model: str, tag: str) -> dict:
                      "calls": stats.get("stage2_calls"), "wall_seconds": round(wall, 1),
                      "recorded_run": {"gold_worth": len(_fams(rec_worth, fam_of)), "worth": len(rec_worth),
                                       "gold_kept60": len(_fams([p["pub_num"] for p in rec.get("pruned", [])], fam_of))}})
+        rows[-1]["meter"] = meter_summary("screen", model, 1)
+        calls.clear()
+        per_paper.write_text(json.dumps(rows[-1], ensure_ascii=False, indent=1))
         print(f"[{rec['key']}] {model}: {len(docs)} docs ({rows[-1]['with_abstract']} w/ abstract) → worth {len(worth)} "
               f"kept {len(kept)} | gold fam in {len(gold_in)} → worth {len(gold_worth)} kept {len(gold_kept)} "
               f"(recorded run: worth {rows[-1]['recorded_run']['gold_worth']}) {wall:.0f}s")
@@ -310,6 +317,13 @@ async def main():
         res = await gate_screen(args.model, args.tag)
     res["wall_seconds"] = round(time.monotonic() - t0, 1)
     res["meter"] = meter_summary(stage, args.model, res.get("n_docs") or 0)
+    if args.gate == "screen":
+        ms = [r["meter"] for r in res["rows"] if r.get("meter")]
+        n = len(ms) or 1
+        tot = {k: sum(m[k] for m in ms) for k in ("calls", "errors", "errors_429", "prompt_tokens", "output_tokens",
+                                                   "thought_tokens", "seconds_total", "cost_usd", "max_tokens_hits")}
+        res["meter"] = {"stage": stage, "model": args.model, "n_docs": len(ms), **tot,
+                        "seconds_per_doc": round(tot["seconds_total"] / n, 1), "cost_per_doc": round(tot["cost_usd"] / n, 4)}
     res["llm_usage"] = llm.usage
     res["cache"] = dict(llm_cache.stats)
     res["calls"] = calls
