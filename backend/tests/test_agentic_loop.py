@@ -162,7 +162,7 @@ def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
     monkeypatch.setattr(L, "LOOP_MODE", "wide")
     state = {"summary": "s", "date_cutoff": "20110202", "extraction": {"candidate_inventions": [
         {"id": "inv1", "level": "core", "elements": [
-            {"id": "inv1.e1", "text": "sac inhibitor", "facets": {"named": ["soluble adenylyl cyclase", "sac"], "thing": ["inhibition"], "place": ["prostate cancer"]}}]},
+            {"id": "inv1.e1", "text": "a soluble adenylyl cyclase (sAC) inhibitor", "facets": {"named": ["soluble adenylyl cyclase", "sac"], "thing": ["inhibition"], "place": ["prostate cancer"]}}]},
         {"id": "inv2", "level": "application", "elements": [
             {"id": "inv2.e1", "text": "diagnosis", "facets": {"named": [], "thing": ["staining"], "place": ["tissue"]}}]}]}}
 
@@ -180,19 +180,24 @@ def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
     seen = {}
 
     async def fake_expand(seeds, known, max_cited=200, before=None, light=False):
-        seen.update(seeds=list(seeds), max_cited=max_cited, before=before, light=light)
-        return [_cand("US7", "cited art")], {"cpc_subclasses": {"A61K": 2}, "seeds_after_cutoff": ["US2099"], "cited_total": 40, "cited_light": 10}
+        if "max_cited" not in seen:
+            seen.update(seeds=list(seeds), max_cited=max_cited, before=before, light=light)
+        c7 = _cand("US7", "cited art")
+        c7.raw["bigquery"] = {"cpc_codes": ["A61K31/00", "A61K38/00"]}
+        return [c7], {"cpc_subclasses": {"A61K": 2}, "seeds_after_cutoff": ["US2099"], "cited_total": 40, "cited_light": 10}
     monkeypatch.setattr(L, "expand", fake_expand)
     events = []
     cands, stats = asyncio.run(L.run_loop(state, lambda: 0, lambda: False, lambda k, m, p=None: events.append(k)))
     assert [c[1] for c in calls] == [100] * len(calls) and all(c[2] == "priority:20110202" for c in calls)
     kinds = [q["kind"] for q in stats["rounds"][0]["queries"]]
-    assert kinds[:3] == ["named", "named+thing", "thing+place"] and "thing+place" in kinds[3:]
+    assert kinds[:3] == ["thing", "named+thing", "thing"] and "cpc+thing" in kinds   # place never appears; CPC round after expansion
+    assert stats["rounds"][0]["queries"][1]["facets_used"]["named"] == ["soluble adenylyl cyclase"]   # 'sac' fails validation (not capitalised in the source)
+    assert all("prostate" not in q["query"] for q in stats["rounds"][0]["queries"])
     assert seen["light"] and seen["max_cited"] == L.MAX_CITED_LIGHT and seen["before"] == "20110202"
     pubs = {c.pub_num for c in cands}
     assert "US7" in pubs and "US2099" not in pubs and stats["mode"] == "wide"
     q0 = stats["rounds"][0]["queries"][0]
-    assert q0["n"] == 1 and len(q0["pubs"]) == 2 and q0["new"] == 2 and q0["facets_used"] == {"named": ["soluble adenylyl cyclase", "sac"]}
+    assert q0["n"] == 1 and len(q0["pubs"]) == 2 and q0["new"] == 2 and q0["facets_used"] == {"thing": ["inhibition"]}
     assert stats["rounds"][0]["queries"][1]["new"] == 1   # US2099 repeats, one fresh hit
-    assert stats["rounds"][0]["expanded_pubs"] == ["US7"]
+    assert "US7" in stats["rounds"][0]["expanded_pubs"] and stats["rounds"][0]["cpc_top"] == ["A61K"]
     assert [c["id"] for c in stats["candidates"]] == ["inv1", "inv2"] and events == ["round_done"]

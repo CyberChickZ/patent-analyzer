@@ -33,37 +33,54 @@ def _union(elements: list[dict], facet: str, cap: int) -> tuple[list[str], dict[
 
 
 def candidate_queries(cand: dict) -> list[dict]:
-    """≤3 queries for one candidate invention: the names alone; names AND
-    the thing forms; thing AND place (or thing alone when there is no place).
-    Without names: thing AND place, then thing alone. Each query records
-    the forms it was built from and the elements they came from, so a
-    funnel can say which element/facet brought a document back."""
+    """≤3 queries for one candidate invention, none scoped by `place`:
+    thing forms alone (patent phrasings first); names AND thing (when the
+    element has validated names); thing AND apparatus. The place facet
+    (radiotherapy, prostate cancer, ...) only ranks: H1-02's gold were
+    generic optical-tracking / machine-guidance patents that a domain word
+    excluded structurally (H_monitor.md, H1.md §H7). Each query records the
+    forms it was built from and the elements they came from."""
     els = cand.get("elements") or []
     n_terms, n_from = _union(els, "named", 6)
     t_terms, t_from = _union(els, "thing", 8)
-    p_terms, p_from = _union(els, "place", 6)
-    names, things, places = _named_group(n_terms), _group(t_terms), _group(p_terms)
+    a_terms, a_from = _union(els, "apparatus", 6)
+    names, things, apps = _named_group(n_terms), _group(t_terms), _group(a_terms)
 
     def _q(kind, query, **facets):
         used = {k: v for k, v in facets.items() if v}
         els_used = sorted({eid for k, terms in used.items() for t in terms
-                           for eid in {"named": n_from, "thing": t_from, "place": p_from}[k].get(t, [])})
+                           for eid in {"named": n_from, "thing": t_from, "apparatus": a_from}[k].get(t, [])})
         return {"kind": kind, "query": query, "facets_used": used, "elements": els_used}
 
     out = []
-    if not things and not names:
+    if not things:
         return out
+    out.append(_q("thing", things, thing=t_terms))
     if names:
-        out.append(_q("named", names, named=n_terms))
-        if things:
-            out.append(_q("named+thing", f"{names} {things}", named=n_terms, thing=t_terms))
-    if things and places:
-        out.append(_q("thing+place", f"{things} {places}", thing=t_terms, place=p_terms))
-    elif things:
-        out.append(_q("thing", things, thing=t_terms))
-    if not names and things and places:
-        out.append(_q("thing", things, thing=t_terms))
+        out.append(_q("named+thing", f"{names} {things}", named=n_terms, thing=t_terms))
+    if apps:
+        out.append(_q("thing+apparatus", f"{things} {apps}", thing=t_terms, apparatus=a_terms))
     return out[:PER_CANDIDATE]
+
+
+def cpc_queries(cands: list[dict], subclasses: list[str], max_total: int = 2) -> list[dict]:
+    """`CPC=X/low` AND the core candidate's thing forms, for the top seed
+    subclasses (PatentRiff: "A practitioner might start by searching within a
+    relevant CPC class and then use keywords to filter the results")."""
+    if not cands or not subclasses:
+        return []
+    from .query_gen import cpc_clause
+    core = cands[0]
+    t_terms, t_from = _union(core.get("elements") or [], "thing", 8)
+    things = _group(t_terms)
+    if not things:
+        return []
+    out = []
+    for sc in subclasses[:max_total]:
+        out.append({"candidate": core.get("id") or "inv1", "kind": "cpc+thing", "query": f"{cpc_clause(sc)} {things}",
+                    "facets_used": {"cpc": [sc], "thing": t_terms},
+                    "elements": sorted({e for t in t_terms for e in t_from.get(t, [])})})
+    return out
 
 
 def wide_queries(candidates: list[dict], max_total: int = MAX_QUERIES) -> list[dict]:
@@ -83,7 +100,7 @@ def wide_queries(candidates: list[dict], max_total: int = MAX_QUERIES) -> list[d
             _take(per[0][0], q)
     for cid, qs in per[1:]:
         for q in qs:
-            if q["kind"].startswith("named"):
+            if q["kind"] == "thing":
                 _take(cid, q)
     for cid, qs in per[1:]:
         for q in qs:

@@ -48,7 +48,7 @@ def candidates_from_state(state: dict) -> list[dict]:
                for e in (c.get("elements") or []) if not e.get("unsupported")]
         if els:
             out.append({"id": c.get("id") or f"inv{i + 1}", "level": c.get("level", ""),
-                        "concept": c.get("concept", ""), "elements": els})
+                        "concept": c.get("concept", ""), "cpc_pred": list(c.get("cpc_pred") or []), "elements": els})
     if out:
         return out
     els = elements_from_state(state)
