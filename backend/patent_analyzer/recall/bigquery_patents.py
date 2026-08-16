@@ -271,7 +271,7 @@ async def fetch_cited_by(pub_nums: list[str], max_gib: float = 5.0) -> dict[str,
 
 def _bq_form(p: str) -> str:
     import re
-    m = re.match(r"^([A-Z]{2})(\d+)([A-Z]\d?)?$", p)
+    m = re.match(r"^([A-Z]{2})((?:RE|PP|D|H|T)?\d+)([A-Z]\d?)?$", p)
     if not m:
         return p
     cc, digits, kind = m.group(1), m.group(2), m.group(3) or ""
