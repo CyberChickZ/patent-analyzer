@@ -7,11 +7,11 @@ from __future__ import annotations
 import re
 from collections import Counter
 
-from ..recall.bigquery_patents import fetch_by_pub_nums, fetch_citations, fetch_meta_light
+from ..recall.bigquery_patents import fetch_by_pub_nums, fetch_citations, fetch_cited_by, fetch_meta_light
 from ..recall.pool import Candidate
 
 MAX_CITED_PER_ROUND = 200
-MAX_CITED_LIGHT = int(__import__("os").environ.get("EXPAND_MAX_CITED", "2000"))
+MAX_CITED_LIGHT = int(__import__("os").environ.get("EXPAND_MAX_CITED", "5000"))
 FULL_META_HEAD = 200   # abstracts for the most-cited head; titles only beyond
 
 
@@ -26,7 +26,7 @@ def _after(meta: dict, cutoff: str | None) -> bool:
 
 
 async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CITED_PER_ROUND,
-                 before: str | None = None, light: bool = False) -> tuple[list[Candidate], dict]:
+                 before: str | None = None, light: bool = False, forward: bool = False) -> tuple[list[Candidate], dict]:
     """Returns (new candidates from citations, info) where info has the
     seeds' family ids, CPC subclass counts and BQ stats. Seeds and cited
     documents with priority_date >= `before` (YYYYMMDD) are dropped.
@@ -61,6 +61,17 @@ async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CIT
             weight = 2 if "SEA" in (x.get("category") or "") else 1
             cited[pub] += weight
             by_seed.setdefault(_canon(s), []).append(pub)
+    if forward:
+        # forward edges (patents citing the seed) at weight 1 — pilot's
+        # citing:1 vs cited:3; date filter below drops post-cutoff ones
+        fwd = await fetch_cited_by(seeds)
+        for s, rows in fwd.items():
+            for x in rows:
+                pub = _canon(x.get("publication_number", ""))
+                if pub:
+                    cited[pub] += 1
+                    by_seed.setdefault(_canon(s), []).append(pub)
+        info["forward_total"] = sum(len(v) for v in fwd.values())
     info["cited_total"] = len(cited)
     new = [p for p, _ in cited.most_common() if p not in known and p not in meta][:max_cited]
     info["cited_new"] = len(new)

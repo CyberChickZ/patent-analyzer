@@ -127,7 +127,7 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
 
     seeds += await _run(queries)
     seeds = list(dict.fromkeys(seeds))
-    expanded, info = await expand(seeds, set(pool), max_cited=MAX_CITED_LIGHT, before=cutoff, light=True) if seeds else ([], {})
+    expanded, info = await expand(seeds, set(pool), max_cited=MAX_CITED_LIGHT, before=cutoff, light=True, forward=True) if seeds else ([], {})
     dropped = set(info.get("seeds_after_cutoff") or [])
     for k in list(pool):
         if k in dropped:

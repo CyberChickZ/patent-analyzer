@@ -148,14 +148,19 @@ def test_expand_light_uses_narrow_lookup_beyond_the_head(monkeypatch):
 
     async def fake_cits(pubs):
         return {"S1": {"cits": [{"cited": f"C{i}", "category": "SEA" if i < 2 else "APP"} for i in range(5)]}}
+    async def fake_fwd(pubs):
+        return {"S1": [{"publication_number": "C4", "category": "PRS"}, {"publication_number": "C9", "category": "PRS"}]}
     monkeypatch.setattr(E, "fetch_by_pub_nums", fake_meta)
     monkeypatch.setattr(E, "fetch_meta_light", fake_light)
     monkeypatch.setattr(E, "fetch_citations", fake_cits)
-    out, info = asyncio.run(E.expand(["S1"], set(), max_cited=2000, before="20110101", light=True))
-    assert light[0] == ["S1"] and heavy[0] == ["C0", "C1"] and sorted(light[1]) == ["C2", "C3", "C4"]
-    assert info["cited_by_seed"] == {"S1": ["C0", "C1", "C2", "C3", "C4"]}
-    assert len(out) == 5 and info["cited_light"] == 3
-    assert {c.pub_num: bool(c.abstract) for c in out} == {"C0": True, "C1": True, "C2": False, "C3": False, "C4": False}
+    monkeypatch.setattr(E, "fetch_cited_by", fake_fwd)
+    out, info = asyncio.run(E.expand(["S1"], set(), max_cited=2000, before="20110101", light=True, forward=True))
+    assert info["forward_total"] == 2 and "C9" in info["cited_by_seed"]["S1"]
+    # ordering: C4 is cited (1) + citing (1) = 2 like the SEA ones → head is C0/C1 (SEA=2, first seen) then C4
+    assert light[0] == ["S1"] and heavy[0] == ["C0", "C1"] and sorted(light[1]) == ["C2", "C3", "C4", "C9"]
+    assert info["cited_by_seed"] == {"S1": ["C0", "C1", "C2", "C3", "C4", "C9"]}
+    assert len(out) == 6 and info["cited_light"] == 4
+    assert {c.pub_num: bool(c.abstract) for c in out} == {"C0": True, "C1": True, "C2": False, "C3": False, "C4": False, "C9": False}
 
 
 def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
@@ -179,7 +184,7 @@ def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
     monkeypatch.setattr(L.gp, "is_blocked", lambda: False)
     seen = {}
 
-    async def fake_expand(seeds, known, max_cited=200, before=None, light=False):
+    async def fake_expand(seeds, known, max_cited=200, before=None, light=False, forward=False):
         if "max_cited" not in seen:
             seen.update(seeds=list(seeds), max_cited=max_cited, before=before, light=light)
         c7 = _cand("US7", "cited art")

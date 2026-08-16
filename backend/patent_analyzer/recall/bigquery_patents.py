@@ -236,6 +236,39 @@ async def fetch_meta_light(pub_nums: list[str], max_gib: float = 15.0) -> dict[s
                                               "title": r.title or ""} for r in rows}
 
 
+async def fetch_cited_by(pub_nums: list[str], max_gib: float = 5.0) -> dict[str, list[dict]]:
+    """Forward citations from amie_patents.cited_by (copied once from
+    google_patents_research.publications.cited_by, 21.6 GiB, bucketed on
+    publication_number): pub → [{publication_number, category, filing_date}].
+    Keys canonical. patent-search-pilot keeps forward edges at weight 1
+    (cited 3 / family 2 / citing 1)."""
+    import asyncio
+    import re
+    from google.cloud import bigquery
+
+    norm = {re.sub(r"[\s\-/,.]", "", p.upper()): p for p in pub_nums if p}
+    if not norm:
+        return {}
+    wanted = [_bq_form(p) for p in norm]
+    client = bigquery.Client(project=GC_PROJECT)
+    pubs_param = bigquery.ArrayQueryParameter("pubs", "STRING", wanted)
+
+    def _run():
+        b = client.query(
+            "SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(p)), 4000) FROM UNNEST(@pubs) p) AS b",
+            job_config=bigquery.QueryJobConfig(query_parameters=[pubs_param]))
+        buckets = list(b.result())[0].b
+        params = [pubs_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
+        return guarded_query(client, f"""
+            SELECT publication_number, cited_by FROM `{GC_PROJECT}.amie_patents.cited_by`
+            WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params, max_gib=max_gib)
+
+    rows = await asyncio.to_thread(_run)
+    return {_canon_pub(r.publication_number): [{"publication_number": _canon_pub(x.get("publication_number") or ""),
+                                                "category": x.get("category") or "", "filing_date": x.get("filing_date")}
+                                               for x in (r.cited_by or [])] for r in rows}
+
+
 def _bq_form(p: str) -> str:
     import re
     m = re.match(r"^([A-Z]{2})(\d+)([A-Z]\d?)?$", p)
@@ -484,3 +517,80 @@ async def fetch_families(family_ids: list[str]) -> dict[str, list[dict]]:
                            "priority_date": str(m.get("priority_date") or ""),
                            "publication_date": str(m.get("publication_date") or "")} for m in r.members]
             for r in rows}
+
+
+def _canon_oa_id(x: str) -> str:
+    """'https://openalex.org/W123', 'w123', '123' -> 'W123'."""
+    x = (x or "").strip().rsplit("/", 1)[-1].upper()
+    if x.isdigit():
+        x = "W" + x
+    return x
+
+
+def _pcs_point_lookup(client, table: str, key_col: str, keys: list[str], cols: str, max_gib: float):
+    """Bucket-pruned IN lookup on an amie_patents.pcs_oa* table: bucket ids
+    come from a zero-byte constant query so the dry-run estimate reflects
+    partition pruning (same trick as fetch_by_pub_nums)."""
+    from google.cloud import bigquery
+    key_param = bigquery.ArrayQueryParameter("keys", "STRING", keys)
+    b = client.query("SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(k)), 4000) FROM UNNEST(@keys) k) AS b",
+                     job_config=bigquery.QueryJobConfig(query_parameters=[key_param]))
+    buckets = list(b.result())[0].b
+    params = [key_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
+    return guarded_query(client, f"""
+        SELECT {cols} FROM `{GC_PROJECT}.amie_patents.{table}`
+        WHERE bucket IN UNNEST(@buckets) AND {key_col} IN UNNEST(@keys)""", params, max_gib=max_gib)
+
+
+async def fetch_citing_patents(oa_ids: list[str], max_gib: float = 5.0) -> dict[str, list[dict]]:
+    """Paper -> USPTO patents citing it, from amie_patents.pcs_oa (Reliance on
+    Science pcs_oa_uspto.csv, Zenodo 21493744, granted through 2025; bucketed
+    on oa_id). Keys are canonical OpenAlex ids ('W123'); each entry:
+    {patent_pub (canonical, e.g. 'US10494607B2'), reftype ('exm' examiner /
+    'app' applicant / 'unk'), confscore (1-10), wherefound ('frontonly' /
+    'bodyonly' / 'both'), grant_year, family_id}. Papers with no citing
+    patent are absent from the result."""
+    import asyncio
+    from google.cloud import bigquery
+
+    keys = sorted({_canon_oa_id(x) for x in oa_ids if x and _canon_oa_id(x)})
+    if not keys:
+        return {}
+    client = bigquery.Client(project=GC_PROJECT)
+    rows = await asyncio.to_thread(
+        _pcs_point_lookup, client, "pcs_oa", "oa_id", keys,
+        "oa_id, patent_pub, reftype, confscore, wherefound, grant_year, family_id", max_gib)
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(r.oa_id, []).append({
+            "patent_pub": _canon_pub(r.patent_pub), "reftype": r.reftype or "",
+            "confscore": int(r.confscore or 0), "wherefound": r.wherefound or "",
+            "grant_year": int(r.grant_year) if r.grant_year else None, "family_id": r.family_id or ""})
+    return out
+
+
+async def fetch_cited_papers(patent_pubs: list[str], max_gib: float = 5.0) -> dict[str, list[dict]]:
+    """Reverse bridge: USPTO patent -> OpenAlex papers it cites, from
+    amie_patents.pcs_oa_by_patent (same rows as pcs_oa, bucketed on
+    patent_pub). Keys are canonical publication numbers (_canon_pub);
+    each entry: {oa_id, reftype, confscore, wherefound}. Only granted
+    US patents appear in Reliance on Science, so application numbers
+    (US2012...A1) never match."""
+    import asyncio
+    import re
+    from google.cloud import bigquery
+
+    norm = sorted({re.sub(r"[\s\-/,.]", "", p.upper()) for p in patent_pubs if p})
+    if not norm:
+        return {}
+    keys = [_bq_form(p) for p in norm]
+    client = bigquery.Client(project=GC_PROJECT)
+    rows = await asyncio.to_thread(
+        _pcs_point_lookup, client, "pcs_oa_by_patent", "patent_pub", keys,
+        "patent_pub, oa_id, reftype, confscore, wherefound", max_gib)
+    out: dict[str, list[dict]] = {}
+    for r in rows:
+        out.setdefault(_canon_pub(r.patent_pub), []).append({
+            "oa_id": r.oa_id, "reftype": r.reftype or "", "confscore": int(r.confscore or 0),
+            "wherefound": r.wherefound or ""})
+    return out
