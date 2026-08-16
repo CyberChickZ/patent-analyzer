@@ -69,3 +69,18 @@ def test_attach_facets_widens_every_element(monkeypatch):
     assert out[0]["facets"]["place"] == ["telepresence", "video call"]
     assert out[1]["facets"]["thing"]  # fallback kept the loop alive
 
+
+
+def test_valid_name_requires_source_presence_and_distinctiveness():
+    from patent_analyzer.agentic.elements import merge_facets, valid_name
+    src = "We inject indocyanine green (ICG) intravenously. A tablet PC shows the feed. The PSS uses two CCD cameras."
+    assert valid_name("indocyanine green", src) and valid_name("icg", src)
+    assert not valid_name("tablet pc", src)   # generic product category
+    assert valid_name("ccd", src)             # capitalised in the source: kept (generic list has no 'ccd')
+    assert valid_name("pss", src)            # capitalised acronym present in the source
+    assert not valid_name("teleconferencing robot", src)   # not in the source
+    m = merge_facets({"named": ["tablet pc", "icg"], "thing": ["perfusion map"]},
+                     {"patent": ["tissue perfusion imaging"], "named": ["indocyanine green", "made up name"], "thing": ["blood flow map"]},
+                     source=src)
+    assert m["named"] == ["icg", "indocyanine green"]
+    assert m["thing"] == ["tissue perfusion imaging", "perfusion map", "blood flow map"]

@@ -33,11 +33,14 @@ def test_extract_elements_template_matches_old_fstring():
     assert got == expected
 
 
-def test_search_facets_template_matches_old_fstring():
+def test_search_facets_template_matches_old_fstring_except_the_patent_facet():
+    # H7 added the `patent` facet on purpose; the rest of the template is unchanged
     fs = _old_fstring('    prompt = f"""For EACH element below, give four facets of search terms:')
     summary, listing = "S" * 5000, "e1: a\ne2: b"
     expected = eval(fs, {"summary": summary, "listing": listing})
-    assert prompts.render("search.facets", summary=summary[:4000], listing=listing) == expected
+    got = prompts.render("search.facets", summary=summary[:4000], listing=listing)
+    assert got.split("  named     —", 1)[1].replace('"patent": [...], ', "") == expected.split("  named     —", 1)[1]
+    assert got.startswith("For EACH element below, give five facets") and "patent    —" in got
 
 
 def test_extract_candidates_template_matches_old_fstring():

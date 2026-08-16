@@ -63,17 +63,41 @@ def fallback_facets(text: str) -> dict:
     return {"thing": uniq[:3], "place": uniq[3:5], "apparatus": []}
 
 
-def merge_facets(base: dict, extra: dict, cap: int = 10) -> dict:
+_GENERIC_NAMES = {"tablet pc", "camera", "server", "sensor", "display", "monitor", "robot", "controller", "computer",
+                  "explicit control", "implicit control", "control", "database", "processor", "software", "hardware"}
+
+
+def valid_name(term: str, source: str) -> bool:
+    """A distinctive name must appear in the source text (element texts +
+    summary) and be either a multi-word phrase or an acronym the source
+    writes in capitals; generic product words never qualify (H1-01 'tablet
+    pc', H1-02 'pss'/'ccd' burned the named queries)."""
+    t = " ".join(str(term).lower().split())
+    if not t or t in _GENERIC_NAMES or len(t) < 3:
+        return False
+    src = source or ""
+    if t not in src.lower():
+        return False
+    if " " in t or "-" in t or any(ch.isdigit() for ch in t):
+        return True
+    return bool(re.search(r"\b" + re.escape(t.upper()) + r"\b", src)) and len(t) <= 8
+
+
+def merge_facets(base: dict, extra: dict, cap: int = 10, source: str | None = None) -> dict:
     """Union of two facet samples, base first, deduped, capped per facet
     (patent-search-pilot: which words the model reaches for is a coin flip;
-    the fix is to toss it twice and merge)."""
+    the fix is to toss it twice and merge). Patent-vocabulary phrasings go
+    to the front of `thing`; names are validated against `source` when given."""
     out = {}
     for k in ("named", "thing", "place", "apparatus"):
         seen = []
-        for t in list((base or {}).get(k) or []) + list((extra or {}).get(k) or []):
+        pre = list((extra or {}).get("patent") or []) + list((base or {}).get("patent") or []) if k == "thing" else []
+        for t in pre + list((base or {}).get(k) or []) + list((extra or {}).get(k) or []):
             t = " ".join(str(t).lower().split())
             if t and t not in seen:
                 seen.append(t)
+        if k == "named" and source is not None:
+            seen = [t for t in seen if valid_name(t, source)]
         out[k] = seen[:cap]
     return out
 
@@ -83,7 +107,8 @@ async def attach_facets(elements: list[dict], summary: str) -> list[dict]:
     extraction's own forms); fallback keeps the loop alive."""
     from app.llm import facet_elements
     got = await facet_elements([{"id": e["id"], "text": e["text"]} for e in elements], summary)
+    source = "\n".join(e.get("text", "") for e in elements) + "\n" + (summary or "")
     for e in elements:
-        merged = merge_facets(e.get("facets") or {}, got.get(e["id"]) or {})
+        merged = merge_facets(e.get("facets") or {}, got.get(e["id"]) or {}, source=source)
         e["facets"] = merged if merged.get("thing") else fallback_facets(e["text"])
     return elements

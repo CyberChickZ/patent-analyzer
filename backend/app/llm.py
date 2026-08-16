@@ -1996,7 +1996,12 @@ async def explain_obviousness(adjudication: dict, chart: dict, invention_summary
         return ""
 
 
-SEARCH_FACETS_PROMPT = prompts.register_default("search.facets", """For EACH element below, give four facets of search terms:
+SEARCH_FACETS_PROMPT = prompts.register_default("search.facets", """For EACH element below, give five facets of search terms:
+  patent    — 2-3 phrasings of this element in the vocabulary a US patent examiner or attorney
+              would use in a claim or title (NOT the paper's coinage): e.g. a paper's "kinetic
+              videoconferencing proxy" is claimed as "telepresence robot", "movable display",
+              "teleconferencing apparatus"; "explicit control" as "remote pan tilt control". Two
+              to three words each.
   named     — 0-4 DISTINCTIVE NAMES that identify this element in this document, COPIED as written
               from the element text or the invention context: chemical / biological / material /
               organism / product / algorithm / protocol names. For an acronym give BOTH the acronym
@@ -2017,7 +2022,7 @@ INVENTION CONTEXT: {summary}
 ELEMENTS:
 {listing}
 
-JSON output: {{"facets": {{"<element id>": {{"named": [...], "thing": [...], "place": [...], "apparatus": [...]}}, ...}}}}""")
+JSON output: {{"facets": {{"<element id>": {{"patent": [...], "named": [...], "thing": [...], "place": [...], "apparatus": [...]}}, ...}}}}""")
 
 
 async def facet_elements(elements: list[dict], summary: str) -> dict[str, dict]:
@@ -2040,10 +2045,10 @@ async def facet_elements(elements: list[dict], summary: str) -> dict[str, dict]:
         for e in elements:
             f = (data.get("facets") or {}).get(e["id"]) or {}
             out[e["id"]] = {k: [str(t).strip().lower() for t in (f.get(k) or []) if str(t).strip()][:FACET_FORMS_CAP]
-                            for k in ("named", "thing", "place", "apparatus")}
+                            for k in ("patent", "named", "thing", "place", "apparatus")}
         return out
     except Exception:
-        return {e["id"]: {"named": [], "thing": [], "place": [], "apparatus": []} for e in elements}
+        return {e["id"]: {"patent": [], "named": [], "thing": [], "place": [], "apparatus": []} for e in elements}
 
 
 # ════════════════════════════════════════════════════════════
