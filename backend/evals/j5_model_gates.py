@@ -253,7 +253,8 @@ async def gate_screen(model: str, tag: str) -> dict:
             a = abstracts.get(d["pub_num"], {})
             docs.append({"pub_num": d["pub_num"], "title": a.get("title") or d.get("title", ""),
                          "abstract": a.get("abstract", ""), "match_type": d.get("match_type"),
-                         "cpc_codes": a.get("cpc_codes", []), "year": a.get("year") or None,
+                         # production pool dicts carry no top-level cpc_codes (they sit in raw.bigquery), so none here
+                         "cpc_codes": [], "year": a.get("year") or None,
                          "prune_cos": float(d.get("cos") or 0)})
         cands = [{"id": c.get("id"), "concept": c.get("concept", "")}
                  for c in rec["extraction"].get("candidate_inventions") or []]
