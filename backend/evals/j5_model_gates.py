@@ -310,15 +310,21 @@ async def main():
     print(f"[j5] gate={args.gate} stage={stage} model={args.model} default={llm.MODEL} cache={os.environ['LLM_CACHE_DIR']}")
 
     t0 = time.monotonic()
-    if args.gate == "extract":
-        res = await gate_extract(args.model)
-    elif args.gate == "eval":
-        res = await gate_eval(args.model)
-    else:
-        res = await gate_screen(args.model, args.tag)
+    res: dict = {}
+    try:
+        if args.gate == "extract":
+            res = await gate_extract(args.model)
+        elif args.gate == "eval":
+            res = await gate_eval(args.model)
+        else:
+            res = await gate_screen(args.model, args.tag)
+    except BaseException as exc:
+        # keep the meter even when the eval's scoring crashes — the live calls were paid for
+        res = {"failed": f"{type(exc).__name__}: {str(exc)[:300]}"}
+        print(f"[j5] gate crashed: {res['failed']} — writing meter anyway")
     res["wall_seconds"] = round(time.monotonic() - t0, 1)
     res["meter"] = meter_summary(stage, args.model, res.get("n_docs") or 0)
-    if args.gate == "screen":
+    if args.gate == "screen" and res.get("rows"):
         ms = [r["meter"] for r in res["rows"] if r.get("meter")]
         n = len(ms) or 1
         tot = {k: sum(m[k] for m in ms) for k in ("calls", "errors", "errors_429", "prompt_tokens", "output_tokens",
