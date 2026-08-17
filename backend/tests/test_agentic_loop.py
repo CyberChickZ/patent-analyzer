@@ -195,9 +195,21 @@ def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
     async def fake_similar(seeds, known, before=None, **kw):
         return [_cand("US8", "google neighbour")], {"similar_total": 5, "by_seed": {"US1": ["US8"]}}
     monkeypatch.setattr(L, "similar_neighbours", fake_similar)
+
+    async def fake_neigh(title, cands, cutoff=None, doi="", arxiv_id="", summary="", embed=None):
+        paper = Candidate(title="a neighbourhood paper", match_type="Paper", raw={"neigh": {"oa_id": "W1", "source": "references"}})
+        return [paper], {"n": 1, "with_oa_id": 1}
+    monkeypatch.setattr(L, "paper_neighbourhood", fake_neigh)
+
+    async def fake_bridge(oa_ids):
+        return {"W1": [{"patent_pub": "US5000A", "reftype": "exm"}]}
+    monkeypatch.setattr("patent_analyzer.recall.bigquery_patents.fetch_citing_patents", fake_bridge, raising=False)
     events = []
     cands, stats = asyncio.run(L.run_loop(state, lambda: 0, lambda: False, lambda k, m, p=None: events.append(k)))
     assert "US8" in {c.pub_num for c in cands} and stats["rounds"][0]["similar_added"] == 1 and stats["rounds"][0]["similar_pubs"] == ["US8"]
+    r0 = stats["rounds"][0]
+    assert r0["neighbourhood_papers"] == 1 and r0["bridge"] == {"oa_ids": 1, "patents": 1, "error": None} and r0["bridge_pubs"] == ["US5000A"]
+    assert "US5000A" in seen["seeds"] and "a neighbourhood paper" in {c.title for c in cands}
     assert [c[1] for c in calls] == [100] * len(calls) and all(c[2] == "priority:20110202" for c in calls)
     kinds = [q["kind"] for q in stats["rounds"][0]["queries"]]
     assert kinds[:3] == ["thing", "named+thing", "thing"] and "cpc+thing" in kinds   # place never appears; CPC round after expansion

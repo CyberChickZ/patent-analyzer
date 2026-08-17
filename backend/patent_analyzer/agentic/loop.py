@@ -11,6 +11,7 @@ tag → per-round stats event.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime, timezone
 
@@ -20,6 +21,7 @@ from ..recall.pool import Candidate, candidates_to_legacy_docs, pool_and_dedupe
 from .coverage import tag_coverage
 from .elements import attach_facets, candidates_from_state, elements_from_state
 from .expand import MAX_CITED_LIGHT, expand, similar_neighbours
+from .neighbourhood import paper_neighbourhood
 from .query_gen import boolean_query, next_mode
 from .validator import validate
 from .wide import cpc_queries, wide_queries
@@ -125,7 +127,44 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
                         "pubs": returned, "new_pubs": new_keys})
         return new_seeds
 
-    seeds += await _run(queries)
+    # paper neighbourhood runs alongside the patent queries (Harry: parallel, no ordering)
+    async def _neigh():
+        if os.environ.get("LOOP_NEIGHBOURHOOD", "1") != "1":
+            return [], {"skipped": True}
+        try:
+            return await paper_neighbourhood(state.get("source_title", ""), cands, cutoff=cutoff,
+                                             doi=state.get("source_doi", ""), arxiv_id=state.get("source_arxiv_id", ""),
+                                             summary=state.get("summary", ""))
+        except Exception as exc:
+            return [], {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
+    (q_seeds, (papers, neigh_info)) = await asyncio.gather(_run(queries), _neigh())
+    seeds += q_seeds
+    for c in papers:
+        pool.setdefault((c.pub_num or c.title).upper(), c)
+    # bridge: patents that cite the neighbourhood papers (Reliance on Science, amie_patents.pcs_oa)
+    bridge_seeds: list[str] = []
+    bridge_info: dict = {"oa_ids": 0, "patents": 0, "by_paper": {}}
+    oa_ids = [(c.raw.get("neigh") or {}).get("oa_id") for c in papers]
+    oa_ids = [o for o in dict.fromkeys(oa_ids) if o]
+    bridge_info["oa_ids"] = len(oa_ids)
+    if oa_ids:
+        try:
+            from ..recall.bigquery_patents import fetch_citing_patents
+            citing = await fetch_citing_patents(oa_ids)
+            for oid, rows in citing.items():
+                pubs = [r.get("patent_pub") or r.get("publication_number") or "" for r in rows]
+                pubs = [x for x in pubs if x]
+                if pubs:
+                    bridge_info["by_paper"][oid] = pubs
+                    bridge_seeds += pubs
+        except ImportError:
+            bridge_info["error"] = "fetch_citing_patents not available"
+        except Exception as exc:
+            bridge_info["error"] = f"{type(exc).__name__}: {exc}"[:200]
+    bridge_seeds = list(dict.fromkeys(bridge_seeds))
+    bridge_info["patents"] = len(bridge_seeds)
+    seeds += bridge_seeds
     seeds = list(dict.fromkeys(seeds))
     expanded, info = await expand(seeds, set(pool), max_cited=MAX_CITED_LIGHT, before=cutoff, light=True, forward=True) if seeds else ([], {})
     dropped = set(info.get("seeds_after_cutoff") or [])
@@ -167,6 +206,9 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
              "cited_total": info.get("cited_total", 0), "cited_light": info.get("cited_light", 0),
              "cited_by_seed": info.get("cited_by_seed", {}), "expanded_pubs": sorted((c.pub_num or c.title).upper() for c in expanded),
              "cpc_top": top_cpc,
+             "neighbourhood": {k: v for k, v in neigh_info.items()}, "neighbourhood_papers": len(papers),
+             "bridge": {"oa_ids": bridge_info["oa_ids"], "patents": bridge_info["patents"], "error": bridge_info.get("error")},
+             "bridge_pubs": sorted(bridge_seeds), "bridge_by_paper": bridge_info["by_paper"],
              "similar_total": sim_info.get("similar_total", 0), "similar_added": len(sim_cands),
              "similar_by_seed": sim_info.get("by_seed", {}),
              "similar_pubs": sorted((c.pub_num or c.title).upper() for c in sim_cands),
