@@ -78,7 +78,8 @@ def _to_candidate(p: dict) -> Candidate:
         year=str(p.get("year") or ""),
         authors=authors,
         source_score=float(p.get("citationCount") or 0),
-        raw={"semantic_scholar": {"paperId": paper_id, "venue": p.get("venue", "")}},
+        raw={"semantic_scholar": {"paperId": paper_id, "venue": p.get("venue", ""), "externalIds": ext,
+                                  "citationCount": p.get("citationCount")}},
     )
 
 
@@ -216,3 +217,43 @@ async def batch(paper_ids: list[str]) -> tuple[list[Candidate], str | None]:
         return [], "unexpected response shape"
     cands = [_to_candidate(p) for p in data if p]
     return cands, None
+
+
+async def match_title(title: str) -> Candidate | None:
+    """/paper/search/match — the single best title match (used to locate the
+    input paper on S2 from its title)."""
+    if not title:
+        return None
+    async with httpx.AsyncClient() as client:
+        data, err = await _get(client, f"{API_BASE}/paper/search/match", {"query": title[:300], "fields": DEFAULT_FIELDS})
+    if err or not data:
+        return None
+    rows = data.get("data") or []
+    return _to_candidate(rows[0]) if rows else None
+
+
+async def references_all(paper_id: str, max_total: int = 1000) -> tuple[list[Candidate], str | None]:
+    """Every reference, paginated (API docs example: offset=…&limit=500)."""
+    return await _paged(f"{API_BASE}/paper/{paper_id}/references", "citedPaper", max_total)
+
+
+async def citations_all(paper_id: str, max_total: int = 1000) -> tuple[list[Candidate], str | None]:
+    return await _paged(f"{API_BASE}/paper/{paper_id}/citations", "citingPaper", max_total)
+
+
+async def _paged(url: str, key: str, max_total: int) -> tuple[list[Candidate], str | None]:
+    out: list[Candidate] = []
+    offset, err = 0, None
+    async with httpx.AsyncClient() as client:
+        while offset < max_total:
+            data, err = await _get(client, url, {"offset": offset, "limit": min(500, max_total - offset), "fields": DEFAULT_FIELDS})
+            if err or not data:
+                break
+            for entry in data.get("data") or []:
+                p = entry.get(key) if isinstance(entry, dict) else None
+                if p and p.get("title"):
+                    out.append(_to_candidate(p))
+            if data.get("next") is None:
+                break
+            offset = int(data["next"])
+    return out, (err if not out else None)

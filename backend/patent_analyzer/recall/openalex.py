@@ -181,3 +181,25 @@ async def search_paper_by_title(title: str) -> Candidate | None:
     if not results:
         return None
     return _work_to_candidate(results[0])
+
+
+async def ids_for_dois(dois: list[str]) -> dict[str, str]:
+    """DOI → OpenAlex work id (W…), 50 per request via the pipe-joined
+    `filter=doi:` syntax (OpenAlex docs: "You can use OR by putting a pipe
+    between values", ≤50 values)."""
+    import asyncio
+    out: dict[str, str] = {}
+    clean = [d.strip().lower().replace("https://doi.org/", "") for d in dois if d and d.strip()]
+    clean = list(dict.fromkeys(clean))
+    async with httpx.AsyncClient() as client:
+        for i in range(0, len(clean), 50):
+            chunk = clean[i:i + 50]
+            data, err = await _get(client, f"{API_BASE}/works", _params({
+                "filter": "doi:" + "|".join(chunk), "per_page": 50, "select": "id,doi"}))
+            for w in ((data or {}).get("results") or []):
+                doi = (w.get("doi") or "").lower().replace("https://doi.org/", "")
+                if doi and w.get("id"):
+                    out[doi] = w["id"].rsplit("/", 1)[-1]
+            if i + 50 < len(clean):
+                await asyncio.sleep(1.0)
+    return out
