@@ -402,7 +402,9 @@ def annotate_quotes(result: dict, app_data: dict) -> dict:
             continue
         quotes = _item_quotes(item)
         checks = item.get("quote_checks")
-        if isinstance(checks, list) and len(checks) == len(quotes):
+        # production verify_checklist_results (quote_verify) also stores a `quote_checks`
+        # list ({verified, sim, span, bigram}); only our own annotation ({locate, dual, ...}) counts
+        if isinstance(checks, list) and len(checks) == len(quotes) and all("locate" in c for c in checks):
             continue
         checks = []
         for q in quotes:
