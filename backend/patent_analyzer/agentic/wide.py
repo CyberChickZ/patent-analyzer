@@ -53,12 +53,19 @@ def candidate_queries(cand: dict) -> list[dict]:
         return {"kind": kind, "query": query, "facets_used": used, "elements": els_used}
 
     out = []
+    concept = " ".join(str(cand.get("concept") or "").split())
+    if concept:
+        # natural-language query: Google Patents ranks free text semantically
+        # (r/patentexaminer: "Use natural language to describe the problem
+        # being solved, concisely"); counted as its own channel in the funnel
+        out.append({"kind": "natural", "query": concept[:300], "facets_used": {"concept": [concept[:120]]},
+                    "elements": [e.get("id") for e in els if e.get("id")]})
     if not things:
-        return out
+        return out[:PER_CANDIDATE]
     out.append(_q("thing", things, thing=t_terms))
     if names:
         out.append(_q("named+thing", f"{names} {things}", named=n_terms, thing=t_terms))
-    if apps:
+    if apps and len(out) < PER_CANDIDATE:
         out.append(_q("thing+apparatus", f"{things} {apps}", thing=t_terms, apparatus=a_terms))
     return out[:PER_CANDIDATE]
 
@@ -100,7 +107,7 @@ def wide_queries(candidates: list[dict], max_total: int = MAX_QUERIES) -> list[d
             _take(per[0][0], q)
     for cid, qs in per[1:]:
         for q in qs:
-            if q["kind"] == "thing":
+            if q["kind"] in ("natural", "thing"):
                 _take(cid, q)
     for cid, qs in per[1:]:
         for q in qs:
