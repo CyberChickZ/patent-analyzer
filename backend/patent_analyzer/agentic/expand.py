@@ -102,3 +102,44 @@ async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CIT
                               "cpc_codes": m.get("cpc_codes") or [], "cited_by_seeds": cited[pub]}},
         ))
     return out, info
+
+
+MAX_SIMILAR = int(__import__("os").environ.get("EXPAND_MAX_SIMILAR", "1000"))
+
+
+async def similar_neighbours(seed_pubs: list[str], known: set[str], before: str | None = None,
+                             max_out: int = MAX_SIMILAR, max_seeds: int = 300) -> tuple[list[Candidate], dict]:
+    """Google's published nearest neighbours (embedding_v1 `similar`) of the
+    seeds, ranked by how many seeds share them, date-filtered, titles only."""
+    from ..recall.bigquery_patents import fetch_similar
+    seeds = [s for s in dict.fromkeys(_canon(p) for p in seed_pubs if p) if s][:max_seeds]
+    info = {"seeds": len(seeds), "similar_total": 0, "similar_new": 0, "by_seed": {}}
+    if not seeds:
+        return [], info
+    sim = await fetch_similar(seeds)
+    counts = Counter()
+    for s, ns in sim.items():
+        for n in ns:
+            if n and n != s:
+                counts[n] += 1
+    info["similar_total"] = len(counts)
+    new = [p for p, _ in counts.most_common() if p not in known and p not in set(seeds)][:max_out]
+    info["similar_new"] = len(new)
+    if not new:
+        return [], info
+    meta = await fetch_meta_light(new)
+    kept = set()
+    out = []
+    for pub, m in meta.items():
+        if _after(m, before):
+            continue
+        kept.add(pub)
+        out.append(Candidate(
+            title=m.get("title") or pub, snippet="", abstract="", match_type="Patent", pub_num=pub,
+            year=str(m.get("priority_date") or "")[:4], url=f"https://patents.google.com/patent/{pub}/en",
+            source_score=float(counts[pub]), sources=["google_similar"],
+            raw={"bigquery": {"family_id": m.get("family_id", ""), "priority_date": m.get("priority_date", ""),
+                              "shared_by_seeds": counts[pub]}}))
+    info["by_seed"] = {s: [n for n in ns if n in kept] for s, ns in sim.items()}
+    info["by_seed"] = {s: ns for s, ns in info["by_seed"].items() if ns}
+    return out, info

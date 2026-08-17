@@ -19,7 +19,7 @@ from ..recall import serpapi as sp
 from ..recall.pool import Candidate, candidates_to_legacy_docs, pool_and_dedupe
 from .coverage import tag_coverage
 from .elements import attach_facets, candidates_from_state, elements_from_state
-from .expand import MAX_CITED_LIGHT, expand
+from .expand import MAX_CITED_LIGHT, expand, similar_neighbours
 from .query_gen import boolean_query, next_mode
 from .validator import validate
 from .wide import cpc_queries, wide_queries
@@ -134,6 +134,10 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
             del pool[k]
     for c in expanded:
         pool.setdefault((c.pub_num or c.title).upper(), c)
+    # Google's semantic neighbours of the seeds (channel "google_similar")
+    sim_cands, sim_info = await similar_neighbours(seeds, set(pool), before=cutoff) if seeds else ([], {})
+    for c in sim_cands:
+        pool.setdefault((c.pub_num or c.title).upper(), c)
     # CPC round: the subclasses the citation neighbourhood is classified in
     # (expansion head carries cpc_codes), AND the core candidate's thing forms
     cpc_counts: dict[str, int] = {}
@@ -163,6 +167,9 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
              "cited_total": info.get("cited_total", 0), "cited_light": info.get("cited_light", 0),
              "cited_by_seed": info.get("cited_by_seed", {}), "expanded_pubs": sorted((c.pub_num or c.title).upper() for c in expanded),
              "cpc_top": top_cpc,
+             "similar_total": sim_info.get("similar_total", 0), "similar_added": len(sim_cands),
+             "similar_by_seed": sim_info.get("by_seed", {}),
+             "similar_pubs": sorted((c.pub_num or c.title).upper() for c in sim_cands),
              "pool_size": len(pool), "queries": log, "pool_pubs": sorted(pool), "seed_pubs": sorted(set(seeds) - dropped),
              "covered": [], "uncovered": [], "cpc_hint": next(iter(info.get("cpc_subclasses") or {}), None),
              "ts": datetime.now(timezone.utc).isoformat()}

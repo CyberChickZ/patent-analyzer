@@ -191,8 +191,13 @@ def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
         c7.raw["bigquery"] = {"cpc_codes": ["A61K31/00", "A61K38/00"]}
         return [c7], {"cpc_subclasses": {"A61K": 2}, "seeds_after_cutoff": ["US2099"], "cited_total": 40, "cited_light": 10}
     monkeypatch.setattr(L, "expand", fake_expand)
+
+    async def fake_similar(seeds, known, before=None, **kw):
+        return [_cand("US8", "google neighbour")], {"similar_total": 5, "by_seed": {"US1": ["US8"]}}
+    monkeypatch.setattr(L, "similar_neighbours", fake_similar)
     events = []
     cands, stats = asyncio.run(L.run_loop(state, lambda: 0, lambda: False, lambda k, m, p=None: events.append(k)))
+    assert "US8" in {c.pub_num for c in cands} and stats["rounds"][0]["similar_added"] == 1 and stats["rounds"][0]["similar_pubs"] == ["US8"]
     assert [c[1] for c in calls] == [100] * len(calls) and all(c[2] == "priority:20110202" for c in calls)
     kinds = [q["kind"] for q in stats["rounds"][0]["queries"]]
     assert kinds[:3] == ["thing", "named+thing", "thing"] and "cpc+thing" in kinds   # place never appears; CPC round after expansion
@@ -206,3 +211,18 @@ def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
     assert stats["rounds"][0]["queries"][1]["new"] == 1   # US2099 repeats, one fresh hit
     assert "US7" in stats["rounds"][0]["expanded_pubs"] and stats["rounds"][0]["cpc_top"] == ["A61K"]
     assert [c["id"] for c in stats["candidates"]] == ["inv1", "inv2"] and events == ["round_done"]
+
+
+def test_similar_neighbours_ranks_shared_neighbours_and_filters_dates(monkeypatch):
+    from patent_analyzer.agentic import expand as E
+
+    async def fake_sim(pubs):
+        return {"S1": ["S1", "N1", "N2"], "S2": ["S2", "N1", "N3"]}
+
+    async def fake_light(pubs):
+        return {p: {"priority_date": "2015-01-01" if p == "N3" else "2000-01-01", "family_id": "f", "title": f"t{p}"} for p in pubs}
+    monkeypatch.setattr("patent_analyzer.recall.bigquery_patents.fetch_similar", fake_sim)
+    monkeypatch.setattr(E, "fetch_meta_light", fake_light)
+    out, info = asyncio.run(E.similar_neighbours(["S1", "S2"], set(), before="20110101"))
+    assert [c.pub_num for c in out][0] == "N1" and "N3" not in {c.pub_num for c in out}
+    assert info["similar_total"] == 3 and info["by_seed"] == {"S1": ["N1", "N2"], "S2": ["N1"]}

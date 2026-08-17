@@ -269,6 +269,37 @@ async def fetch_cited_by(pub_nums: list[str], max_gib: float = 5.0) -> dict[str,
                                                for x in (r.cited_by or [])] for r in rows}
 
 
+async def fetch_similar(pub_nums: list[str], max_gib: float = 5.0) -> dict[str, list[str]]:
+    """Google's own semantic neighbours: amie_patents.similar (copied once
+    from google_patents_research.publications.similar — the embedding_v1
+    nearest neighbours Google publishes, ~25 per patent; 117 GiB one-time,
+    point lookups afterwards). pub → [neighbour pubs], keys canonical."""
+    import asyncio
+    import re
+    from google.cloud import bigquery
+
+    norm = {re.sub(r"[\s\-/,.]", "", p.upper()): p for p in pub_nums if p}
+    if not norm:
+        return {}
+    wanted = [_bq_form(p) for p in norm]
+    client = bigquery.Client(project=GC_PROJECT)
+    pubs_param = bigquery.ArrayQueryParameter("pubs", "STRING", wanted)
+
+    def _run():
+        b = client.query(
+            "SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(p)), 4000) FROM UNNEST(@pubs) p) AS b",
+            job_config=bigquery.QueryJobConfig(query_parameters=[pubs_param]))
+        buckets = list(b.result())[0].b
+        params = [pubs_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
+        return guarded_query(client, f"""
+            SELECT publication_number, similar FROM `{GC_PROJECT}.amie_patents.similar`
+            WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params, max_gib=max_gib)
+
+    rows = await asyncio.to_thread(_run)
+    return {_canon_pub(r.publication_number): [_canon_pub(x.get("publication_number") or "") for x in (r.similar or [])
+                                               if x.get("publication_number")] for r in rows}
+
+
 def _bq_form(p: str) -> str:
     import re
     m = re.match(r"^([A-Z]{2})((?:RE|PP|D|H|T)?\d+)([A-Z]\d?)?$", p)
