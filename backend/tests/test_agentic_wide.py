@@ -6,51 +6,55 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from patent_analyzer.agentic.wide import candidate_queries, cpc_queries, wide_queries
 
 
-def _cand(cid, named, things, apps=None):
-    return {"id": cid, "elements": [{"id": f"{cid}.e0", "facets": {"named": named, "thing": things, "place": ["radiotherapy"], "apparatus": apps or []}}]}
+def _cand(cid, named, things, apps=None, patent=None):
+    return {"id": cid, "elements": [
+        {"id": f"{cid}.e0", "facets": {"named": [], "thing": ["video conferencing", "telepresence"], "place": ["meeting room"], "apparatus": []}},
+        {"id": f"{cid}.e1", "facets": {"named": named, "thing": things, "place": ["radiotherapy"], "apparatus": apps or [], "patent": patent or []}}]}
 
 
-def test_candidate_queries_never_use_place_and_lead_with_thing():
-    qs = candidate_queries(_cand("inv1", ["indocyanine green", "icg"], ["tissue perfusion imaging", "perfusion map"], ["ccd camera"]))
-    assert [q["kind"] for q in qs] == ["thing", "named+thing", "thing+apparatus"]
-    assert qs[0]["query"] == '((tissue perfusion imaging) OR (perfusion map))'
-    assert qs[1]["query"] == '("indocyanine green" OR icg) ((tissue perfusion imaging) OR (perfusion map))'
-    assert qs[2]["query"] == '((tissue perfusion imaging) OR (perfusion map)) (ccd camera)'
-    assert all("radiotherapy" not in q["query"] for q in qs)
-    assert candidate_queries(_cand("inv2", [], ["vault nanoparticle"]))[0]["kind"] == "thing"
-    assert candidate_queries(_cand("inv3", ["x"], [])) == []
+def test_candidate_queries_are_narrow_per_element_with_the_domain():
+    qs = candidate_queries(_cand("inv1", ["indocyanine green", "icg"], ["swivel display", "rotating monitor"], ["turntable"]))
+    kinds = [q["kind"] for q in qs]
+    assert kinds == ["natural", "wide", "element:inv1.e1", "named+domain"]
+    assert qs[2]["query"] == "((swivel display) OR (rotating monitor)) ((video conferencing) OR telepresence)"
+    assert qs[2]["facets_used"] == {"thing": ["swivel display", "rotating monitor"], "domain": ["video conferencing", "telepresence"]}
+    assert qs[1]["kind"] == "wide" and "radiotherapy" in qs[1]["query"] and "radiotherapy" not in qs[2]["query"]
+    assert qs[3]["query"].startswith('("indocyanine green" OR icg) ((video conferencing) OR telepresence)')
+    assert qs[0]["query"] == "video conferencing swivel display" and len(qs[0]["query"].split()) <= 10
+    assert candidate_queries({"id": "x", "elements": []}) == []
 
 
-def test_wide_queries_core_first_then_other_things_and_caps():
+def test_wide_queries_core_first_then_other_naturals_and_caps():
     cands = [_cand("inv1", [], ["a"], ["b"]), _cand("inv2", ["sac"], ["c"]), _cand("inv3", ["momp"], ["e"])]
-    qs = wide_queries(cands, max_total=5)
+    qs = wide_queries(cands, max_total=6)
     assert [(q["candidate"], q["kind"]) for q in qs] == [
-        ("inv1", "thing"), ("inv1", "thing+apparatus"), ("inv2", "thing"), ("inv3", "thing"), ("inv2", "named+thing")]
-    assert len({q["query"] for q in qs}) == 5
+        ("inv1", "natural"), ("inv1", "wide"), ("inv1", "element:inv1.e1"), ("inv2", "natural"), ("inv2", "wide"), ("inv3", "natural")]
+    assert len({q["query"] for q in qs}) == 6
 
 
 def test_queries_record_facets_used_and_source_elements():
     cand = {"id": "inv1", "elements": [
         {"id": "inv1.e0", "facets": {"named": ["icg"], "thing": ["perfusion map"], "place": []}},
         {"id": "inv1.e1", "facets": {"named": [], "thing": ["tissue perfusion"], "place": ["hindlimb"]}}]}
-    qs = candidate_queries(cand)
-    assert qs[0]["facets_used"] == {"thing": ["perfusion map", "tissue perfusion"]} and qs[0]["elements"] == ["inv1.e0", "inv1.e1"]
-    assert qs[1]["facets_used"] == {"named": ["icg"], "thing": ["perfusion map", "tissue perfusion"]}
+    qs = {q["kind"]: q for q in candidate_queries(cand)}
+    assert qs["wide"]["facets_used"] == {"thing": ["perfusion map", "tissue perfusion"], "place": ["hindlimb"]} and qs["wide"]["elements"] == ["inv1.e0", "inv1.e1"]
+    assert qs["element:inv1.e1"]["facets_used"] == {"thing": ["tissue perfusion"], "domain": ["perfusion map"]}
+    assert qs["named+domain"]["facets_used"] == {"named": ["icg"], "domain": ["perfusion map"]}
 
 
 def test_cpc_queries_use_top_subclasses_with_core_things():
-    qs = cpc_queries([_cand("inv1", [], ["optical tracking", "marker tracking"])], ["A61B", "A61N", "G06T"])
+    qs = cpc_queries([{"id": "inv1", "elements": [{"id": "e0", "facets": {"thing": ["optical tracking", "marker tracking"]}}]}], ["A61B", "A61N", "G06T"])
     assert [q["query"] for q in qs] == ["CPC=A61B/low ((optical tracking) OR (marker tracking))", "CPC=A61N/low ((optical tracking) OR (marker tracking))"]
     assert qs[0]["kind"] == "cpc+thing" and qs[0]["facets_used"]["cpc"] == ["A61B"]
     assert cpc_queries([], ["A61B"]) == []
 
 
-def test_natural_language_query_comes_first_when_the_candidate_has_a_concept():
-    cand = {"id": "inv1", "concept": "A telepresence robot whose display swivels toward the participant a remote user selects.",
-            "elements": [{"id": "inv1.e0", "facets": {"named": [], "thing": ["telepresence robot"], "place": ["meeting"], "apparatus": ["turntable"]}}]}
+def test_natural_query_uses_patent_phrasings_when_present():
+    cand = {"id": "inv1", "elements": [
+        {"id": "inv1.e0", "facets": {"thing": ["telepresence robot"], "patent": ["teleconferencing apparatus"]}},
+        {"id": "inv1.e1", "facets": {"thing": ["rotation"], "patent": ["swiveling video monitor"]}}]}
     qs = candidate_queries(cand)
-    assert [q["kind"] for q in qs] == ["natural", "thing", "thing+apparatus"]
-    assert qs[0]["query"].startswith("A telepresence robot whose display swivels") and qs[0]["elements"] == ["inv1.e0"]
+    assert qs[0]["kind"] == "natural" and qs[0]["query"] == "teleconferencing apparatus swiveling video monitor telepresence robot"
 
 
 def test_title_terms_prefers_repeated_bigrams():

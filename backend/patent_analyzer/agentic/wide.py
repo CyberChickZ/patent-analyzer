@@ -32,42 +32,64 @@ def _union(elements: list[dict], facet: str, cap: int) -> tuple[list[str], dict[
     return kept, {t: origin[t] for t in kept}
 
 
-def candidate_queries(cand: dict) -> list[dict]:
-    """≤3 queries for one candidate invention, none scoped by `place`:
-    thing forms alone (patent phrasings first); names AND thing (when the
-    element has validated names); thing AND apparatus. The place facet
-    (radiotherapy, prostate cancer, ...) only ranks: H1-02's gold were
-    generic optical-tracking / machine-guidance patents that a domain word
-    excluded structurally (H_monitor.md, H1.md §H7). Each query records the
-    forms it was built from and the elements they came from."""
+def candidate_queries(cand: dict, max_elements: int = 6) -> list[dict]:
+    """Queries for one candidate invention (H7 v3, from the H1-01 funnels):
+    one 8-form OR blob per candidate lost the gold that a narrower phrasing
+    had reached (Google returns the top 100 of ~1e5; ranking variance
+    dominates), so the budget goes to several NARROW queries instead:
+      natural       — ≤10 words: patent phrasings of the first elements + domain
+      wide          — blob of thing forms ∧ place forms (the h1d shape that hit)
+      element:<id>  — per limitation: its thing forms (≤3) ∧ the invention's
+                      domain (the preamble's thing forms), no place scoping
+      named+domain  — validated distinctive names ∧ domain
+    Each query records the forms it was built from and the elements."""
     els = cand.get("elements") or []
+    if not els:
+        return []
+    e0 = els[0]
+    dom_terms = [" ".join(str(t).lower().split()) for t in ((e0.get("facets") or {}).get("thing") or [])][:3]
+    domain = _group(dom_terms)
     n_terms, n_from = _union(els, "named", 6)
     t_terms, t_from = _union(els, "thing", 8)
-    a_terms, a_from = _union(els, "apparatus", 6)
-    names, things, apps = _named_group(n_terms), _group(t_terms), _group(a_terms)
-
-    def _q(kind, query, **facets):
-        used = {k: v for k, v in facets.items() if v}
-        els_used = sorted({eid for k, terms in used.items() for t in terms
-                           for eid in {"named": n_from, "thing": t_from, "apparatus": a_from}[k].get(t, [])})
-        return {"kind": kind, "query": query, "facets_used": used, "elements": els_used}
-
+    p_terms, p_from = _union(els, "place", 4)
     out = []
-    concept = " ".join(str(cand.get("concept") or "").split())
-    if concept:
-        # natural-language query: Google Patents ranks free text semantically
-        # (r/patentexaminer: "Use natural language to describe the problem
-        # being solved, concisely"); counted as its own channel in the funnel
-        out.append({"kind": "natural", "query": concept[:300], "facets_used": {"concept": [concept[:120]]},
-                    "elements": [e.get("id") for e in els if e.get("id")]})
-    if not things:
-        return out[:PER_CANDIDATE]
-    out.append(_q("thing", things, thing=t_terms))
-    if names:
-        out.append(_q("named+thing", f"{names} {things}", named=n_terms, thing=t_terms))
-    if apps and len(out) < PER_CANDIDATE:
-        out.append(_q("thing+apparatus", f"{things} {apps}", thing=t_terms, apparatus=a_terms))
-    return out[:PER_CANDIDATE]
+
+    def _q(kind, query, elements, **facets):
+        used = {k: v for k, v in facets.items() if v}
+        return {"kind": kind, "query": query, "facets_used": used, "elements": elements}
+
+    # natural: short free text, Google ranks it semantically
+    words: list[str] = []
+    for e in els[:4]:
+        for t in ((e.get("facets") or {}).get("patent") or (e.get("facets") or {}).get("thing") or [])[:1]:
+            for w in str(t).lower().split():
+                if w not in words:
+                    words.append(w)
+    for t in dom_terms[:1]:
+        for w in t.split():
+            if w not in words:
+                words.append(w)
+    if len(words) >= 3:
+        out.append(_q("natural", " ".join(words[:10]), [e.get("id") for e in els[:4]], natural=words[:10]))
+    things = _group(t_terms)
+    places = _group(p_terms)
+    if things and places:
+        out.append(_q("wide", f"{things} {places}", sorted({eid for t in t_terms for eid in t_from.get(t, [])}), thing=t_terms, place=p_terms))
+    elif things:
+        out.append(_q("wide", things, sorted({eid for t in t_terms for eid in t_from.get(t, [])}), thing=t_terms))
+    for e in els[1:1 + max_elements]:
+        f = e.get("facets") or {}
+        forms = [" ".join(str(t).lower().split()) for t in (f.get("thing") or [])][:3]
+        forms = [t for t in forms if t and t not in dom_terms]
+        if not forms:
+            continue
+        g = _group(forms)
+        out.append(_q(f"element:{e.get('id')}", f"{g} {domain}" if domain else g, [e.get("id")], thing=forms, domain=dom_terms))
+    if n_terms:
+        names = _named_group(n_terms)
+        out.append(_q("named+domain", f"{names} {domain}" if domain else names,
+                      sorted({eid for t in n_terms for eid in n_from.get(t, [])}), named=n_terms, domain=dom_terms))
+    return out
 
 
 def cpc_queries(cands: list[dict], subclasses: list[str], max_total: int = 2) -> list[dict]:
@@ -102,16 +124,14 @@ def wide_queries(candidates: list[dict], max_total: int = MAX_QUERIES) -> list[d
             seen.add(q["query"])
             out.append({"candidate": cid, **q})
 
+    # the core candidate gets the budget; other candidates only their natural / wide query
     if per:
         for q in per[0][1]:
             _take(per[0][0], q)
     for cid, qs in per[1:]:
         for q in qs:
-            if q["kind"] in ("natural", "thing"):
+            if q["kind"] in ("natural", "wide"):
                 _take(cid, q)
-    for cid, qs in per[1:]:
-        for q in qs:
-            _take(cid, q)
     return out
 
 
