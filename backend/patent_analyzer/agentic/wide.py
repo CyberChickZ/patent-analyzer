@@ -113,3 +113,33 @@ def wide_queries(candidates: list[dict], max_total: int = MAX_QUERIES) -> list[d
         for q in qs:
             _take(cid, q)
     return out
+
+
+_STOP = set("""a an the of for and or in on to with by from is are be as at into via using based method system
+apparatus device toward towards through between over under new novel approach study analysis paper we our its their
+""".split())
+
+
+def title_terms(titles: list[str], top: int = 8) -> list[str]:
+    """Most frequent bigrams (then unigrams) across neighbourhood titles —
+    the vocabulary the field itself uses, instead of the model's guess."""
+    import re
+    from collections import Counter
+    bi, uni = Counter(), Counter()
+    for t in titles:
+        words = [w for w in re.findall(r"[a-z][a-z\-]{2,}", (t or "").lower()) if w not in _STOP]
+        uni.update(set(words))
+        bi.update({f"{a} {b}" for a, b in zip(words, words[1:])})
+    out = [g for g, c in bi.most_common() if c >= 2][:top]
+    for w, c in uni.most_common():
+        if len(out) >= top:
+            break
+        if c >= 2 and all(w not in g for g in out):
+            out.append(w)
+    return out[:top]
+
+
+def terms_query(cand_id: str, terms: list[str]) -> dict | None:
+    if not terms:
+        return None
+    return {"candidate": cand_id, "kind": "neigh_terms", "query": _group(terms), "facets_used": {"neigh_terms": terms}, "elements": []}

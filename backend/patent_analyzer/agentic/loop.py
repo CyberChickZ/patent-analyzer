@@ -24,7 +24,7 @@ from .expand import MAX_CITED_LIGHT, expand, similar_neighbours
 from .neighbourhood import paper_neighbourhood
 from .query_gen import boolean_query, next_mode
 from .validator import validate
-from .wide import cpc_queries, wide_queries
+from .wide import cpc_queries, terms_query, title_terms, wide_queries
 
 MAX_ROUNDS = int(os.environ.get("LOOP_MAX_ROUNDS", "3"))
 MAX_ELEMENTS = int(os.environ.get("LOOP_MAX_ELEMENTS", "12"))
@@ -165,6 +165,11 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
     bridge_seeds = list(dict.fromkeys(bridge_seeds))
     bridge_info["patents"] = len(bridge_seeds)
     seeds += bridge_seeds
+    # one query in the neighbourhood's own words (frequent title bigrams)
+    nterms = title_terms([c.title for c in papers]) if papers else []
+    tq = terms_query(cands[0].get("id") or "inv1", nterms) if cands else None
+    if tq and len(log) < WIDE_MAX_QUERIES - CPC_QUERIES + 1:
+        seeds += await _run([tq])
     seeds = list(dict.fromkeys(seeds))
     expanded, info = await expand(seeds, set(pool), max_cited=MAX_CITED_LIGHT, before=cutoff, light=True, forward=True) if seeds else ([], {})
     dropped = set(info.get("seeds_after_cutoff") or [])
