@@ -236,7 +236,7 @@ async def fetch_meta_light(pub_nums: list[str], max_gib: float = 15.0) -> dict[s
                                               "title": r.title or ""} for r in rows}
 
 
-async def fetch_cited_by(pub_nums: list[str], max_gib: float = 5.0) -> dict[str, list[dict]]:
+async def fetch_cited_by(pub_nums: list[str], max_gib: float = 8.0) -> dict[str, list[dict]]:
     """Forward citations from amie_patents.cited_by (copied once from
     google_patents_research.publications.cited_by, 21.6 GiB, bucketed on
     publication_number): pub → [{publication_number, category, filing_date}].
@@ -269,7 +269,7 @@ async def fetch_cited_by(pub_nums: list[str], max_gib: float = 5.0) -> dict[str,
                                                for x in (r.cited_by or [])] for r in rows}
 
 
-async def fetch_similar(pub_nums: list[str], max_gib: float = 5.0) -> dict[str, list[str]]:
+async def fetch_similar(pub_nums: list[str], max_gib: float = 12.0) -> dict[str, list[str]]:
     """Google's own semantic neighbours: amie_patents.similar (copied once
     from google_patents_research.publications.similar — the embedding_v1
     nearest neighbours Google publishes, ~25 per patent; 117 GiB one-time,

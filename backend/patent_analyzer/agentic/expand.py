@@ -64,7 +64,11 @@ async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CIT
     if forward:
         # forward edges (patents citing the seed) at weight 1 — pilot's
         # citing:1 vs cited:3; date filter below drops post-cutoff ones
-        fwd = await fetch_cited_by(seeds)
+        try:
+            fwd = await fetch_cited_by(seeds)
+        except Exception as exc:          # budget guard or BQ error: forward edges are optional
+            info["forward_error"] = f"{type(exc).__name__}: {exc}"[:160]
+            fwd = {}
         for s, rows in fwd.items():
             for x in rows:
                 pub = _canon(x.get("publication_number", ""))
@@ -116,7 +120,11 @@ async def similar_neighbours(seed_pubs: list[str], known: set[str], before: str 
     info = {"seeds": len(seeds), "similar_total": 0, "similar_new": 0, "by_seed": {}}
     if not seeds:
         return [], info
-    sim = await fetch_similar(seeds)
+    try:
+        sim = await fetch_similar(seeds)
+    except Exception as exc:
+        info["error"] = f"{type(exc).__name__}: {exc}"[:160]
+        return [], info
     counts = Counter()
     for s, ns in sim.items():
         for n in ns:

@@ -179,7 +179,10 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
     for c in expanded:
         pool.setdefault((c.pub_num or c.title).upper(), c)
     # Google's semantic neighbours of the seeds (channel "google_similar")
-    sim_cands, sim_info = await similar_neighbours(seeds, set(pool), before=cutoff) if seeds else ([], {})
+    try:
+        sim_cands, sim_info = await similar_neighbours(seeds, set(pool), before=cutoff) if seeds else ([], {})
+    except Exception as exc:
+        sim_cands, sim_info = [], {"error": f"{type(exc).__name__}: {exc}"[:160]}
     for c in sim_cands:
         pool.setdefault((c.pub_num or c.title).upper(), c)
     # CPC round: the subclasses the citation neighbourhood is classified in
