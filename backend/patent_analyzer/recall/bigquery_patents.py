@@ -577,10 +577,11 @@ async def fetch_citing_patents(oa_ids: list[str], max_gib: float = 5.0) -> dict[
     """Paper -> USPTO patents citing it, from amie_patents.pcs_oa (Reliance on
     Science pcs_oa_uspto.csv, Zenodo 21493744, granted through 2025; bucketed
     on oa_id). Keys are canonical OpenAlex ids ('W123'); each entry:
-    {patent_pub (canonical, e.g. 'US10494607B2'), reftype ('exm' examiner /
-    'app' applicant / 'unk'), confscore (1-10), wherefound ('frontonly' /
-    'bodyonly' / 'both'), grant_year, family_id}. Papers with no citing
-    patent are absent from the result."""
+    {patent_pub (canonical, e.g. 'US10494607B2'), reftype ('app' for
+    99.998% of rows — the USPTO file carries no usable examiner flag),
+    confscore (4-10), wherefound ('frontonly' / 'bodyonly' / 'both'),
+    grant_year (NULL for grants before amie_patents.pubs coverage),
+    family_id}. Papers with no citing patent are absent from the result."""
     import asyncio
     from google.cloud import bigquery
 
@@ -604,9 +605,11 @@ async def fetch_cited_papers(patent_pubs: list[str], max_gib: float = 5.0) -> di
     """Reverse bridge: USPTO patent -> OpenAlex papers it cites, from
     amie_patents.pcs_oa_by_patent (same rows as pcs_oa, bucketed on
     patent_pub). Keys are canonical publication numbers (_canon_pub);
-    each entry: {oa_id, reftype, confscore, wherefound}. Only granted
-    US patents appear in Reliance on Science, so application numbers
-    (US2012...A1) never match."""
+    each entry: {oa_id, reftype, confscore, wherefound}. The file is
+    USPTO-only but includes ~1M pre-grant publications (US-2015133390-A1),
+    so application numbers do match. reftype is 'app' for 99.998% of rows
+    (846 'exm' in 34.8M, counted 2026-09-18; the 2024 release is the same
+    for its USPTO rows) — it does not separate examiner citations."""
     import asyncio
     import re
     from google.cloud import bigquery
