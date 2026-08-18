@@ -208,7 +208,7 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
              "cpc_top": top_cpc,
              "neighbourhood": {k: v for k, v in neigh_info.items()}, "neighbourhood_papers": len(papers),
              "bridge": {"oa_ids": bridge_info["oa_ids"], "patents": bridge_info["patents"], "error": bridge_info.get("error")},
-             "bridge_pubs": sorted(bridge_seeds), "bridge_by_paper": bridge_info["by_paper"],
+             "bridge_pubs": sorted(bridge_seeds), "bridge_by_paper": bridge_info["by_paper"], "neigh_oa_ids": oa_ids,
              "similar_total": sim_info.get("similar_total", 0), "similar_added": len(sim_cands),
              "similar_by_seed": sim_info.get("by_seed", {}),
              "similar_pubs": sorted((c.pub_num or c.title).upper() for c in sim_cands),
