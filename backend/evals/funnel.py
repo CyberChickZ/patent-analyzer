@@ -117,6 +117,26 @@ async def build_funnel(rec: dict, gold_entry: dict) -> dict:
                      "channel": q.get("channel"), "total": q.get("total"), "returned": len(pubs), "new": len(new),
                      "papers": q.get("papers", 0), "gold_families": sorted(gf), "gold_new": len(gnew),
                      "reach": len(reached), "gold_pubs": [p for p in pubs if p in fam_of]})
+    # 1b) paper neighbourhood → bridge (patents citing those papers)
+    if rd.get("neighbourhood") is not None:
+        bp = [_canon(p) for p in rd.get("bridge_pubs", [])]
+        bg = _fams(bp, fam_of)
+        rows.append({"stage": "bridge", "papers": rd.get("neighbourhood_papers"), "oa_ids": (rd.get("bridge") or {}).get("oa_ids"),
+                     "returned": len(bp), "new": len([p for p in bp if p not in seen]), "gold_families": sorted(bg),
+                     "gold_new": len(bg - reached), "reach": len(reached | bg), "error": (rd.get("bridge") or {}).get("error"),
+                     "neigh_sources": (rd.get("neighbourhood") or {}).get("sources"), "neigh_seconds": (rd.get("neighbourhood") or {}).get("seconds"),
+                     "gold_pubs": [p for p in bp if p in fam_of]})
+        reached |= bg
+        seen.update(bp)
+    # 1c) Google's semantic neighbours of the seeds
+    if rd.get("similar_pubs") is not None:
+        sp = [_canon(p) for p in rd.get("similar_pubs", [])]
+        sg = _fams(sp, fam_of)
+        rows.append({"stage": "google_similar", "seeds": rd.get("seeds"), "similar_total": rd.get("similar_total"),
+                     "returned": len(sp), "new": len([p for p in sp if p not in seen]), "gold_families": sorted(sg),
+                     "gold_new": len(sg - reached), "reach": len(reached | sg), "gold_pubs": [p for p in sp if p in fam_of]})
+        reached |= sg
+        seen.update(sp)
     # 2) expansion
     by_seed = rd.get("cited_by_seed")
     expanded = set(_canon(p) for p in rd.get("expanded_pubs", []))
@@ -175,6 +195,12 @@ def funnel_md(f: dict) -> str:
             gf = ",".join(r["gold_families"]) or "—"
             L.append(f"| {r['n']} | query | {r['kind']} | {r['candidate']} | {' '.join(r['elements'])} | {r['total'] if r['total'] is not None else '?'} | "
                      f"{r['returned']} | {r['new']} | {gf} (+{r['gold_new']}) | {r['reach']} | `{r['query'][:110]}` |")
+        elif r["stage"] == "bridge":
+            L.append(f"| — | paper neighbourhood → bridge | {r['papers']} papers, {r['oa_ids']} OpenAlex ids | | | {r.get('neigh_seconds')}s | {r['returned']} | {r['new']} | "
+                     f"{','.join(r['gold_families']) or '—'} (+{r['gold_new']}) | {r['reach']} | {r.get('error') or ''} sources={r.get('neigh_sources')} |")
+        elif r["stage"] == "google_similar":
+            L.append(f"| — | google similar | {r['seeds']} seeds → {r['similar_total']} neighbours | | | | {r['returned']} | {r['new']} | "
+                     f"{','.join(r['gold_families']) or '—'} (+{r['gold_new']}) | {r['reach']} | shared-by-seeds ranking, date-filtered |")
         elif r["stage"] == "expansion":
             gs = "; ".join(f"{s}→{','.join(v)}" for s, v in list(r["gold_by_seed"].items())[:6]) or "—"
             L.append(f"| — | expansion | seeds {r['seeds']} | | | {r['cited_total']} cited | {r['returned']} | {r['new']} | "
@@ -209,7 +235,7 @@ def summary_table(funnels: list[dict]) -> str:
                 b["gold_any"] += len(r["gold_families"])
                 b["gold_new"] += r["gold_new"]
                 b["calls_with_gold"] += 1 if r["gold_families"] else 0
-            elif r["stage"] in ("expansion", "other_channels"):
+            elif r["stage"] in ("expansion", "other_channels", "bridge", "google_similar"):
                 b = by.setdefault(r["stage"], Counter())
                 b["calls"] += 1
                 b["returned"] += r["returned"]
