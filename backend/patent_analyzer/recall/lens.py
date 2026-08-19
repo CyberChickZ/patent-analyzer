@@ -166,3 +166,63 @@ async def _post(endpoint: str, body: dict) -> tuple[dict | None, str | None]:
     if data is not None and not err:
         kv().put(_CACHE_NS, ck, data)
     return data, err
+
+
+def _norm_doi(d: str) -> str:
+    d = (d or "").strip().lower()
+    d = re.sub(r"^https?://(dx\.)?doi\.org/", "", d)
+    return d[4:] if d.startswith("doi:") else d
+
+
+def _norm_oa(w: str) -> str:
+    w = (w or "").strip().upper()
+    w = re.sub(r"^HTTPS?://OPENALEX\.ORG/", "", w)
+    return w
+
+
+async def scholarly_by_ids(dois: list[str], oa_ids: list[str]) -> tuple[dict[str, dict], str | None]:
+    """Papers -> the patents that cite them (Lens 'patent_citations').
+
+    Terms queries on ids.doi / ids.openalex, batched so one request never
+    asks for more than MAX_RECORDS['scholarly'] records.  Returns
+    {key: {lens_id, title, patent_citations_count, patent_citations: [lens
+    patent ids]}} keyed by the DOI / OpenAlex id as given (lower-cased DOI,
+    upper-cased W-id); a paper matched by both ids appears under both keys.
+    """
+    dois_n = {_norm_doi(d): d for d in dois if d}
+    oas_n = {_norm_oa(w): w for w in oa_ids if w}
+    out: dict[str, dict] = {}
+    first_err = None
+    per = MAX_RECORDS["scholarly"]
+    items = [("ids.doi", k) for k in dois_n] + [("ids.openalex", k) for k in oas_n]
+    for i in range(0, len(items), per):
+        chunk = items[i:i + per]
+        d_chunk = [k for f, k in chunk if f == "ids.doi"]
+        w_chunk = [k for f, k in chunk if f == "ids.openalex"]
+        should = []
+        if d_chunk:
+            should.append({"terms": {"ids.doi": d_chunk}})
+        if w_chunk:
+            should.append({"terms": {"ids.openalex": w_chunk}})
+        query = should[0] if len(should) == 1 else {"bool": {"should": should}}
+        body = {"query": query, "size": per, "include": _SCHOLARLY_INCLUDE}
+        data, err = await _post("scholarly", body)
+        if err:
+            first_err = first_err or err
+            continue
+        w_set, d_set = set(w_chunk), set(d_chunk)
+        for w in data.get("data") or []:
+            rec = {"lens_id": w.get("lens_id"), "title": w.get("title") or "",
+                   "patent_citations_count": int(w.get("patent_citations_count") or 0),
+                   "patent_citations": [pc.get("lens_id") for pc in (w.get("patent_citations") or []) if pc.get("lens_id")]}
+            for ext in w.get("external_ids") or []:
+                typ, val = (ext.get("type") or "").lower(), ext.get("value") or ""
+                if typ == "doi" and _norm_doi(val) in d_set:
+                    out[_norm_doi(val)] = rec
+                elif typ == "openalex" and _norm_oa(val) in w_set:
+                    out[_norm_oa(val)] = rec
+                elif typ == "magid" and f"W{val}" in w_set:
+                    # OpenAlex W-ids inherit MAG ids; Lens matches ids.openalex but only
+                    # echoes the magid in external_ids
+                    out[f"W{val}"] = rec
+    return out, first_err
