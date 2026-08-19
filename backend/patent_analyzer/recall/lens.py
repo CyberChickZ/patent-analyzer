@@ -277,3 +277,48 @@ async def patents_by_lens_ids(lens_ids: list[str], source: str = "lens_bridge") 
             continue
         out.extend(_to_candidate(p, source) for p in data.get("data") or [])
     return out, first_err
+
+
+def _iso(yyyymmdd: str) -> str:
+    s = re.sub(r"\D", "", yyyymmdd or "")
+    return f"{s[:4]}-{s[4:6]}-{s[6:8]}" if len(s) == 8 else yyyymmdd
+
+
+def search_body(query_terms: list[str], cpc: str | None, before: str | None, size: int) -> dict:
+    """bool query: multi-word terms as match_phrase on title/abstract/claims,
+    single words as match; at least one must hit; CPC prefix and
+    date_published < before as filters."""
+    should = []
+    for t in query_terms:
+        t = " ".join((t or "").split())
+        if not t:
+            continue
+        for fld in ("title", "abstract", "claim"):
+            should.append({"match_phrase" if " " in t else "match": {fld: t}})
+    filt: list[dict] = []
+    if cpc:
+        sym = re.sub(r"[^A-Za-z0-9/]", "", cpc).upper()
+        filt.append({"query_string": {"query": f"class_cpc.symbol:{sym.replace('/', chr(92) + '/')}*"}})
+    if before:
+        filt.append({"range": {"date_published": {"lt": _iso(before)}}})
+    q: dict[str, Any] = {"bool": {"must": [{"bool": {"should": should, "minimum_should_match": 1}}]}}
+    if filt:
+        q["bool"]["filter"] = filt
+    return {"query": q, "size": min(size, MAX_RECORDS["patent"]), "include": _PATENT_INCLUDE}
+
+
+async def search_patents(query_terms: list[str], cpc: str | None = None, before: str | None = None,
+                         size: int = 100) -> tuple[list[Candidate], str | None]:
+    """Keyword search of the Patent API (one request, <= MAX_RECORDS['patent']
+    records). `before` is YYYYMMDD; results carry the simple family."""
+    terms = [t for t in query_terms if t and t.strip()]
+    if not terms:
+        return [], None
+    data, err = await _post("patent", search_body(terms, cpc, before, size))
+    if err:
+        return [], err
+    cands = [_to_candidate(p, "lens_search") for p in data.get("data") or []]
+    total = data.get("total")
+    for c in cands:
+        c.raw["lens"]["total"] = total
+    return cands, None
