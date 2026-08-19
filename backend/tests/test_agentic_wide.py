@@ -18,6 +18,8 @@ def test_candidate_queries_are_narrow_per_element_with_the_domain():
     assert kinds == ["natural", "wide", "element:inv1.e1", "named+domain"]
     assert qs[2]["query"] == "((swivel display) OR (rotating monitor)) ((video conferencing) OR telepresence)"
     assert qs[2]["facets_used"] == {"thing": ["swivel display", "rotating monitor"], "domain": ["video conferencing", "telepresence"]}
+    scoped = candidate_queries(_cand("inv1", [], ["swivel display"]), cpc_groups=["H04N7/15"])
+    assert [q for q in scoped if q["kind"] == "element:inv1.e1"][0]["query"] == "(swivel display) CPC=H04N7/low"
     assert qs[1]["kind"] == "wide" and "radiotherapy" in qs[1]["query"] and "radiotherapy" not in qs[2]["query"]
     assert qs[3]["query"].startswith('("indocyanine green" OR icg) ((video conferencing) OR telepresence)')
     assert qs[0]["query"] == "video conferencing swivel display" and len(qs[0]["query"].split()) <= 10
@@ -43,9 +45,9 @@ def test_queries_record_facets_used_and_source_elements():
 
 
 def test_cpc_queries_use_top_subclasses_with_core_things():
-    qs = cpc_queries([{"id": "inv1", "elements": [{"id": "e0", "facets": {"thing": ["optical tracking", "marker tracking"]}}]}], ["A61B", "A61N", "G06T"])
-    assert [q["query"] for q in qs] == ["CPC=A61B/low ((optical tracking) OR (marker tracking))", "CPC=A61N/low ((optical tracking) OR (marker tracking))"]
-    assert qs[0]["kind"] == "cpc+thing" and qs[0]["facets_used"]["cpc"] == ["A61B"]
+    qs = cpc_queries([{"id": "inv1", "elements": [{"id": "e0", "facets": {"thing": ["optical tracking", "marker tracking"]}}]}], ["A61B", "A61B5/11", "A61N5", "G06T7"])
+    assert [q["query"] for q in qs] == ["((optical tracking) OR (marker tracking)) CPC=A61B5/low", "((optical tracking) OR (marker tracking)) CPC=A61N5/low"]
+    assert qs[0]["kind"] == "cpc+thing" and qs[0]["facets_used"]["cpc"] == ["A61B5"]
     assert cpc_queries([], ["A61B"]) == []
 
 

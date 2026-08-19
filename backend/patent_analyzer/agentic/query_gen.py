@@ -64,12 +64,17 @@ def _named_group(terms: list[str], cap: int = 6) -> str:
     return f"({q})" if len(ts) > 1 else q
 
 
-def cpc_clause(subclass: str) -> str:
+def cpc_clause(code: str) -> str:
     """Google Patents: `CPC=B60R22` matches exactly that code, `/low` adds the
-    children — a bare subclass never matches a document, so always ask for
-    the subtree."""
-    c = (subclass or "").strip().upper()
-    return f"CPC={c}/low" if c else ""
+    children. Measured through SerpAPI (H7 gold probe, 2026-09-18): the
+    clause only works at MAIN-GROUP level or deeper (`CPC=H04N7/low` →
+    20,312; `CPC=H04N/low`, `CPC=H04N`, `cpc:H04N7` → 0) and only when it
+    is the LAST term of the query (leading `CPC=… (a OR b)` → 0). Callers
+    append the returned clause at the end."""
+    c = (code or "").strip().upper().split("/")[0]
+    if not c or len(c) < 5:          # subclass (4 chars) never matches
+        return ""
+    return f"CPC={c}/low"
 
 
 def boolean_query(element: dict, mode: str = "strict", field: str = "AB", cpc: str | None = None) -> str:
@@ -89,13 +94,13 @@ def boolean_query(element: dict, mode: str = "strict", field: str = "AB", cpc: s
     parts = [p for p in parts if p]
     body = " ".join(parts)
     q = f"{field}=({body})" if field else body
-    if mode == "strict" and cpc:
-        q += " " + cpc_clause(cpc)
     if mode == "strict" and thing and place:
         t0 = (t_terms or [""])[0]
         p0 = (p_terms or [""])[0]
         if t0 and p0 and " " not in t0 and " " not in p0:
             q += f" ({t0} NEAR/10 {p0})"   # ranking hint only
+    if mode == "strict" and cpc and cpc_clause(cpc):
+        q += " " + cpc_clause(cpc)        # must be last
     return q
 
 

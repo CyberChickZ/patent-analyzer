@@ -61,7 +61,7 @@ def test_loop_rounds_and_budget(monkeypatch):
     # e2 never covered: rounds 2 (CL=) and 3 (CPC=) both tried
     assert any("CL=(" in q["query"] for q in rounds[1]["queries"]) if len(rounds) > 1 else True
     assert all("AB=(" not in q["query"] for q in rounds[0]["queries"])
-    assert any("CPC=H04N" in q["query"] for q in rounds[2]["queries"]) if len(rounds) > 2 else True
+    assert all("CPC=" not in q["query"] for q in rounds[2]["queries"]) if len(rounds) > 2 else True   # subclass hint → no clause (needs a main group)
     assert all(k == "round_done" for k, _ in events)
 
 
@@ -221,7 +221,7 @@ def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
     q0 = stats["rounds"][0]["queries"][0]
     assert q0["n"] == 1 and len(q0["pubs"]) == 2 and q0["new"] == 2 and q0["kind"] == "wide"
     assert stats["rounds"][0]["queries"][1]["new"] == 1   # US2099 repeats, one fresh hit
-    assert "US7" in stats["rounds"][0]["expanded_pubs"] and stats["rounds"][0]["cpc_top"] == ["A61K"]
+    assert "US7" in stats["rounds"][0]["expanded_pubs"] and stats["rounds"][0]["cpc_top"] == ["A61K31", "A61K38"]
     assert [c["id"] for c in stats["candidates"]] == ["inv1", "inv2"] and events == ["round_done"]
 
 

@@ -32,7 +32,7 @@ def _union(elements: list[dict], facet: str, cap: int) -> tuple[list[str], dict[
     return kept, {t: origin[t] for t in kept}
 
 
-def candidate_queries(cand: dict, max_elements: int = 6) -> list[dict]:
+def candidate_queries(cand: dict, max_elements: int = 6, cpc_groups: list[str] | None = None) -> list[dict]:
     """Queries for one candidate invention (H7 v3, from the H1-01 funnels):
     one 8-form OR blob per candidate lost the gold that a narrower phrasing
     had reached (Google returns the top 100 of ~1e5; ranking variance
@@ -77,6 +77,9 @@ def candidate_queries(cand: dict, max_elements: int = 6) -> list[dict]:
         out.append(_q("wide", f"{things} {places}", sorted({eid for t in t_terms for eid in t_from.get(t, [])}), thing=t_terms, place=p_terms))
     elif things:
         out.append(_q("wide", things, sorted({eid for t in t_terms for eid in t_from.get(t, [])}), thing=t_terms))
+    from .query_gen import cpc_clause
+    groups = [g for g in (cpc_groups if cpc_groups is not None else cand.get("cpc_pred") or []) if cpc_clause(g)]
+    scope = cpc_clause(groups[0]) if groups else ""
     for e in els[1:1 + max_elements]:
         f = e.get("facets") or {}
         forms = [" ".join(str(t).lower().split()) for t in (f.get("thing") or [])][:3]
@@ -84,7 +87,12 @@ def candidate_queries(cand: dict, max_elements: int = 6) -> list[dict]:
         if not forms:
             continue
         g = _group(forms)
-        out.append(_q(f"element:{e.get('id')}", f"{g} {domain}" if domain else g, [e.get("id")], thing=forms, domain=dom_terms))
+        if scope:
+            # gold probe: `(remote participant display) CPC=H04N7/low` → gold rank 19 (48 unscoped);
+            # the CPC clause must be the last term
+            out.append(_q(f"element:{e.get('id')}", f"{g} {scope}", [e.get("id")], thing=forms, cpc=[groups[0].split("/")[0]]))
+        else:
+            out.append(_q(f"element:{e.get('id')}", f"{g} {domain}" if domain else g, [e.get("id")], thing=forms, domain=dom_terms))
     if n_terms:
         names = _named_group(n_terms)
         out.append(_q("named+domain", f"{names} {domain}" if domain else names,
@@ -93,9 +101,10 @@ def candidate_queries(cand: dict, max_elements: int = 6) -> list[dict]:
 
 
 def cpc_queries(cands: list[dict], subclasses: list[str], max_total: int = 2) -> list[dict]:
-    """`CPC=X/low` AND the core candidate's thing forms, for the top seed
-    subclasses (PatentRiff: "A practitioner might start by searching within a
-    relevant CPC class and then use keywords to filter the results")."""
+    """The core candidate's thing forms AND `CPC=<main group>/low` (clause
+    last), for the top groups (PatentRiff: "A practitioner might start by
+    searching within a relevant CPC class and then use keywords to filter the
+    results"). Subclass-level codes are skipped (they match nothing)."""
     if not cands or not subclasses:
         return []
     from .query_gen import cpc_clause
@@ -105,9 +114,9 @@ def cpc_queries(cands: list[dict], subclasses: list[str], max_total: int = 2) ->
     if not things:
         return []
     out = []
-    for sc in subclasses[:max_total]:
-        out.append({"candidate": core.get("id") or "inv1", "kind": "cpc+thing", "query": f"{cpc_clause(sc)} {things}",
-                    "facets_used": {"cpc": [sc], "thing": t_terms},
+    for sc in [g for g in subclasses if cpc_clause(g)][:max_total]:
+        out.append({"candidate": core.get("id") or "inv1", "kind": "cpc+thing", "query": f"{things} {cpc_clause(sc)}",
+                    "facets_used": {"cpc": [sc.split("/")[0]], "thing": t_terms},
                     "elements": sorted({e for t in t_terms for e in t_from.get(t, [])})})
     return out
 

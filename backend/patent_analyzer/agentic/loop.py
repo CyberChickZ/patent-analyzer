@@ -187,13 +187,16 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
         pool.setdefault((c.pub_num or c.title).upper(), c)
     # CPC round: the subclasses the citation neighbourhood is classified in
     # (expansion head carries cpc_codes), AND the core candidate's thing forms
+    # main groups (H04N7), not subclasses: CPC=<subclass>/low returns nothing (gold probe)
     cpc_counts: dict[str, int] = {}
     for c in expanded:
         for code in ((c.raw or {}).get("bigquery") or {}).get("cpc_codes") or []:
-            cpc_counts[code[:4]] = cpc_counts.get(code[:4], 0) + 1
-    top_cpc = [k for k, _ in sorted(cpc_counts.items(), key=lambda kv: -kv[1])][:CPC_QUERIES]
-    if not top_cpc:
-        top_cpc = list(dict.fromkeys(c[:4] for cand in cands for c in (cand.get("cpc_pred") or [])))[:CPC_QUERIES]
+            grp = str(code).split("/")[0]
+            if len(grp) >= 5:
+                cpc_counts[grp] = cpc_counts.get(grp, 0) + 1
+    pred = list(dict.fromkeys(str(c).split("/")[0] for cand in cands for c in (cand.get("cpc_pred") or []) if len(str(c).split("/")[0]) >= 5))
+    seed_top = [k for k, _ in sorted(cpc_counts.items(), key=lambda kv: -kv[1])]
+    top_cpc = list(dict.fromkeys(pred[:1] + seed_top + pred[1:]))[:CPC_QUERIES]
     cpc_seeds = await _run(cpc_queries(cands, top_cpc, max_total=CPC_QUERIES)) if top_cpc else []
     cpc_seeds = [p for p in dict.fromkeys(cpc_seeds) if p not in set(seeds)]
     if cpc_seeds:
