@@ -226,3 +226,54 @@ async def scholarly_by_ids(dois: list[str], oa_ids: list[str]) -> tuple[dict[str
                     # echoes the magid in external_ids
                     out[f"W{val}"] = rec
     return out, first_err
+
+
+def _pub_num(doc_id: dict) -> str:
+    j, n, k = (doc_id.get("jurisdiction") or "").upper(), str(doc_id.get("doc_number") or ""), (doc_id.get("kind") or "").upper()
+    return f"{j}{n}{k}" if j and n else ""
+
+
+def _to_candidate(p: dict, source: str) -> Candidate:
+    pub = _pub_num(p)
+    titles = ((p.get("biblio") or {}).get("invention_title") or [])
+    title = ""
+    for t in titles:
+        if (t.get("lang") or "").lower() == "en":
+            title = t.get("text") or ""
+            break
+    if not title and titles:
+        title = titles[0].get("text") or ""
+    cpc = []
+    for c in (((p.get("biblio") or {}).get("classifications_cpc") or {}).get("classifications") or []):
+        s = c.get("symbol")
+        if s and s not in cpc:
+            cpc.append(s)
+    members = (((p.get("families") or {}).get("simple_family") or {}).get("members") or [])
+    fam_pubs = sorted({_pub_num(m.get("document_id") or {}) for m in members} - {""})
+    fam_lens = sorted({m.get("lens_id") for m in members if m.get("lens_id")})
+    date = p.get("date_published") or ""
+    return Candidate(
+        title=title, url=f"https://www.lens.org/lens/patent/{p.get('lens_id')}" if p.get("lens_id") else "",
+        pub_num=pub, match_type="Patent", year=date[:4], sources=[source],
+        raw={"lens": {"lens_id": p.get("lens_id"), "date_published": date,
+                      "publication_type": p.get("publication_type"),
+                      "family": fam_pubs, "family_lens_ids": fam_lens,
+                      "family_key": fam_lens[0] if fam_lens else p.get("lens_id"),
+                      "cpc": cpc}})
+
+
+async def patents_by_lens_ids(lens_ids: list[str], source: str = "lens_bridge") -> tuple[list[Candidate], str | None]:
+    """Patent records for Lens patent ids (terms on lens_id), batched at
+    MAX_RECORDS['patent'] per request."""
+    ids = list(dict.fromkeys(i for i in lens_ids if i))
+    out: list[Candidate] = []
+    first_err = None
+    per = MAX_RECORDS["patent"]
+    for i in range(0, len(ids), per):
+        body = {"query": {"terms": {"lens_id": ids[i:i + per]}}, "size": per, "include": _PATENT_INCLUDE}
+        data, err = await _post("patent", body)
+        if err:
+            first_err = first_err or err
+            continue
+        out.extend(_to_candidate(p, source) for p in data.get("data") or [])
+    return out, first_err
