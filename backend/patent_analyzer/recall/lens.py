@@ -67,6 +67,7 @@ services or data derived from Lens, to the end-user."
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -89,8 +90,22 @@ _CACHE_DAYS = 30
 PER_MINUTE = {"patent": 10, "scholarly": 20}
 MAX_RECORDS = {"patent": 100, "scholarly": 500}
 
+_MAX_429_RETRIES = 2
+_MAX_RETRY_WAIT = 65.0
+
 call_log: list[dict] = []
 _gates: dict[str, MinuteGate] = {}
+
+
+def _retry_after(headers) -> float | None:
+    for k, scale in (("x-rate-limit-retry-after-seconds", 1.0), ("x-rate-limit-retry-after-millis", 0.001)):
+        v = headers.get(k)
+        if v:
+            try:
+                return max(0.2, float(v) * scale + 0.2)
+            except ValueError:
+                pass
+    return None
 
 _SCHOLARLY_INCLUDE = ["lens_id", "title", "external_ids", "patent_citations", "patent_citations_count"]
 _PATENT_INCLUDE = ["lens_id", "jurisdiction", "doc_number", "kind", "date_published", "publication_type",
@@ -131,18 +146,28 @@ async def _post(endpoint: str, body: dict) -> tuple[dict | None, str | None]:
         return None, "lens: LENS_API_TOKEN not set"
     t0 = time.time()
     await _gate(endpoint).wait()
-    status, err, data = 0, None, None
+    status, err, data, retries = 0, None, None, 0
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-            r = await client.post(f"{API_BASE}/{endpoint}/search", json=body,
-                                  headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+            while True:
+                r = await client.post(f"{API_BASE}/{endpoint}/search", json=body,
+                                      headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
+                # the per-minute limit is a sliding window, not the calendar minute the
+                # MinuteGate counts: honour x-rate-limit-retry-after-seconds once or twice
+                if r.status_code != 429 or retries >= _MAX_429_RETRIES:
+                    break
+                wait = _retry_after(r.headers)
+                if wait is None or wait > _MAX_RETRY_WAIT:
+                    break
+                retries += 1
+                await asyncio.sleep(wait)
         status = r.status_code
         if status == 200:
             data = r.json()
         elif status == 204:
             data = {"total": 0, "results": 0, "data": []}
         elif status == 429:
-            err = (f"lens {endpoint}: 429 rate limit (remaining/min="
+            err = (f"lens {endpoint}: 429 rate limit after {retries} retries (remaining/min="
                    f"{r.headers.get('x-rate-limit-remaining-request-per-minute')}, "
                    f"remaining/month={r.headers.get('x-rate-limit-remaining-request-per-month')}, "
                    f"retry-after={r.headers.get('x-rate-limit-retry-after-seconds')}s)")
@@ -162,7 +187,7 @@ async def _post(endpoint: str, body: dict) -> tuple[dict | None, str | None]:
     call_log.append({"endpoint": endpoint, "params": _summary(body),
                      "returned": len((data or {}).get("data") or []), "total": (data or {}).get("total"),
                      "seconds": round(time.time() - t0, 2), "http_status": status, "cached": False,
-                     **({"err": err} if err else {})})
+                     **({"retries_429": retries} if retries else {}), **({"err": err} if err else {})})
     if data is not None and not err:
         kv().put(_CACHE_NS, ck, data)
     return data, err
@@ -251,6 +276,7 @@ def _to_candidate(p: dict, source: str) -> Candidate:
     members = (((p.get("families") or {}).get("simple_family") or {}).get("members") or [])
     fam_pubs = sorted({_pub_num(m.get("document_id") or {}) for m in members} - {""})
     fam_lens = sorted({m.get("lens_id") for m in members if m.get("lens_id")})
+    fam_dates = sorted({(m.get("document_id") or {}).get("date") or "" for m in members} - {""})
     date = p.get("date_published") or ""
     return Candidate(
         title=title, url=f"https://www.lens.org/lens/patent/{p.get('lens_id')}" if p.get("lens_id") else "",
@@ -258,6 +284,7 @@ def _to_candidate(p: dict, source: str) -> Candidate:
         raw={"lens": {"lens_id": p.get("lens_id"), "date_published": date,
                       "publication_type": p.get("publication_type"),
                       "family": fam_pubs, "family_lens_ids": fam_lens,
+                      "family_earliest_date": fam_dates[0] if fam_dates else date,
                       "family_key": fam_lens[0] if fam_lens else p.get("lens_id"),
                       "cpc": cpc}})
 

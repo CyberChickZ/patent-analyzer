@@ -114,6 +114,7 @@ def test_patents_by_lens_ids_normalises(client):
     assert c.raw["lens"]["cpc"] == ["H04N7/15", "G06V40/176"]
     assert c.raw["lens"]["family"] == ["US20120194631A1", "US8520052B2"]
     assert c.raw["lens"]["family_key"] == "133-754-808-407-131"
+    assert c.raw["lens"]["family_earliest_date"] == "2012-08-02"
     assert client.posts[0][1]["query"] == {"terms": {"lens_id": ["166-918-267-737-124"]}}
 
 
@@ -141,12 +142,23 @@ def test_cache_hit_skips_request(client):
 
 
 def test_rate_limit_and_missing_token(client, monkeypatch):
-    client.queue.append(_Resp({"message": "too many"}, status=429,
-                              headers={"x-rate-limit-remaining-request-per-minute": "0",
-                                       "x-rate-limit-retry-after-seconds": "42"}))
+    slept = []
+
+    async def fake_sleep(s):
+        slept.append(s)
+    monkeypatch.setattr(lens.asyncio, "sleep", fake_sleep)
+    r429 = _Resp({"message": "too many"}, status=429, headers={"x-rate-limit-retry-after-seconds": "2"})
+    client.queue += [r429, r429, r429]
     cands, err = asyncio.run(lens.search_patents(["turntable"]))
-    assert cands == [] and "429" in err and "retry-after=42s" in err
-    assert lens.call_log[-1]["http_status"] == 429 and "err" in lens.call_log[-1]
+    assert cands == [] and "429" in err and "after 2 retries" in err and "retry-after=2s" in err
+    assert slept == [2.2, 2.2] and len(client.posts) == 3
+    assert lens.call_log[-1]["http_status"] == 429 and "err" in lens.call_log[-1] and lens.call_log[-1]["retries_429"] == 2
+    client.queue += [r429, _Resp(_PATENT)]
+    cands, err = asyncio.run(lens.search_patents(["turntable two"]))
+    assert err is None and len(cands) == 1 and len(client.posts) == 5   # one retry then 200
+    client.queue.append(_Resp({"message": "too many"}, status=429, headers={"x-rate-limit-retry-after-seconds": "600"}))
+    cands, err = asyncio.run(lens.search_patents(["turntable three"]))
+    assert "429" in err and len(client.posts) == 6                       # retry-after too long: no retry
     monkeypatch.delenv("LENS_API_TOKEN")
     cands, err = asyncio.run(lens.search_patents(["other"]))
-    assert cands == [] and "LENS_API_TOKEN" in err and len(client.posts) == 1
+    assert cands == [] and "LENS_API_TOKEN" in err and len(client.posts) == 6
