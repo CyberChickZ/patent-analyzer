@@ -120,11 +120,14 @@ _TEI_TAG = re.compile(r"<[^>]+>")
 
 
 def render_grobid_tei(xml: str) -> str:
-    """Body <p> and <head> text of a GROBID TEI document, in document order."""
+    """Abstract, body and back-matter (annex / acknowledgement divs, not the
+    bibliography) <p>/<head>/<figDesc>/<formula> text of a GROBID TEI document."""
     body = xml.split("<body>", 1)[1].split("</body>", 1)[0] if "<body>" in xml else xml
     abstract = xml.split("<abstract>", 1)[1].split("</abstract>", 1)[0] if "<abstract>" in xml else ""
+    back = xml.split("<back>", 1)[1].split("</back>", 1)[0] if "<back>" in xml else ""
+    back = "".join(m.group(0) for m in re.finditer(r'<div type="(?:annex|acknowledgement)".*?</div>', back, re.S))
     parts = []
-    for m in re.finditer(r"<(head|p|figDesc|formula)\b[^>]*>(.*?)</\1>", abstract + body, re.S):
+    for m in re.finditer(r"<(head|p|figDesc|formula)\b[^>]*>(.*?)</\1>", abstract + body + back, re.S):
         t = _TEI_TAG.sub("", m.group(2))
         t = re.sub(r"\s+", " ", t).strip()
         if t:
