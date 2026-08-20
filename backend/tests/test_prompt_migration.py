@@ -52,3 +52,10 @@ def test_extract_candidates_template_matches_old_fstring():
     doc_kind, guidance, summary, doc_text = "paper", llm._DOC_KIND_GUIDANCE["paper"], "S" * 5000, "D" * 20
     expected = eval(fs, {"_EXTRACTION_DOC_CAP": llm._EXTRACTION_DOC_CAP, "doc_kind": doc_kind, "guidance": guidance, "summary": summary, "doc_text": doc_text})
     assert prompts.render("extract.candidates", doc_kind=doc_kind, guidance=guidance, summary=summary[:4000], document=doc_text) == expected
+
+
+def test_idca_summarize_registered_verbatim():
+    src = subprocess.run(["git", "show", f"{OLD_REV}:backend/app/llm.py"], capture_output=True, text=True, cwd=Path(__file__).parent.parent).stdout
+    i = src.index('    task_prompt = """════ TASK ════\nRead the ENTIRE')
+    j = src.index('"""', i + 30) + 3
+    assert prompts.get("idca.summarize")[0] == src[i:j][len('    task_prompt = """'):-3]

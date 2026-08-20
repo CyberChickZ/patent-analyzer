@@ -569,31 +569,7 @@ CRITICAL: Regenerate from scratch addressing the issues. Use ONLY facts from the
 """
 
 
-async def detect_and_summarize_invention(
-    document_text: str,
-    source_pdf_path: str | None = None,
-) -> dict:
-    """ONE LLM CALL: classify document → status_determination + fields_map +
-    doc_type + CPC subclass + summary. This is the IDCA step — everything
-    downstream (persona, decompose, eval) depends on this output.
-
-    Returns:
-        {
-          "status_determination": "Present" | "Implied" | "Absent",
-          "has_innovation": bool,       # backward compat: True unless Absent
-          "reasoning":      str,
-          "doc_type":       "invention" | "literature_review" | "design_engineering"
-                          | "talks_about_invention_but_no_invention",
-          "category":       "Process" | "Machine" | "Manufacture" | "Composition" | "Design" | "None",
-          "fields_map":     list[str],  # 3-7 technical field labels
-          "source_citation": str,       # APA format if determinable
-          "cpc_subclass":   str,        # 4-char CPC code, e.g. "G06N"
-          "summary":        str,        # 200-400 word canonical invention summary
-        }
-    """
-    system = ("You are a patent analyst. Read the document and classify it. "
-              "Output JSON only.")
-    task_prompt = """════ TASK ════
+IDCA_SUMMARIZE_PROMPT = prompts.register_default("idca.summarize", """════ TASK ════
 Read the ENTIRE attached document and perform IDCA (Invention
 Detection, Classification, and Assignment).
 
@@ -651,7 +627,35 @@ Output strictly this JSON, no preamble:
   "cpc_subclass": "G06N",
   "publication_date": "YYYY-MM-DD if determinable from the document (arXiv date, copyright year, conference date), or empty string",
   "summary": "400-800 word summary, or empty string if Absent"
-}}"""
+}}""")
+
+
+async def detect_and_summarize_invention(
+    document_text: str,
+    source_pdf_path: str | None = None,
+) -> dict:
+    """ONE LLM CALL: classify document → status_determination + fields_map +
+    doc_type + CPC subclass + summary. This is the IDCA step — everything
+    downstream (persona, decompose, eval) depends on this output.
+
+    Returns:
+        {
+          "status_determination": "Present" | "Implied" | "Absent",
+          "has_innovation": bool,       # backward compat: True unless Absent
+          "reasoning":      str,
+          "doc_type":       "invention" | "literature_review" | "design_engineering"
+                          | "talks_about_invention_but_no_invention",
+          "category":       "Process" | "Machine" | "Manufacture" | "Composition" | "Design" | "None",
+          "fields_map":     list[str],  # 3-7 technical field labels
+          "source_citation": str,       # APA format if determinable
+          "cpc_subclass":   str,        # 4-char CPC code, e.g. "G06N"
+          "summary":        str,        # 200-400 word canonical invention summary
+        }
+    """
+    system = ("You are a patent analyst. Read the document and classify it. "
+              "Output JSON only.")
+    task_prompt, _ = prompts.get("idca.summarize")   # registry v0 = the template below
+
     if source_pdf_path and Path(source_pdf_path).exists():
         resp = await call_llm_with_pdfs(
             system, task_prompt, [source_pdf_path], thinking_budget=4096,
