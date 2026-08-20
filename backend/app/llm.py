@@ -1316,6 +1316,36 @@ def _is_ssr(checklist: list) -> bool:
     return bool(checklist and isinstance(checklist[0], dict) and "weight" in checklist[0])
 
 
+EVALUATE_PDF_PROMPT = prompts.register_default("evaluate.document_pdf", """{source_label}{pa_ordinal} attached PDF = PRIOR ART candidate.{fig_note}
+
+INVENTION SUMMARY:
+{invention_summary}
+
+EVALUATION CRITERIA ({n_items} items):
+{cl_text}
+
+PRIOR ART CANDIDATE:
+TITLE: {prior_art_title}
+TYPE: {prior_art_type}
+
+Read the ENTIRE prior art document — every page, every figure, every table.
+
+TASK:
+1. Is this the SAME document as the source? (identical title/authors/DOI)
+   If yes, set is_source_duplicate=true.
+2. {scoring_instruction}
+
+JSON output:
+{{
+  "is_source_duplicate": true | false,
+  "duplicate_reason": "if true",
+  "anticipation_assessment": "102 analysis in 1-2 sentences",
+  "key_teachings": "103 relevant elements in 1-2 sentences",
+  "rs_synopsis": "One sentence: what this prior art does (actor→operation→outcome)",
+  {output_schema}
+}}""")
+
+
 async def evaluate_single_document(
     invention_summary: str,
     checklist: list,
@@ -1386,34 +1416,10 @@ async def evaluate_single_document(
             '    ...all items...\n'
             '  }')
 
-    prompt = f"""{source_label}{pa_ordinal} attached PDF = PRIOR ART candidate.{fig_note}
-
-INVENTION SUMMARY:
-{invention_summary}
-
-EVALUATION CRITERIA ({len(checklist)} items):
-{cl_text}
-
-PRIOR ART CANDIDATE:
-TITLE: {prior_art_title}
-TYPE: {prior_art_type}
-
-Read the ENTIRE prior art document — every page, every figure, every table.
-
-TASK:
-1. Is this the SAME document as the source? (identical title/authors/DOI)
-   If yes, set is_source_duplicate=true.
-2. {scoring_instruction}
-
-JSON output:
-{{
-  "is_source_duplicate": true | false,
-  "duplicate_reason": "if true",
-  "anticipation_assessment": "102 analysis in 1-2 sentences",
-  "key_teachings": "103 relevant elements in 1-2 sentences",
-  "rs_synopsis": "One sentence: what this prior art does (actor→operation→outcome)",
-  {output_schema}
-}}"""
+    prompt = prompts.render("evaluate.document_pdf", source_label=source_label, pa_ordinal=pa_ordinal, fig_note=fig_note,
+                            invention_summary=invention_summary, n_items=len(checklist), cl_text=cl_text,
+                            prior_art_title=prior_art_title, prior_art_type=prior_art_type,
+                            scoring_instruction=scoring_instruction, output_schema=output_schema)
 
     try:
         resp = await call_llm_with_pdfs(
@@ -1473,6 +1479,27 @@ def _align_checklist_keys(result: dict, checklist: list) -> int:
     return unmatched
 
 
+EVALUATE_TEXT_PROMPT = prompts.register_default("evaluate.document_text", """INVENTION: {invention_summary}
+
+CRITERIA ({n_items} items):
+{cl_text}
+
+PRIOR ART "{prior_art_title}" ({prior_art_type}) — {doc_label}:
+<document>
+{prior_art_text}
+</document>
+
+{scoring_instruction}
+
+JSON output:
+{{
+  "anticipation_assessment": "1-2 sentences",
+  "key_teachings": "1-2 sentences",
+  "rs_synopsis": "One sentence: what this prior art does",
+  {output_schema}
+}}""")
+
+
 async def evaluate_single_document_text(
     invention_summary: str,
     checklist: list,
@@ -1523,25 +1550,9 @@ async def evaluate_single_document_text(
             '    "<item>": {"analysis": "...", ' + evidence_field + '"match": true|false},\n'
             '    ...all items...\n  }')
 
-    prompt = f"""INVENTION: {invention_summary}
-
-CRITERIA ({len(checklist)} items):
-{cl_text}
-
-PRIOR ART "{prior_art_title}" ({prior_art_type}) — {doc_label}:
-<document>
-{prior_art_text}
-</document>
-
-{scoring_instruction}
-
-JSON output:
-{{
-  "anticipation_assessment": "1-2 sentences",
-  "key_teachings": "1-2 sentences",
-  "rs_synopsis": "One sentence: what this prior art does",
-  {output_schema}
-}}"""
+    prompt = prompts.render("evaluate.document_text", invention_summary=invention_summary, n_items=len(checklist), cl_text=cl_text,
+                            prior_art_title=prior_art_title, prior_art_type=prior_art_type, doc_label=doc_label,
+                            prior_art_text=prior_art_text, scoring_instruction=scoring_instruction, output_schema=output_schema)
     try:
         resp = await call_llm(system, prompt, thinking_budget=4096, model=stage_model("eval"))
         m = re.search(r'\{.*\}', resp, re.DOTALL)

@@ -10,7 +10,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from app import llm, prompts
 
-OLD_REV = "0eb85c3"
+OLD_REV = "0eb85c3"          # last f-string version of extract.* / search.facets
+EVAL_REV = "584c5fc"         # last f-string version of evaluate.*
 
 
 def _old_fstring(marker: str) -> str:
@@ -59,3 +60,22 @@ def test_idca_summarize_registered_verbatim():
     i = src.index('    task_prompt = """════ TASK ════\nRead the ENTIRE')
     j = src.index('"""', i + 30) + 3
     assert prompts.get("idca.summarize")[0] == src[i:j][len('    task_prompt = """'):-3]
+
+
+def _fstring_in(fn_name: str, start_marker: str, rev: str = EVAL_REV) -> str:
+    src = subprocess.run(["git", "show", f"{rev}:backend/app/llm.py"], capture_output=True, text=True, cwd=Path(__file__).parent.parent).stdout
+    L = src.index(fn_name)
+    i = src.index(start_marker, L)
+    j = src.index('"""', i + 30) + 3
+    return src[i:j][len("    prompt = "):]
+
+
+def test_evaluate_templates_match_old_fstrings():
+    fs = _fstring_in("async def evaluate_single_document_text", '    prompt = f"""INVENTION: {invention_summary}')
+    kw = dict(invention_summary="INV", checklist=[1, 2, 3], cl_text="CL", prior_art_title="T", prior_art_type="Patent",
+              doc_label="full text", prior_art_text="DOC", scoring_instruction="SI", output_schema='"x": 1')
+    assert prompts.render("evaluate.document_text", n_items=3, **{k: v for k, v in kw.items() if k != "checklist"}) == eval(fs, dict(kw))
+    fs = _fstring_in("async def evaluate_single_document(", '    prompt = f"""{source_label}{pa_ordinal} attached PDF')
+    kw = dict(source_label="First ", pa_ordinal="second", fig_note="FN", invention_summary="INV", checklist=[1, 2], cl_text="CL",
+              prior_art_title="T", prior_art_type="Patent", scoring_instruction="SI", output_schema='"x": 1')
+    assert prompts.render("evaluate.document_pdf", n_items=2, **{k: v for k, v in kw.items() if k != "checklist"}) == eval(fs, dict(kw))
