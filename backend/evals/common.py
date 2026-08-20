@@ -12,6 +12,8 @@ def model_tag() -> str:
     different models never share a cached run file. Empty for the default model."""
     parts = [f"{st}-{os.getenv(f'LLM_MODEL_{st.upper()}')}" for st in ("extract", "screen", "eval", "idca")
              if os.getenv(f"LLM_MODEL_{st.upper()}")]
+    if os.getenv("LLM_THINKING_LEVEL"):
+        parts.append(f"think-{os.getenv('LLM_THINKING_LEVEL').lower()}")
     return ("_" + "+".join(parts)) if parts else ""
 
 

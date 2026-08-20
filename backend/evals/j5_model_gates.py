@@ -335,7 +335,8 @@ async def main():
     res["cache"] = dict(llm_cache.stats)
     res["calls"] = calls
     RUN_DIR.mkdir(parents=True, exist_ok=True)
-    out = RUN_DIR / f"{args.gate}_{args.model}{('_' + args.tag) if args.gate == 'screen' else ''}.json"
+    think = f"_think-{os.environ['LLM_THINKING_LEVEL'].lower()}" if os.environ.get("LLM_THINKING_LEVEL") else ""
+    out = RUN_DIR / f"{args.gate}_{args.model}{think}{('_' + args.tag) if args.gate == 'screen' else ''}.json"
     out.write_text(json.dumps(res, ensure_ascii=False, indent=1))
     print(json.dumps(res["meter"], indent=1))
     print(f"[j5] wrote {out}")
