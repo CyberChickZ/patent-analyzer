@@ -32,6 +32,12 @@ def _file_sha(path: str) -> str:
         return "missing"
 
 
+def _thinking_extra() -> list[str]:
+    """LLM_THINKING_LEVEL changes the request without changing thinking_budget; unset → no key change."""
+    lvl = os.environ.get("LLM_THINKING_LEVEL")
+    return [f"thinking_level={lvl.upper()}"] if lvl else []
+
+
 def install():
     import app.llm as llm
 
@@ -45,6 +51,7 @@ def install():
         model = model or llm.MODEL
         # schema-less calls keep their historical key (cached IDCA / extraction stay valid)
         extra = [json.dumps(response_schema, sort_keys=True)] if response_schema else []
+        extra += _thinking_extra()
         p = CACHE_DIR / (_key("text", model, system, user, max_tokens, thinking_budget, *extra) + ".json")
         if p.exists():
             stats["hits"] += 1
@@ -63,6 +70,7 @@ def install():
         shas = [_file_sha(x) for x in pdf_paths]
         img = [hashlib.sha1(b).hexdigest() for b in (image_parts or [])]
         extra = [json.dumps(response_schema, sort_keys=True)] if response_schema else []
+        extra += _thinking_extra()
         p = CACHE_DIR / (_key("pdfs", model, system, user, shas, img, max_tokens, thinking_budget, *extra) + ".json")
         if p.exists():
             stats["hits"] += 1
