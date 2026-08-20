@@ -29,7 +29,7 @@ TIMEOUT = 30.0
 
 # Throttle: anonymous = 100 req/5min ≈ 1 req/3s; with key ≈ 1 req/s
 MIN_INTERVAL_ANON = 3.5
-MIN_INTERVAL_KEYED = 1.0
+MIN_INTERVAL_KEYED = 1.1
 
 
 def _serial():
@@ -94,7 +94,7 @@ async def _get(client: httpx.AsyncClient, url: str, params: dict | None = None,
                 last_err = "HTTP 429 (Semantic Scholar rate limited)"
                 # Anonymous rate limit is 100 req / 5min — back off, but bounded
                 # (S2_429_MAX_RETRIES, default 1): a wide search has many queries
-                if i + 1 >= int(os.environ.get("S2_429_MAX_RETRIES", "1")):
+                if i + 1 >= int(os.environ.get("S2_429_MAX_RETRIES", "3")):
                     return None, last_err
                 await asyncio.sleep(5 + i * 10)
                 continue
