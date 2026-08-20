@@ -128,6 +128,18 @@ async def build_funnel(rec: dict, gold_entry: dict) -> dict:
                      "gold_pubs": [p for p in bp if p in fam_of]})
         reached |= bg
         seen.update(bp)
+    # 1b') Lens bridge + Lens searches
+    if rd.get("lens") is not None:
+        lp = [_canon(p) for p in rd.get("lens_pubs", [])]
+        lg = _fams(lp, fam_of)
+        rows.append({"stage": "lens", "bridge_patents": (rd.get("lens") or {}).get("bridge_patents"), "search_calls": (rd.get("lens") or {}).get("search_calls"),
+                     "returned": len(lp), "new": len([p for p in lp if p not in seen]), "gold_families": sorted(lg),
+                     "gold_new": len(lg - reached), "reach": len(reached | lg), "error": (rd.get("lens") or {}).get("error") or (rd.get("lens") or {}).get("bridge_error"),
+                     "searches": [{"element": x.get("element"), "cpc": x.get("cpc"), "returned": x.get("returned"),
+                                   "gold": sorted(_fams([_canon(p) for p in x.get("pubs", [])], fam_of))} for x in rd.get("lens_searches", [])],
+                     "gold_pubs": [p for p in lp if p in fam_of]})
+        reached |= lg
+        seen.update(lp)
     # 1c) Google's semantic neighbours of the seeds
     if rd.get("similar_pubs") is not None:
         sp = [_canon(p) for p in rd.get("similar_pubs", [])]
@@ -198,6 +210,10 @@ def funnel_md(f: dict) -> str:
         elif r["stage"] == "bridge":
             L.append(f"| — | paper neighbourhood → bridge | {r['papers']} papers, {r['oa_ids']} OpenAlex ids | | | {r.get('neigh_seconds')}s | {r['returned']} | {r['new']} | "
                      f"{','.join(r['gold_families']) or '—'} (+{r['gold_new']}) | {r['reach']} | {r.get('error') or ''} sources={r.get('neigh_sources')} |")
+        elif r["stage"] == "lens":
+            sx = "; ".join(f"{x['element']} cpc={x['cpc']} → {x['returned']} gold={','.join(x['gold']) or '—'}" for x in r["searches"]) or "no searches"
+            L.append(f"| — | Lens bridge + search | bridge {r['bridge_patents']} patents, {r['search_calls']} searches | | | | {r['returned']} | {r['new']} | "
+                     f"{','.join(r['gold_families']) or '—'} (+{r['gold_new']}) | {r['reach']} | {r.get('error') or ''} {sx} |")
         elif r["stage"] == "google_similar":
             L.append(f"| — | google similar | {r['seeds']} seeds → {r['similar_total']} neighbours | | | | {r['returned']} | {r['new']} | "
                      f"{','.join(r['gold_families']) or '—'} (+{r['gold_new']}) | {r['reach']} | shared-by-seeds ranking, date-filtered |")
@@ -235,7 +251,7 @@ def summary_table(funnels: list[dict]) -> str:
                 b["gold_any"] += len(r["gold_families"])
                 b["gold_new"] += r["gold_new"]
                 b["calls_with_gold"] += 1 if r["gold_families"] else 0
-            elif r["stage"] in ("expansion", "other_channels", "bridge", "google_similar"):
+            elif r["stage"] in ("expansion", "other_channels", "bridge", "google_similar", "lens"):
                 b = by.setdefault(r["stage"], Counter())
                 b["calls"] += 1
                 b["returned"] += r["returned"]

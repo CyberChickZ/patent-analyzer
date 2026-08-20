@@ -33,6 +33,7 @@ GP_CALLS_PER_JOB = int(os.environ.get("LOOP_GP_MAX_CALLS", "30"))
 LOOP_MODE = os.environ.get("LOOP_MODE", "wide")          # wide (recall-first) | elements (per-element walk)
 WIDE_MAX_QUERIES = int(os.environ.get("LOOP_WIDE_MAX_QUERIES", "10"))
 CPC_QUERIES = int(os.environ.get("LOOP_CPC_QUERIES", "2"))
+LENS_CALLS = int(os.environ.get("LOOP_LENS_CALLS", "6"))      # Lens trial: 1000 req/month
 
 
 class Budget:
@@ -165,6 +166,53 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
     bridge_seeds = list(dict.fromkeys(bridge_seeds))
     bridge_info["patents"] = len(bridge_seeds)
     seeds += bridge_seeds
+    # Lens bridge + Lens patent search (trial: 1000 req/month, patent 10/min): ≤LENS_CALLS per job
+    lens_info: dict = {"bridge_patents": 0, "search_calls": 0, "searches": [], "error": None}
+    lens_pubs: list[str] = []
+    if LENS_CALLS and os.environ.get("LENS_API_TOKEN"):
+        try:
+            from ..recall import lens
+            dois = [c.doi for c in papers if c.doi][:400]
+            sch, err = await lens.scholarly_by_ids(dois, oa_ids[:400])
+            lens_ids = list(dict.fromkeys(l for v in (sch or {}).values() for l in (v.get("patent_citations") or [])))
+            if lens_ids:
+                lcands, err2 = await lens.patents_by_lens_ids(lens_ids[:800])
+                for c in lcands:
+                    key = (c.pub_num or c.title).upper()
+                    if c.pub_num:
+                        lens_pubs.append(c.pub_num)
+                        seeds.append(c.pub_num)
+                    pool.setdefault(key, c)
+                lens_info["bridge_patents"] = len(lcands)
+                lens_info["bridge_error"] = err2
+            lens_info["bridge_papers"] = len(sch or {})
+            lens_info["bridge_error"] = lens_info.get("bridge_error") or err
+            # searches: per-element forms (≤3) with the predicted main group, then the wide blob
+            grp = next((str(c).split("/")[0] for cand in cands for c in (cand.get("cpc_pred") or []) if len(str(c).split("/")[0]) >= 5), None)
+            core_els = (cands[0].get("elements") or [])[1:]
+            lens_queries = []
+            for e in core_els[:LENS_CALLS - 1]:
+                forms = [" ".join(str(t).lower().split()) for t in ((e.get("facets") or {}).get("thing") or [])][:3]
+                if forms:
+                    lens_queries.append({"element": e.get("id"), "terms": forms, "cpc": grp})
+            wide_terms = [q["query"] for q in queries if q["kind"] == "wide"]
+            for i, lq in enumerate(lens_queries[:LENS_CALLS - 1]):
+                lc, lerr = await lens.search_patents(lq["terms"], cpc=lq["cpc"], before=cutoff, size=100)
+                lens_info["search_calls"] += 1
+                new_keys = []
+                for c in lc:
+                    key = (c.pub_num or c.title).upper()
+                    if key not in pool:
+                        pool[key] = c
+                        new_keys.append(c.pub_num)
+                    if c.pub_num:
+                        lens_pubs.append(c.pub_num)
+                        seeds.append(c.pub_num)
+                lens_info["searches"].append({"element": lq["element"], "terms": lq["terms"], "cpc": lq["cpc"], "returned": len(lc),
+                                              "new": len(new_keys), "pubs": [c.pub_num for c in lc if c.pub_num], "error": lerr})
+        except Exception as exc:
+            lens_info["error"] = f"{type(exc).__name__}: {exc}"[:200]
+    lens_pubs = list(dict.fromkeys(lens_pubs))
     # one query in the neighbourhood's own words (frequent title bigrams)
     nterms = title_terms([c.title for c in papers]) if papers else []
     tq = terms_query(cands[0].get("id") or "inv1", nterms) if cands else None
@@ -220,6 +268,8 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
              "neighbourhood": {k: v for k, v in neigh_info.items()}, "neighbourhood_papers": len(papers),
              "bridge": {"oa_ids": bridge_info["oa_ids"], "patents": bridge_info["patents"], "error": bridge_info.get("error")},
              "bridge_pubs": sorted(bridge_seeds), "bridge_by_paper": bridge_info["by_paper"], "neigh_oa_ids": oa_ids,
+             "lens": {k: v for k, v in lens_info.items() if k != "searches"}, "lens_searches": lens_info.get("searches", []),
+             "lens_pubs": sorted(lens_pubs),
              "similar_total": sim_info.get("similar_total", 0), "similar_added": len(sim_cands),
              "similar_by_seed": sim_info.get("by_seed", {}),
              "similar_pubs": sorted((c.pub_num or c.title).upper() for c in sim_cands),
