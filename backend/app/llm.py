@@ -1500,6 +1500,14 @@ JSON output:
 }}""")
 
 
+EVALUATE_BRI_INSTRUCTION = prompts.register_default("evaluate.bri_instruction", """
+CLAIM INTERPRETATION — BROADEST REASONABLE INTERPRETATION (MPEP 2111 / 2111.01). Read each criterion the way a US examiner reads a pending claim: give its words their plain meaning and their broadest reasonable interpretation consistent with the invention's own description, not the narrowest reading the wording admits. Identity of terminology is not required (MPEP 2131): a part or step in the document that performs the same function in substantially the same way satisfies the criterion even if it is named, arranged or exemplified differently; a generic component (processor, memory, module, database, controller, network element, sensor, standard protocol) is satisfied by any such component the document describes; a functional limitation ("configured to X", "for X-ing", "wherein X") is satisfied by any disclosed part that performs X. The rule "do not infer beyond what the text states" governs facts, not claim scope: never add a disclosure the document does not make, but do not score 0 merely because the document uses different words, a different example, or a broader or narrower species of the same feature. Score 0 only when no reasonable reading of the criterion is met by anything the document discloses. Quotes stay verbatim: every score 1 or 2 still needs evidence_quotes copied exactly from the document, never paraphrased or invented; if nothing in the text supports even the broad reading, score 0.""")
+
+
+def _bri_enabled() -> bool:
+    return os.environ.get("EVAL_BRI") == "1"
+
+
 async def evaluate_single_document_text(
     invention_summary: str,
     checklist: list,
@@ -1514,6 +1522,9 @@ async def evaluate_single_document_text(
     doc_mode="abstract" (default): short snippet, silence scores 0.
     doc_mode="full_text": numbered full document; every non-zero score must
     carry a verbatim evidence_quote so it can be verified against the text.
+    EVAL_BRI=1 appends the registry prompt evaluate.bri_instruction (examiner-
+    style broadest reasonable interpretation) to the scoring instruction; the
+    default prompt is unchanged.
     """
 
     use_ssr = _is_ssr(checklist)
@@ -1549,6 +1560,8 @@ async def evaluate_single_document_text(
             '"checklist_results": {\n'
             '    "<item>": {"analysis": "...", ' + evidence_field + '"match": true|false},\n'
             '    ...all items...\n  }')
+    if _bri_enabled():
+        scoring_instruction += prompts.get("evaluate.bri_instruction")[0]
 
     prompt = prompts.render("evaluate.document_text", invention_summary=invention_summary, n_items=len(checklist), cl_text=cl_text,
                             prior_art_title=prior_art_title, prior_art_type=prior_art_type, doc_label=doc_label,
