@@ -25,6 +25,7 @@ with neither fall back to abstract + claims (text_mode="abstract_claims").
 
 Usage:
     python3 evals/panorama_data.py --n102 40 --n103 40 --nallow 20 --max-pages 60
+    python3 evals/panorama_data.py --run h2_holdout --exclude-run h2 --seed 7   # hold-out, disjoint apps
 """
 
 import argparse
@@ -458,24 +459,37 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--max-pages", type=int, default=60)
     ap.add_argument("--no-pages", action="store_true", help="abstract + claims only")
+    ap.add_argument("--run", default="h2", help="run name under eval_data/runs/")
+    ap.add_argument("--exclude-run", default=None,
+                    help="run name whose samples.json applications are held out (e.g. h2 for a hold-out)")
     args = ap.parse_args()
 
+    run_dir = RUN_DIR.parent / args.run
+    exclude_apps: set[str] = set()
+    prev_keys: set[tuple] = set()
+    if args.exclude_run:
+        prev = json.loads((RUN_DIR.parent / args.exclude_run / "samples.json").read_text())
+        exclude_apps = {s["app"] for s in prev}
+        prev_keys = {(s["app"], s["claimNumber"]) for s in prev}
     rows = load_rows()
-    samples = sample_instances(rows, args.n102, args.n103, args.nallow, args.seed)
+    samples = sample_instances(rows, args.n102, args.n103, args.nallow, args.seed, exclude_apps=exclude_apps)
+    overlap = [(s["app"], s["claimNumber"]) for s in samples if (s["app"], s["claimNumber"]) in prev_keys]
+    assert not overlap, overlap
     docs = build_docs(samples, rows, max_pages=0 if args.no_pages else args.max_pages)
     for s in samples:
         for c in s["cited"]:
             c["text_mode"] = docs[c["pub"]]["text_mode"]
-    RUN_DIR.mkdir(parents=True, exist_ok=True)
-    (RUN_DIR / "samples.json").write_text(json.dumps(samples, indent=1, ensure_ascii=False))
-    (RUN_DIR / "docs.json").write_text(json.dumps(docs, ensure_ascii=False))
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "samples.json").write_text(json.dumps(samples, indent=1, ensure_ascii=False))
+    (run_dir / "docs.json").write_text(json.dumps(docs, ensure_ascii=False))
     labels = Counter(s["label"] for s in samples)
     dep = Counter((s["label"], s["is_dependent"]) for s in samples)
     modes = Counter(d["text_mode"] for d in docs.values())
-    print(f"samples: {dict(labels)}  dependent: {dict(dep)}")
+    print(f"samples: {dict(labels)}  dependent: {dict(dep)}  apps: {len({s['app'] for s in samples})}"
+          + (f"  (held out from {args.exclude_run}: {len(exclude_apps)} apps excluded)" if args.exclude_run else ""))
     print(f"docs: {len(docs)} unique, text modes {dict(modes)}, "
           f"avg chars {sum(len(d['text']) for d in docs.values()) // max(len(docs), 1)}")
-    print(f"wrote {RUN_DIR / 'samples.json'}")
+    print(f"wrote {run_dir / 'samples.json'}")
 
 
 if __name__ == "__main__":
