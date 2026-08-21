@@ -198,10 +198,13 @@ def claim_instances(row: dict) -> list[dict]:
 
 
 def sample_instances(rows: list[dict], n102: int = 40, n103: int = 40, nallow: int = 20,
-                     seed: int = 42, per_app_per_label: int = 2) -> list[dict]:
+                     seed: int = 42, per_app_per_label: int = 2,
+                     exclude_apps: set[str] | None = None) -> list[dict]:
     """Seeded sample, at most `per_app_per_label` claims per label per
     application, independent claims first so the §102/§103 sets are not
-    dominated by 'wherein' one-liners."""
+    dominated by 'wherein' one-liners. `exclude_apps` (application numbers
+    of an earlier run) are skipped whole, so a hold-out shares no
+    application, hence no (app, claimNumber), with the run it is held out from."""
     rng = random.Random(seed)
     order = list(range(len(rows)))
     rng.shuffle(order)
@@ -210,6 +213,8 @@ def sample_instances(rows: list[dict], n102: int = 40, n103: int = 40, nallow: i
     for i in order:
         if all(v <= 0 for v in quota.values()):
             break
+        if exclude_apps and rows[i].get("applicationNumber") in exclude_apps:
+            continue
         inst = claim_instances(rows[i])
         if not inst:
             continue
