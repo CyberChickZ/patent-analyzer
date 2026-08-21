@@ -14,7 +14,7 @@ DOCS = [{"pub_num": "US1", "title": "gaze tracking for video calls", "abstract":
         {"pub_num": "US2", "title": "motorized turntable", "abstract": "rotates a display"},
         {"pub_num": "US3", "title": "bread recipe", "abstract": "flour and water"},
         {"pub_num": "US4", "title": "eye direction estimation", "abstract": ""}]
-VEC = {"gaze estimation": [1, 0], "turntable rotation": [0, 1], "gaze tracking for video calls": [0.9, 0.1],
+VEC = {"gaze estimation": [1, 0], "turntable rotation": [0, 1], "gaze tracking for video calls": [0.9, 0.1], "a summary": [0.5, 0.5],
        "motorized turntable rotates a display": [0.1, 0.9], "bread recipe flour and water": [0.5, 0.5],
        "eye direction estimation": [0.8, 0.2]}
 
@@ -55,3 +55,11 @@ def test_prune_end_to_end_reports_every_stage():
         return json.dumps({"verdicts": [{"i": i, "worth_reading": True, "elements": []} for i in range(4)]})
     out, st = asyncio.run(prune([{"id": "inv1"}], ELS, docs, embed_docs=_emb, embed_queries=_emb, call=fake_call, topk=4, keep=3))
     assert len(out) == 3 and st["pool"] == 4 and st["stage1_out"] == 4 and st["stage2_out"] == 3 and st["unanswered"] == 0
+
+
+def test_stage1_summary_query_and_cap():
+    docs = [dict(d) for d in DOCS]
+    idxs, st = stage1_embed(ELS, docs, topk=1, embed_docs=_emb, embed_queries=_emb, summary="a summary")
+    assert 2 in idxs and docs[2]["prune_best_element"] == "summary"     # the bread recipe is closest to the summary vector
+    idxs, st = stage1_embed(ELS, docs, topk=4, embed_docs=_emb, embed_queries=_emb, cap=2)
+    assert len(idxs) == 2 and st["stage1_out"] == 2

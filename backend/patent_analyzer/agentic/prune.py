@@ -22,8 +22,9 @@ import os
 
 import numpy as np
 
-STAGE1_TOPK = int(os.environ.get("PRUNE_STAGE1_TOPK", "100"))
-STAGE2_BATCH = int(os.environ.get("PRUNE_STAGE2_BATCH", "25"))
+STAGE1_TOPK = int(os.environ.get("PRUNE_STAGE1_TOPK", "250"))
+STAGE1_CAP = int(os.environ.get("PRUNE_STAGE1_CAP", "1200"))   # union cap → ≤ CAP/BATCH screen calls
+STAGE2_BATCH = int(os.environ.get("PRUNE_STAGE2_BATCH", "40"))
 KEEP = int(os.environ.get("PRUNE_KEEP", "60"))
 
 SCREEN_SCHEMA = {
@@ -43,16 +44,19 @@ def _doc_text(d: dict) -> str:
 
 
 def stage1_embed(elements: list[dict], docs: list[dict], topk: int = STAGE1_TOPK,
-                 embed_docs=None, embed_queries=None) -> tuple[list[int], dict]:
-    """Indices of docs in the union of per-element top-k by cosine; each
-    surviving doc gets `prune_cos` (max over elements)."""
+                 embed_docs=None, embed_queries=None, summary: str = "", cap: int = STAGE1_CAP) -> tuple[list[int], dict]:
+    """Indices of docs in the union of per-element (and whole-summary) top-k
+    by cosine, capped at `cap` by best cosine; each surviving doc gets
+    `prune_cos` (max over queries). h1g H1-01: 3 of 4 gold families were
+    dropped here at cos .56-.65 with top-100 per element (cut .62)."""
     if not docs or not elements:
         return list(range(len(docs))), {"stage1_in": len(docs), "stage1_out": len(docs)}
     if embed_docs is None or embed_queries is None:
         from ..encoders import embed_docs as _ed, embed_queries as _eq
         embed_docs, embed_queries = embed_docs or _ed, embed_queries or _eq
     dv = np.asarray(embed_docs([_doc_text(d) or "untitled" for d in docs]), dtype=np.float32)
-    qv = np.asarray(embed_queries([e["text"] for e in elements]), dtype=np.float32)
+    queries = [e["text"] for e in elements] + ([summary[:2000]] if summary else [])
+    qv = np.asarray(embed_queries(queries), dtype=np.float32)
     dv /= np.linalg.norm(dv, axis=1, keepdims=True) + 1e-9
     qv /= np.linalg.norm(qv, axis=1, keepdims=True) + 1e-9
     sim = qv @ dv.T                                    # elements × docs
@@ -62,11 +66,13 @@ def stage1_embed(elements: list[dict], docs: list[dict], topk: int = STAGE1_TOPK
         keep.update(int(i) for i in np.argpartition(-row, k - 1)[:k])
     best = sim.max(axis=0)
     best_el = sim.argmax(axis=0)
+    labels = [e.get("id", "") for e in elements] + (["summary"] if summary else [])
+    out = sorted(keep, key=lambda i: -best[i])[:cap]
+    keep = set(out)
     for i in range(len(docs)):
         docs[i]["prune_cos"] = float(best[i])
-        docs[i]["prune_best_element"] = elements[int(best_el[i])].get("id", "")
+        docs[i]["prune_best_element"] = labels[int(best_el[i])]
         docs[i]["prune_stage1"] = i in keep
-    out = sorted(keep, key=lambda i: -best[i])
     return out, {"stage1_in": len(docs), "stage1_out": len(out),
                  "stage1_cut_cos": float(min(best[i] for i in keep)) if keep else None}
 
@@ -147,7 +153,8 @@ async def prune(candidates: list[dict], elements: list[dict], docs: list[dict], 
     """Full funnel: pool docs → stage 1 → stage 2 → ≤KEEP docs (dicts get
     prune_* fields). Stats carry every stage's counts."""
     idxs, s1 = stage1_embed(elements, docs, topk=kw.get("topk", STAGE1_TOPK),
-                            embed_docs=kw.get("embed_docs"), embed_queries=kw.get("embed_queries"))
+                            embed_docs=kw.get("embed_docs"), embed_queries=kw.get("embed_queries"),
+                            summary=kw.get("summary", ""), cap=kw.get("cap", STAGE1_CAP))
     kept, s2 = await stage2_llm(candidates, elements, docs, idxs, batch_size=kw.get("batch_size", STAGE2_BATCH),
                                 keep=kw.get("keep", KEEP), call=kw.get("call"))
     return [docs[i] for i in kept], {"pool": len(docs), **s1, **s2}

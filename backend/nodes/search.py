@@ -358,7 +358,7 @@ async def search_node(state: GraphState) -> dict:
         try:
             from patent_analyzer.agentic.prune import prune as _prune
             _t0 = _time.monotonic()
-            pruned_docs, prune_stats = await _prune(loop_stats.get("candidates") or [], loop_stats["elements"], all_docs)
+            pruned_docs, prune_stats = await _prune(loop_stats.get("candidates") or [], loop_stats["elements"], all_docs, summary=summary)
             prune_stats["seconds"] = round(_time.monotonic() - _t0, 1)
             _event("prune_done", f"prune: pool {prune_stats.get('pool')} → embed {prune_stats.get('stage1_out')} "
                                  f"→ llm {prune_stats.get('stage2_worth')} worth reading, kept {len(pruned_docs)} "
