@@ -68,3 +68,15 @@ def test_title_terms_prefers_repeated_bigrams():
     q = terms_query("inv1", terms)
     assert q["kind"] == "neigh_terms" and q["query"].startswith("((telepresence robot)")
     assert terms_query("inv1", []) is None
+
+
+def test_element_queries_rotate_the_predicted_groups():
+    cand = {"id": "inv1", "cpc_pred": ["A61N5/10", "A61B6/04", "G01S17/00"], "elements": [
+        {"id": "inv1.e0", "facets": {"thing": ["radiotherapy positioning"]}},
+        {"id": "inv1.e1", "facets": {"thing": ["optical marker"]}},
+        {"id": "inv1.e2", "facets": {"thing": ["fiducial calibration"]}},
+        {"id": "inv1.e3", "facets": {"thing": ["motion tracking"]}},
+        {"id": "inv1.e4", "facets": {"thing": ["beam gating"]}}]}
+    qs = [q for q in candidate_queries(cand) if q["kind"].startswith("element:")]
+    assert [q["facets_used"]["cpc"] for q in qs] == [["A61N5"], ["A61B6"], ["G01S17"], ["A61N5"]]
+    assert qs[0]["query"] == "(optical marker) CPC=A61N5/low" and qs[1]["query"] == "(fiducial calibration) CPC=A61B6/low"

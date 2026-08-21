@@ -80,9 +80,10 @@ def ladder(gold_text: str, forms: dict, cpc_sub: str | None, cutoff: str | None)
         if dom:
             steps.append({"shape": "form AND domain", "query": f"{g(t1[0])} {g(dom[0])}", "forms": [t1, (dom[0], "domain", "e0")]})
         if cpc_sub:
-            steps.append({"shape": "form AND CPC=gold subclass/low", "query": f"CPC={cpc_sub}/low {g(t1[0])}", "forms": [t1], "cpc": cpc_sub})
+            # clause LAST (leading CPC=… returns 0 through SerpAPI)
+            steps.append({"shape": "form AND CPC=gold group/low", "query": f"{g(t1[0])} CPC={cpc_sub}/low", "forms": [t1], "cpc": cpc_sub})
             if len(ranked) > 1:
-                steps.append({"shape": "2 forms AND CPC", "query": f"CPC={cpc_sub}/low {g(t1[0])} {g(ranked[1][0])}", "forms": [t1, ranked[1]], "cpc": cpc_sub})
+                steps.append({"shape": "2 forms OR AND CPC", "query": f"({g(t1[0])} OR {g(ranked[1][0])}) CPC={cpc_sub}/low", "forms": [t1, ranked[1]], "cpc": cpc_sub})
     steps.append({"shape": "gold title words (upper bound, not our vocabulary)", "query": " ".join(sorted(gw)[:6]), "forms": []})
     return steps
 
@@ -108,7 +109,10 @@ async def probe(key: str, tag: str, max_calls: int) -> dict:
         fam = g["family_id"]
         row = {"pub": g["pub"], "family": fam, "title": g.get("title"), "cpc_subclasses": subs, "cpc_groups": sorted({c.split("/")[0] for c in cpcs})[:6],
                "seed_cpc_overlap": sorted(set(subs) & set(seed_cpc)), "steps": []}
-        gsub = next((s for s in subs if s in seed_cpc), subs[0] if subs else None)
+        # main groups, not subclasses: CPC=<subclass>/low returns nothing; prefer a group the seeds share
+        groups = sorted({c.split("/")[0] for c in cpcs if len(c.split("/")[0]) >= 5})
+        gsub = next((g for g in groups if g in seed_cpc), groups[0] if groups else None)
+        row["cpc_group_used"] = gsub
         for step in ladder(text, forms, gsub, cutoff)[:max_calls]:
             cands, err = await sp.search_patents(step["query"], max_pages=1, before=before)
             calls += 1

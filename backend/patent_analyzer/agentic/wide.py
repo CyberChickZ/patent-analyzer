@@ -78,19 +78,20 @@ def candidate_queries(cand: dict, max_elements: int = 6, cpc_groups: list[str] |
     elif things:
         out.append(_q("wide", things, sorted({eid for t in t_terms for eid in t_from.get(t, [])}), thing=t_terms))
     from .query_gen import cpc_clause
-    groups = [g for g in (cpc_groups if cpc_groups is not None else cand.get("cpc_pred") or []) if cpc_clause(g)]
-    scope = cpc_clause(groups[0]) if groups else ""
-    for e in els[1:1 + max_elements]:
+    groups = list(dict.fromkeys(str(g).split("/")[0] for g in (cpc_groups if cpc_groups is not None else cand.get("cpc_pred") or []) if cpc_clause(g)))[:3]
+    for n, e in enumerate(els[1:1 + max_elements]):
         f = e.get("facets") or {}
         forms = [" ".join(str(t).lower().split()) for t in (f.get("thing") or [])][:3]
         forms = [t for t in forms if t and t not in dom_terms]
         if not forms:
             continue
         g = _group(forms)
-        if scope:
-            # gold probe: `(remote participant display) CPC=H04N7/low` → gold rank 19 (48 unscoped);
-            # the CPC clause must be the last term
-            out.append(_q(f"element:{e.get('id')}", f"{g} {scope}", [e.get("id")], thing=forms, cpc=[groups[0].split("/")[0]]))
+        if groups:
+            # gold probes: `(form) CPC=H04N7/low` → rank 19 (48 unscoped); `((f1) OR (f2)) CPC=A61B6/low`
+            # → rank 76, `… CPC=A61B2503/low` → rank 5: the group matters as much as the words, so the
+            # predicted groups rotate across the elements. The CPC clause must be the last term.
+            grp = groups[n % len(groups)]
+            out.append(_q(f"element:{e.get('id')}", f"{g} {cpc_clause(grp)}", [e.get("id")], thing=forms, cpc=[grp]))
         else:
             out.append(_q(f"element:{e.get('id')}", f"{g} {domain}" if domain else g, [e.get("id")], thing=forms, domain=dom_terms))
     if n_terms:
