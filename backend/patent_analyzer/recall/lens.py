@@ -321,7 +321,7 @@ def search_body(query_terms: list[str], cpc: str | None, before: str | None, siz
         if not t:
             continue
         for fld in ("title", "abstract", "claim"):
-            should.append({"match_phrase" if " " in t else "match": {fld: t}})
+            should.append({"match": {fld: t}})   # OR of the words; match_phrase left 5/100/0/0 hits (h1g)
     filt: list[dict] = []
     if cpc:
         sym = re.sub(r"[^A-Za-z0-9/]", "", cpc).upper()

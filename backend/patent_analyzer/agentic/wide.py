@@ -87,10 +87,10 @@ def candidate_queries(cand: dict, max_elements: int = 6, cpc_groups: list[str] |
             continue
         g = _group(forms)
         if groups:
-            # gold probes: `(form) CPC=H04N7/low` → rank 19 (48 unscoped); `((f1) OR (f2)) CPC=A61B6/low`
-            # → rank 76, `… CPC=A61B2503/low` → rank 5: the group matters as much as the words, so the
-            # predicted groups rotate across the elements. The CPC clause must be the last term.
-            grp = groups[n % len(groups)]
+            # gold probes: `(form) CPC=H04N7/low` → rank 19 (48 unscoped). The invention-level group
+            # (first predicted) scopes every element; the neighbouring groups go through Lens (free).
+            # The CPC clause must be the last term.
+            grp = groups[0]
             out.append(_q(f"element:{e.get('id')}", f"{g} {cpc_clause(grp)}", [e.get("id")], thing=forms, cpc=[grp]))
         else:
             out.append(_q(f"element:{e.get('id')}", f"{g} {domain}" if domain else g, [e.get("id")], thing=forms, domain=dom_terms))

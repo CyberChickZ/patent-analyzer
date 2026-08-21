@@ -126,7 +126,7 @@ def test_search_patents_body_shape(client):
     assert body["size"] == 50
     inner = body["query"]["bool"]["must"][0]["bool"]
     assert inner["minimum_should_match"] == 1
-    assert {"match_phrase": {"title": "telepresence system"}} in inner["should"]
+    assert {"match": {"title": "telepresence system"}} in inner["should"]
     assert {"match": {"claim": "turntable"}} in inner["should"]
     filt = body["query"]["bool"]["filter"]
     assert {"query_string": {"query": "class_cpc.symbol:H04N7\\/15*"}} in filt

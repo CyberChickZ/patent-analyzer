@@ -50,3 +50,15 @@ def test_neighbourhood_collects_sources_filters_cutoff_and_resolves_ids(monkeypa
     ids = {c.title: (c.raw.get("neigh") or {}).get("oa_id") for c in papers}
     assert ids["old ref"] == "W111" and ids["ref with doi"] == "W888" and ids["openalex hit"] == "W777"
     assert info["with_oa_id"] == len(papers) and info["located"]["paperId"] == "P0"
+
+
+def test_keyword_queries_are_short_and_from_facets():
+    from patent_analyzer.agentic.neighbourhood import keyword_queries
+    cand = {"id": "inv1", "concept": "A very long concept sentence " * 20, "elements": [
+        {"id": "e0", "facets": {"thing": ["telepresence system", "video conferencing"], "patent": ["teleconferencing apparatus"]}},
+        {"id": "e1", "facets": {"thing": ["telepresence robot"], "patent": ["movable display"]}},
+        {"id": "e2", "facets": {"thing": ["rotation"]}}]}
+    qs = keyword_queries(cand)
+    assert qs[0] == "teleconferencing apparatus movable display rotation" and len(qs[0].split()) <= 7
+    assert qs[1] == "telepresence system video conferencing robot"
+    assert len(keyword_queries({"id": "x", "concept": "one two three four five six seven eight nine"})[0].split()) == 7

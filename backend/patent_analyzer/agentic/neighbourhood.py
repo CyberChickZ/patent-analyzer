@@ -37,6 +37,33 @@ def _oa_from_s2(c: Candidate) -> str:
     return f"W{mag}" if mag else ""
 
 
+def keyword_queries(cand: dict, max_words: int = 7) -> list[str]:
+    """≤2 short queries per candidate: (patent phrasing | thing) forms of the
+    first elements, and the preamble's domain forms + one element form."""
+    els = cand.get("elements") or []
+    if not els:
+        c = " ".join(str(cand.get("concept") or "").split())
+        return [" ".join(c.split()[:max_words])] if c else []
+
+    def forms(e, k):
+        return [" ".join(str(t).lower().split()) for t in ((e.get("facets") or {}).get(k) or [])]
+    out = []
+    words: list[str] = []
+    for e in els[:4]:
+        for t in (forms(e, "patent") or forms(e, "thing"))[:1]:
+            for w in t.split():
+                if w not in words:
+                    words.append(w)
+    if len(words) >= 3:
+        out.append(" ".join(words[:max_words]))
+    dom = forms(els[0], "thing")[:2]
+    el1 = forms(els[1], "thing")[:1] if len(els) > 1 else []
+    q2 = " ".join(dict.fromkeys(" ".join(dom + el1).split()))
+    if len(q2.split()) >= 3 and q2 not in out:
+        out.append(" ".join(q2.split()[:max_words]))
+    return out
+
+
 async def locate(title: str, doi: str = "", arxiv_id: str = "") -> Candidate | None:
     if doi:
         cands, _ = await ss.batch([f"DOI:{doi}"])
@@ -90,14 +117,15 @@ async def paper_neighbourhood(title: str, cands: list[dict], cutoff: str | None 
         _add(cits, "citations")
         _add(recs, "recommendations")
     for cand in cands[:4]:
-        concept = " ".join(str(cand.get("concept") or "").split())[:300]
-        if not concept:
-            continue
-        s2, _ = await ss.search(concept, limit=50)
-        info["s2_calls"] += 1
-        _add(s2, f"s2_search:{cand.get('id')}")
-        oa_hits, _ = await oa.search_works(concept, limit=50)
-        _add(oa_hits, f"openalex:{cand.get('id')}")
+        # short keyword queries: S2 and OpenAlex return 0 for a 200-char concept sentence
+        # (verified 2026-09-18), 15-20 hits for 5-6 words
+        for kq in keyword_queries(cand)[:KW_PER_CAND]:
+            s2, _ = await ss.search(kq, limit=50)
+            info["s2_calls"] += 1
+            _add(s2, f"s2_search:{cand.get('id')}")
+            oa_hits, _ = await oa.search_works(kq, limit=50)
+            _add(oa_hits, f"openalex:{cand.get('id')}")
+        info.setdefault("keyword_queries", {})[cand.get("id")] = keyword_queries(cand)[:KW_PER_CAND]
     # second hop: references of the papers closest to the invention summary
     hop_src = [c for c in pool.values() if ((c.raw or {}).get("semantic_scholar") or {}).get("paperId")]
     if hop_src and summary:

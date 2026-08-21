@@ -107,8 +107,12 @@ async def attach_facets(elements: list[dict], summary: str) -> list[dict]:
     extraction's own forms); fallback keeps the loop alive."""
     from app.llm import facet_elements
     got = await facet_elements([{"id": e["id"], "text": e["text"]} for e in elements], summary)
+    meta = got.pop("_meta", {}) if isinstance(got, dict) else {}
     source = "\n".join(e.get("text", "") for e in elements) + "\n" + (summary or "")
     for e in elements:
         merged = merge_facets(e.get("facets") or {}, got.get(e["id"]) or {}, source=source)
         e["facets"] = merged if merged.get("thing") else fallback_facets(e["text"])
+    if elements and meta.get("cpc_groups"):
+        # neighbouring CPC main groups (examiners cite across fields) ride on the first element
+        elements[0]["cpc_groups"] = list(meta["cpc_groups"])
     return elements

@@ -63,3 +63,10 @@ def test_stage1_summary_query_and_cap():
     assert 2 in idxs and docs[2]["prune_best_element"] == "summary"     # the bread recipe is closest to the summary vector
     idxs, st = stage1_embed(ELS, docs, topk=4, embed_docs=_emb, embed_queries=_emb, cap=2)
     assert len(idxs) == 2 and st["stage1_out"] == 2
+
+
+def test_graph_sourced_docs_skip_the_embedding_cut():
+    docs = [dict(d) for d in DOCS]
+    docs[2]["sources"] = ["citation_graph"]          # bread recipe, far from every element
+    idxs, st = stage1_embed(ELS, docs, topk=1, embed_docs=_emb, embed_queries=_emb)
+    assert 2 in idxs and docs[2]["prune_stage1"]

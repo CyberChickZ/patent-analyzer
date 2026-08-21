@@ -26,6 +26,7 @@ STAGE1_TOPK = int(os.environ.get("PRUNE_STAGE1_TOPK", "250"))
 STAGE1_CAP = int(os.environ.get("PRUNE_STAGE1_CAP", "1200"))   # union cap → ≤ CAP/BATCH screen calls
 STAGE2_BATCH = int(os.environ.get("PRUNE_STAGE2_BATCH", "40"))
 KEEP = int(os.environ.get("PRUNE_KEEP", "60"))
+GRAPH_SOURCES = {"citation_graph", "google_similar", "lens_bridge"}
 
 SCREEN_SCHEMA = {
     "type": "OBJECT",
@@ -67,7 +68,10 @@ def stage1_embed(elements: list[dict], docs: list[dict], topk: int = STAGE1_TOPK
     best = sim.max(axis=0)
     best_el = sim.argmax(axis=0)
     labels = [e.get("id", "") for e in elements] + (["summary"] if summary else [])
-    out = sorted(keep, key=lambda i: -best[i])[:cap]
+    # candidates that arrived through the graph (citations / Google similar / paper→patent bridges)
+    # were selected by structure, not text: they skip the embedding cut (leader H7 (3))
+    protected = {i for i, d in enumerate(docs) if set(d.get("sources") or []) & GRAPH_SOURCES}
+    out = sorted(keep | protected, key=lambda i: -best[i])[:cap + len(protected)]
     keep = set(out)
     for i in range(len(docs)):
         docs[i]["prune_cos"] = float(best[i])

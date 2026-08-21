@@ -93,8 +93,9 @@ def pool_and_dedupe(channel_results: dict[str, list[Candidate]]) -> list[Candida
                     existing = by_key[k]
                     break
             if existing is None:
-                # New candidate
-                c.sources = [channel]
+                # New candidate: keep its own origin tags (citation_graph, google_similar, lens_bridge…)
+                own = [x for x in (c.sources or []) if x and x != channel]
+                c.sources = [channel] + own
                 for k in keys:
                     by_key[k] = c
                 seen_for_cand[id(c)] = set(keys)

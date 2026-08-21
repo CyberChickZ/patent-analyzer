@@ -110,6 +110,11 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
     async def _run(qs: list[dict]) -> list[str]:
         new_seeds: list[str] = []
         for q in qs:
+            if not budget.gp_ok() and budget.serp_left() <= 0:
+                log.append({"n": len(log) + 1, "candidate": q["candidate"], "kind": q["kind"], "query": q["query"],
+                            "facets_used": q.get("facets_used", {}), "elements": q.get("elements", []),
+                            "channel": "skipped:budget", "total": None, "hits": 0, "new": 0, "papers": 0, "pubs": [], "new_pubs": []})
+                continue
             hits, total, chan = await _search(q["query"], before, budget, num=100, scholar=True)
             returned, new_keys = [], []
             for c in hits:
@@ -187,15 +192,28 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
                 lens_info["bridge_error"] = err2
             lens_info["bridge_papers"] = len(sch or {})
             lens_info["bridge_error"] = lens_info.get("bridge_error") or err
-            # searches: per-element forms (≤3) with the predicted main group, then the wide blob
-            grp = next((str(c).split("/")[0] for cand in cands for c in (cand.get("cpc_pred") or []) if len(str(c).split("/")[0]) >= 5), None)
-            core_els = (cands[0].get("elements") or [])[1:]
-            lens_queries = []
-            for e in core_els[:LENS_CALLS - 1]:
+            # searches: the NEIGHBOURING main groups (facet call's cpc_groups, minus the ≤2 Google
+            # already used) × the core candidate's thing forms — Lens is free during the trial,
+            # so the extra groups cost no SerpAPI (leader H7 (a)); then per-element forms if budget remains
+            core = cands[0]
+            core_els = core.get("elements") or []
+            pred = [str(c).split("/")[0] for c in (core.get("cpc_pred") or []) if len(str(c).split("/")[0]) >= 5]
+            neigh_groups = [g for g in ((core_els[0].get("cpc_groups") if core_els else None) or []) if g not in pred[:2]]
+            core_forms = []
+            for e in core_els[:4]:
+                for t in ((e.get("facets") or {}).get("thing") or [])[:2]:
+                    t = " ".join(str(t).lower().split())
+                    if t and t not in core_forms:
+                        core_forms.append(t)
+            lens_queries = [{"element": "core", "terms": core_forms[:6], "cpc": g} for g in neigh_groups[:LENS_CALLS - 2]]
+            grp = pred[0] if pred else None
+            for e in core_els[1:]:
+                if len(lens_queries) >= LENS_CALLS - 1:
+                    break
                 forms = [" ".join(str(t).lower().split()) for t in ((e.get("facets") or {}).get("thing") or [])][:3]
                 if forms:
                     lens_queries.append({"element": e.get("id"), "terms": forms, "cpc": grp})
-            wide_terms = [q["query"] for q in queries if q["kind"] == "wide"]
+            lens_info["neigh_groups"] = neigh_groups
             for i, lq in enumerate(lens_queries[:LENS_CALLS - 1]):
                 lc, lerr = await lens.search_patents(lq["terms"], cpc=lq["cpc"], before=cutoff, size=100)
                 lens_info["search_calls"] += 1

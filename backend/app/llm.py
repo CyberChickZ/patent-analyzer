@@ -2037,7 +2037,12 @@ INVENTION CONTEXT: {summary}
 ELEMENTS:
 {listing}
 
-JSON output: {{"facets": {{"<element id>": {{"patent": [...], "named": [...], "thing": [...], "place": [...], "apparatus": [...]}}, ...}}}}""")
+ALSO give "cpc_groups": 5-8 CPC MAIN GROUPS (e.g. "H04N7", "G01S17", "A61B6" — subclass + group number,
+no slash part) where prior art for these elements is likely classified, INCLUDING the neighbouring
+technologies the implementation borrows from other fields (optical tracking → G01S17, machine guidance
+→ G05D1, video conferencing → H04N7): an examiner cites across fields, the paper's own field is not enough.
+
+JSON output: {{"cpc_groups": ["..."], "facets": {{"<element id>": {{"patent": [...], "named": [...], "thing": [...], "place": [...], "apparatus": [...]}}, ...}}}}""")
 
 
 async def facet_elements(elements: list[dict], summary: str) -> dict[str, dict]:
@@ -2061,6 +2066,12 @@ async def facet_elements(elements: list[dict], summary: str) -> dict[str, dict]:
             f = (data.get("facets") or {}).get(e["id"]) or {}
             out[e["id"]] = {k: [str(t).strip().lower() for t in (f.get(k) or []) if str(t).strip()][:FACET_FORMS_CAP]
                             for k in ("patent", "named", "thing", "place", "apparatus")}
+        groups = []
+        for g in data.get("cpc_groups") or []:
+            g = re.sub(r"[^A-Za-z0-9]", "", str(g).split("/")[0]).upper()
+            if re.match(r"^[A-HY]\d\d[A-Z]\d{1,4}$", g) and g not in groups:
+                groups.append(g)
+        out["_meta"] = {"cpc_groups": groups[:8]}
         return out
     except Exception:
         return {e["id"]: {"patent": [], "named": [], "thing": [], "place": [], "apparatus": []} for e in elements}

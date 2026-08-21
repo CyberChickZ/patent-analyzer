@@ -40,8 +40,10 @@ def test_search_facets_template_matches_old_fstring_except_the_patent_facet():
     summary, listing = "S" * 5000, "e1: a\ne2: b"
     expected = eval(fs, {"summary": summary, "listing": listing})
     got = prompts.render("search.facets", summary=summary[:4000], listing=listing)
-    assert got.split("  named     —", 1)[1].replace('"patent": [...], ', "") == expected.split("  named     —", 1)[1]
-    assert got.startswith("For EACH element below, give five facets") and "patent    —" in got
+    tail_got = got.split("  named     —", 1)[1].replace('"patent": [...], ', "")
+    tail_got = tail_got[:tail_got.index("ALSO give")] + tail_got[tail_got.index("JSON output:"):].replace('"cpc_groups": ["..."], ', "")
+    assert tail_got.strip() == expected.split("  named     —", 1)[1].strip()
+    assert got.startswith("For EACH element below, give five facets") and "patent    —" in got and "cpc_groups" in got
 
 
 def test_extract_candidates_template_matches_old_fstring():
