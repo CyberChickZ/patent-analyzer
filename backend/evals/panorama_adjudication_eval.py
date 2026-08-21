@@ -23,6 +23,8 @@ Usage:
     python3 evals/panorama_adjudication_eval.py --limit 100 --max-live-calls 260
     python3 evals/panorama_adjudication_eval.py --variants          # re-score only
     python3 evals/panorama_adjudication_eval.py --claim-only --limit 100
+    python3 evals/panorama_adjudication_eval.py --run h2_holdout --variants            # hold-out set
+    EVAL_BRI=1 python3 evals/panorama_adjudication_eval.py --run h2_holdout --tag bri --variants
 """
 
 import argparse
@@ -92,9 +94,11 @@ async def score_document(claim_text: str, checklist: list[dict], doc: dict) -> d
 
 
 async def run_stage1(samples: list[dict], docs: dict[str, dict], with_preamble: bool,
-                     concurrency: int = 3) -> dict[str, dict]:
-    """Per instance: elements + one scored result per cited reference."""
-    out_path = RUN_DIR / "doc_results.json"
+                     concurrency: int = 3, run_dir: Path = RUN_DIR, tag: str = "") -> dict[str, dict]:
+    """Per instance: elements + one scored result per cited reference.
+    Results go to <run_dir>/doc_results<tag>.json (tag e.g. "_bri" keeps a
+    prompt variant's stage 1 apart from the default prompt's)."""
+    out_path = run_dir / f"doc_results{tag}.json"
     done = json.loads(out_path.read_text()) if out_path.exists() else {}
     sem = asyncio.Semaphore(concurrency)
 
@@ -221,16 +225,20 @@ async def main():
     ap.add_argument("--variants", action="store_true", help="re-score cached stage-1 results under every rule variant")
     ap.add_argument("--claim-only", action="store_true", help="run the claim-only Gemini control")
     ap.add_argument("--concurrency", type=int, default=3)
+    ap.add_argument("--run", default="h2", help="run name under eval_data/runs/ (samples.json + docs.json)")
+    ap.add_argument("--tag", default="", help="suffix for doc_results / adjudication_result (e.g. bri)")
     args = ap.parse_args()
 
     import llm_cache
     install_budget(args.max_live_calls)
-    samples = json.loads((RUN_DIR / "samples.json").read_text())[:args.limit]
-    docs = json.loads((RUN_DIR / "docs.json").read_text())
+    run_dir = RUN_DIR.parent / args.run
+    tag = f"_{args.tag}" if args.tag else ""
+    samples = json.loads((run_dir / "samples.json").read_text())[:args.limit]
+    docs = json.loads((run_dir / "docs.json").read_text())
 
     if args.claim_only:
         res = await claim_only(samples)
-        (RUN_DIR / "claim_only.json").write_text(json.dumps(res, indent=1))
+        (run_dir / "claim_only.json").write_text(json.dumps(res, indent=1))
         c = res["confusion"]
         print("claim-only control:", fmt_table("claim-only", c))
         print(fmt_matrix(c))
@@ -240,10 +248,11 @@ async def main():
         return
 
     try:
-        stage1 = await run_stage1(samples, docs, with_preamble=not args.no_preamble, concurrency=args.concurrency)
+        stage1 = await run_stage1(samples, docs, with_preamble=not args.no_preamble, concurrency=args.concurrency,
+                                  run_dir=run_dir, tag=tag)
     except BudgetExceeded as exc:
         print(f"stopped: {exc}")
-        stage1 = json.loads((RUN_DIR / "doc_results.json").read_text())
+        stage1 = json.loads((run_dir / f"doc_results{tag}.json").read_text())
     stage1 = {k: v for k, v in stage1.items() if k in {f"{s['app']}:{s['claimNumber']}" for s in samples}}
     print(f"stage 1: {len(stage1)} instances, {sum(len(v['docs']) for v in stage1.values())} scored documents; "
           + llm_cache.summary())
@@ -263,7 +272,7 @@ async def main():
     print("base correct by dependent:", dict(dep))
     modes = Counter(m for r in base["rows"] for m in r["text_modes"])
     print("document text modes:", dict(modes))
-    (RUN_DIR / "adjudication_result.json").write_text(json.dumps(report, indent=1))
+    (run_dir / f"adjudication_result{tag}.json").write_text(json.dumps(report, indent=1))
 
 
 if __name__ == "__main__":
