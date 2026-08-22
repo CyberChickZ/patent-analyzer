@@ -17,7 +17,7 @@ from typing import Any, Literal, TypedDict
 
 from langgraph.types import interrupt
 
-PHASES = ("idca", "extract", "search", "evaluate")
+PHASES = ("idca", "extract", "search", "evaluate", "draft")
 
 # what the reviewer may change after each phase (state keys; whole-value replace)
 EDITABLE: dict[str, tuple[str, ...]] = {
@@ -25,6 +25,7 @@ EDITABLE: dict[str, tuple[str, ...]] = {
     "extract": ("extraction", "checklist"),
     "search": ("ranked_candidates",),
     "evaluate": ("scoring_report",),
+    "draft": ("draft_claims",),
 }
 # what the reviewer sees (read-only context next to the editable values)
 SHOWN: dict[str, tuple[str, ...]] = {
@@ -32,6 +33,7 @@ SHOWN: dict[str, tuple[str, ...]] = {
     "extract": ("summary",),
     "search": ("search_stats",),
     "evaluate": ("eval_stats",),
+    "draft": ("adjudication",),
 }
 
 
@@ -131,6 +133,41 @@ def _diff_docs(before: list[dict] | None, after: list[dict] | None, phase: str) 
     return out
 
 
+def _limitations(draft: dict | None) -> dict[str, tuple[dict, dict]]:
+    out = {}
+    for c in (draft or {}).get("claims") or []:
+        for l in c.get("limitations") or []:
+            if l.get("lid"):
+                out[l["lid"]] = (c, l)
+    return out
+
+
+def _diff_draft(before: dict | None, after: dict | None, phase: str) -> list[dict]:
+    """Limitation-level diff of the draft claims (by lid): text edits, deleted
+    and added limitations; edited items are marked so the report can say so."""
+    b, a = _limitations(before), _limitations(after)
+    ts = _now()
+    out = []
+    for lid, (_, l) in b.items():
+        if lid not in a:
+            out.append({"phase": phase, "kind": "limitation", "id": lid, "op": "delete", "before": {"text": l.get("text")}, "after": None, "ts": ts})
+        elif (l.get("text") or "") != (a[lid][1].get("text") or ""):
+            out.append({"phase": phase, "kind": "limitation", "id": lid, "op": "edit",
+                        "before": {"text": l.get("text")}, "after": {"text": a[lid][1].get("text")}, "ts": ts})
+            a[lid][1]["edited_by_user"] = True
+            a[lid][0]["edited_by_user"] = True
+    for lid, (c, l) in a.items():
+        if lid not in b:
+            out.append({"phase": phase, "kind": "limitation", "id": lid, "op": "add", "before": None, "after": {"text": l.get("text")}, "ts": ts})
+            l["edited_by_user"] = True
+            c["edited_by_user"] = True
+    bn = {c.get("no") for c in (before or {}).get("claims") or []}
+    an = {c.get("no") for c in (after or {}).get("claims") or []}
+    for no in sorted(x for x in bn - an if x is not None):
+        out.append({"phase": phase, "kind": "claim", "id": str(no), "op": "delete", "before": None, "after": None, "ts": ts})
+    return out
+
+
 def apply_response(phase: str, state: dict, resp: HumanResponse | None) -> dict:
     """State patch for a HumanResponse. accept/ignore/None → {}; edit → the
     whitelisted values replaced, edited items marked, user_edits appended,
@@ -154,6 +191,8 @@ def apply_response(phase: str, state: dict, resp: HumanResponse | None) -> dict:
             edits += _diff_extraction(old, new, phase)
         elif key in ("ranked_candidates", "scoring_report"):
             edits += _diff_docs(old, new, phase)
+        elif key == "draft_claims":
+            edits += _diff_draft(old, new, phase)
         elif old != new:
             edits.append({"phase": phase, "kind": "field", "id": key, "op": "edit", "before": old if not isinstance(old, str) else old[:2000],
                           "after": new if not isinstance(new, str) else new[:2000], "ts": _now()})

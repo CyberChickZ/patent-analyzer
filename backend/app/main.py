@@ -92,13 +92,14 @@ USE_LANGGRAPH = True  # Always use LangGraph pipeline
 
 
 _checkpointer_singleton = None
-PHASE_NODE = {"idca": "idca", "extract": "ssr", "search": "search", "evaluate": "evaluate"}
+PHASE_NODE = {"idca": "idca", "extract": "ssr", "search": "search", "evaluate": "evaluate", "draft": "draft"}
 PHASE_OF_NODE = {v: k for k, v in PHASE_NODE.items()}
 _SNAPSHOT_KEYS = ("summary", "checklist", "delegation", "innovation_axes", "technology_choices", "applicable_types",
                   "cpc_subclass", "fields_map", "source_title", "source_arxiv_id", "source_doi", "status_determination",
                   "doc_type", "input_mode", "personas", "input_local_path", "notify_email", "evolve", "hitl_enabled",
                   "phase_results", "extraction", "document_text", "ranked_candidates", "search_stats", "scoring_report",
-                  "eval_stats", "pause_after", "user_edits", "prompt_versions", "category", "publication_date")
+                  "eval_stats", "pause_after", "user_edits", "prompt_versions", "category", "publication_date",
+                  "adjudication", "draft_claims")
 
 
 def _checkpointer():
@@ -323,7 +324,7 @@ async def _start_pipeline_worker():
 
 
 def _next_node(phase: str) -> str:
-    order = ["idca", "ssr", "search", "evaluate", "report"]
+    order = ["idca", "ssr", "search", "evaluate", "draft", "report"]
     node = PHASE_NODE.get(phase, "ssr")
     return order[min(order.index(node) + 1, len(order) - 1)]
 

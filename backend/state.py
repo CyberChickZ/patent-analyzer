@@ -99,6 +99,12 @@ class GraphState(TypedDict, total=False):
     overall_summary: str
     novelty_score: float
     risk_level: str
+    adjudication: dict             # rule verdict (patent_analyzer.adjudicate) + claim_chart once the draft node ran
+
+    # ── Phase 4b: Draft claims (nodes/draft.py) ──
+    draft_claims: dict             # {candidate_id, strategy, claims[{no, form, depends_on, preamble, limitations[{lid, text,
+                                   #  basis[{element_id, evidence_quote, evidence_loc}], origin, coverage, flags}]}],
+                                   #  avoidance, definiteness, recheck, llm_calls}
 
     # ── Phase 5: Report ──
     report_html_gcs: str      # gs:// URI of generated HTML report
@@ -109,7 +115,7 @@ class GraphState(TypedDict, total=False):
     hitl_pending: HitlPending | None
     hitl_history: list[dict]  # [{phase, user_input, timestamp, changes}]
     hitl_response: dict  # user's HITL choice/comment from frontend submit
-    pause_after: list[str]    # phases whose gate interrupts: idca | extract | search | evaluate
+    pause_after: list[str]    # phases whose gate interrupts: idca | extract | search | evaluate | draft
     paused_at: str            # phase the graph is currently paused after ("" when running)
     user_edits: Annotated[list[dict], operator.add]   # {phase, kind, id/pub_num, op, before, after, ts}
     prompt_versions: Annotated[dict[str, int], _merge_dicts]   # prompt name -> registry version used
