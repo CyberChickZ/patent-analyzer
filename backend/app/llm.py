@@ -37,9 +37,17 @@ MAX_TOKENS = 8192
 STAGES = ("extract", "screen", "eval", "idca")
 
 
+# J5 gates (outputs/eval_status/J5.md, 2026-09-18): the screen stage keeps the same gold with
+# gemini-3.1-flash-lite at 13x the speed, 23x cheaper and 0/45 429s vs 2.5-pro (which also
+# loses batches to thinking overrunning max_output_tokens); extract/eval stay on the global model
+# (3.5-flash scored lower on both). 2.5-pro/flash/flash-lite retire 2026-10-20 — re-gate before then.
+STAGE_DEFAULTS = {"screen": "gemini-3.1-flash-lite"}
+
+
 def stage_model(stage: str) -> str:
-    """Model id for a pipeline stage: LLM_MODEL_<STAGE> if set, else the global MODEL."""
-    return os.getenv(f"LLM_MODEL_{stage.upper()}") or MODEL
+    """Model id for a pipeline stage: LLM_MODEL_<STAGE> if set, else the
+    stage default from the J5 gates, else the global MODEL."""
+    return os.getenv(f"LLM_MODEL_{stage.upper()}") or STAGE_DEFAULTS.get(stage.lower()) or MODEL
 
 _client: genai.Client | None = None
 

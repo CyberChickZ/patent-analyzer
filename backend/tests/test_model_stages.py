@@ -14,7 +14,8 @@ def test_stage_model_env_overrides_and_falls_back(monkeypatch):
     monkeypatch.setattr(llm, "MODEL", "gemini-2.5-pro")
     for st in llm.STAGES:
         monkeypatch.delenv(f"LLM_MODEL_{st.upper()}", raising=False)
-        assert llm.stage_model(st) == "gemini-2.5-pro"
+        assert llm.stage_model(st) == llm.STAGE_DEFAULTS.get(st, "gemini-2.5-pro")
+    assert llm.stage_model("screen") == "gemini-3.1-flash-lite"      # J5 gate default
     monkeypatch.setenv("LLM_MODEL_SCREEN", "gemini-3.1-flash-lite")
     monkeypatch.setenv("LLM_MODEL_EXTRACT", "gemini-3.5-flash")
     assert llm.stage_model("screen") == "gemini-3.1-flash-lite"

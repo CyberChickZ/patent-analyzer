@@ -166,7 +166,8 @@ def test_expand_light_uses_narrow_lookup_beyond_the_head(monkeypatch):
 def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
     monkeypatch.setattr(L, "LOOP_MODE", "wide")
     state = {"summary": "s", "date_cutoff": "20110202", "extraction": {"candidate_inventions": [
-        {"id": "inv1", "level": "core", "elements": [
+        {"id": "inv1", "level": "core", "cpc_pred": ["A61K31/00"], "elements": [
+            {"id": "inv1.e0", "text": "A method of inhibiting prostate cancer cell proliferation", "facets": {"thing": ["cancer treatment", "cell proliferation"]}},
             {"id": "inv1.e1", "text": "a soluble adenylyl cyclase (sAC) inhibitor", "facets": {"named": ["soluble adenylyl cyclase", "sac"], "thing": ["inhibition"], "place": ["prostate cancer"]}}]},
         {"id": "inv2", "level": "application", "elements": [
             {"id": "inv2.e1", "text": "diagnosis", "facets": {"named": [], "thing": ["staining"], "place": ["tissue"]}}]}]}}
@@ -212,14 +213,15 @@ def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
     assert "US5000A" in seen["seeds"] and "a neighbourhood paper" in {c.title for c in cands}
     assert [c[1] for c in calls] == [100] * len(calls) and all(c[2] == "priority:20110202" for c in calls)
     kinds = [q["kind"] for q in stats["rounds"][0]["queries"]]
-    assert kinds[0] == "wide" and "named+domain" in kinds and "cpc+thing" in kinds   # one element → no natural (needs ≥3 words); CPC round after expansion
-    nq = [q for q in stats["rounds"][0]["queries"] if q["kind"] == "named+domain"][0]
-    assert nq["facets_used"]["named"] == ["soluble adenylyl cyclase"]   # 'sac' fails validation (not capitalised in the source)
+    assert kinds[:2] == ["element:inv1.e1", "candidate+cpc"] and "cpc+thing" in kinds   # v6: one element → candidate query dedupes into the element query; CPC round after expansion
+    eq = stats["rounds"][0]["queries"][0]
+    assert eq["facets_used"]["specific"] == ["soluble adenylyl cyclase", "inhibition"]   # 'sac' fails validation (not capitalised in the source)
+    assert all("prostate cancer" not in q["query"] for q in stats["rounds"][0]["queries"] if q["kind"].startswith("element"))
     assert seen["light"] and seen["max_cited"] == L.MAX_CITED_LIGHT and seen["before"] == "20110202"
     pubs = {c.pub_num for c in cands}
     assert "US7" in pubs and "US2099" not in pubs and stats["mode"] == "wide"
     q0 = stats["rounds"][0]["queries"][0]
-    assert q0["n"] == 1 and len(q0["pubs"]) == 2 and q0["new"] == 2 and q0["kind"] == "wide"
+    assert q0["n"] == 1 and len(q0["pubs"]) == 2 and q0["new"] == 2 and q0["kind"] == "element:inv1.e1"
     assert stats["rounds"][0]["queries"][1]["new"] == 1   # US2099 repeats, one fresh hit
     assert "US7" in stats["rounds"][0]["expanded_pubs"] and stats["rounds"][0]["cpc_top"] == ["A61K31", "A61K38"]
     assert [c["id"] for c in stats["candidates"]] == ["inv1", "inv2"] and events == ["round_done"]
