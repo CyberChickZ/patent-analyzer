@@ -1,12 +1,14 @@
-"""Disclosure adapter (Dis2Pat form): problem / core_idea / how_it_works /
-novelty / optional_variants -> Doc. core_idea seeds the A1 concept,
-how_it_works is the element source, optional_variants become dependent_hints."""
+"""Disclosure adapter (Dis2Pat form): title / problem / core_idea / how_it_works /
+novelty / benefits / optional_variants -> Doc (the seven HF `lj408/Dis2Pat`
+disclosure fields). core_idea seeds the A1 concept, how_it_works is the
+element source, optional_variants become dependent_hints."""
 
 FIELDS = (
     ("problem", "Problem"),
     ("core_idea", "Core Idea"),
     ("how_it_works", "How It Works"),
     ("novelty", "Novelty"),
+    ("benefits", "Benefits"),
     ("optional_variants", "Optional Variants"),
 )
 
@@ -22,9 +24,9 @@ def _paragraphs(value) -> list[str]:
 
 
 def doc_from_fields(problem: str = "", core_idea: str = "", how_it_works: str = "",
-                    novelty: str = "", optional_variants=None, title: str = "") -> dict:
+                    novelty: str = "", optional_variants=None, title: str = "", benefits: str = "") -> dict:
     values = {"problem": problem, "core_idea": core_idea, "how_it_works": how_it_works,
-              "novelty": novelty, "optional_variants": optional_variants}
+              "novelty": novelty, "benefits": benefits, "optional_variants": optional_variants}
     sections = [{"title": label, "paragraphs": _paragraphs(values[key]), "subsections": []}
                 for key, label in FIELDS if _paragraphs(values[key])]
     return {"title": title or "", "abstract": " ".join(_paragraphs(core_idea))[:1000],

@@ -114,3 +114,11 @@ def test_doc_from_fields():
     text = render_doc(doc)
     assert "[S3.P2] Train with L1." in text
     assert doc_from_fields(core_idea="x")["sections"][0]["title"] == "Core Idea"
+
+
+def test_doc_from_fields_benefits_and_title():
+    doc = doc_from_fields(title="Offset nets", core_idea="A learned offset network.", benefits="Less drift.",
+                          optional_variants=["Use L2 loss"])
+    assert doc["title"] == "Offset nets"
+    assert [s["title"] for s in doc["sections"]] == ["Core Idea", "Benefits", "Optional Variants"]
+    assert doc["sections"][1]["paragraphs"] == ["Less drift."]
