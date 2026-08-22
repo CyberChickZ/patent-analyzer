@@ -70,3 +70,14 @@ def test_graph_sourced_docs_skip_the_embedding_cut():
     docs[2]["sources"] = ["citation_graph"]          # bread recipe, far from every element
     idxs, st = stage1_embed(ELS, docs, topk=1, embed_docs=_emb, embed_queries=_emb)
     assert 2 in idxs and docs[2]["prune_stage1"]
+
+
+def test_llm_screen_cannot_drop_a_graph_sourced_doc():
+    docs = [dict(d) for d in DOCS]
+    docs[2]["sources"] = ["google_similar"]
+    idxs, _ = stage1_embed(ELS, docs, topk=4, embed_docs=_emb, embed_queries=_emb)
+
+    async def fake_call(system, user, response_schema=None):
+        return json.dumps({"verdicts": [{"i": i, "worth_reading": i != 2, "elements": [], "reason": "r"} for i in range(4)]})
+    kept, st = asyncio.run(stage2_llm([{"id": "inv1"}], ELS, docs, idxs, batch_size=4, keep=4, call=fake_call))
+    assert 2 in kept and "graph source" in docs[2]["prune_reason"] and "When in doubt, keep it" in __import__("patent_analyzer.agentic.prune", fromlist=["x"])._batch_prompt([{"id": "inv1"}], ELS, [(0, docs[0])])

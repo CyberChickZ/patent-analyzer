@@ -92,7 +92,10 @@ def _batch_prompt(candidates: list[dict], elements: list[dict], batch: list[tupl
     return f"""You screen prior-art candidates for a patent search. For EACH document decide whether
 reading it in full would be worth an examiner's time for the invention below — an abstract
 cannot prove several elements, so do not penalise short or old records; ask whether the
-document plausibly discloses or teaches toward ANY element. Then list the element ids it
+document plausibly discloses or teaches toward ANY element, in ANY field (examiners cite
+across fields: a software method can anticipate a step of a mechanical system and vice versa).
+When in doubt, keep it: a wrong keep costs one read, a wrong drop loses the reference. Drop
+only when the document clearly concerns a different problem. Then list the element ids it
 appears to touch (may be empty) and give a reason of at most 15 words.
 
 CANDIDATE INVENTIONS:
@@ -143,6 +146,10 @@ async def stage2_llm(candidates: list[dict], elements: list[dict], docs: list[di
     kept = []
     for i in idxs:
         ok, els, why = verdict.get(i, (False, [], "no verdict returned"))
+        if not ok and set(docs[i].get("sources") or []) & GRAPH_SOURCES:
+            # graph-selected candidates are not dropped on an abstract (h1h H1-01: the screen
+            # dropped an examiner-cited reference as "software-based, not physical")
+            ok, why = True, (why + " [kept: graph source]").strip()
         docs[i]["prune_worth_reading"] = ok
         docs[i]["prune_elements"] = els
         docs[i]["prune_reason"] = why
