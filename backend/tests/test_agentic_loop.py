@@ -165,6 +165,7 @@ def test_expand_light_uses_narrow_lookup_beyond_the_head(monkeypatch):
 
 def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
     monkeypatch.setattr(L, "LOOP_MODE", "wide")
+    monkeypatch.setenv("LOOP_REACT", "0")          # template mode; the ReAct loop has its own test
     state = {"summary": "s", "date_cutoff": "20110202", "extraction": {"candidate_inventions": [
         {"id": "inv1", "level": "core", "cpc_pred": ["A61K31/00"], "elements": [
             {"id": "inv1.e0", "text": "A method of inhibiting prostate cancer cell proliferation", "facets": {"thing": ["cancer treatment", "cell proliferation"]}},
@@ -240,3 +241,46 @@ def test_similar_neighbours_ranks_shared_neighbours_and_filters_dates(monkeypatc
     out, info = asyncio.run(E.similar_neighbours(["S1", "S2"], set(), before="20110101"))
     assert [c.pub_num for c in out][0] == "N1" and "N3" not in {c.pub_num for c in out}
     assert info["similar_total"] == 3 and info["by_seed"] == {"S1": ["N1", "N2"], "S2": ["N1"]}
+
+
+def test_wide_mode_react_drives_the_queries(monkeypatch):
+    monkeypatch.setattr(L, "LOOP_MODE", "wide")
+    monkeypatch.setenv("LOOP_REACT", "1")
+    state = {"summary": "s", "date_cutoff": "20110202", "extraction": {"candidate_inventions": [
+        {"id": "inv1", "level": "core", "cpc_pred": ["H04N7/15"], "elements": [
+            {"id": "inv1.e0", "text": "A videoconferencing system", "facets": {"thing": ["video conferencing"]}},
+            {"id": "inv1.e1", "text": "a motorized turntable", "facets": {"thing": ["motorized turntable"]}}]}]}}
+
+    async def fake_facets(els, summary):
+        return {e["id"]: {"named": [], "thing": [], "place": [], "apparatus": []} for e in els}
+    monkeypatch.setattr("app.llm.facet_elements", fake_facets)
+
+    async def fake_react(elements, broad, groups, search, budget_left, event=None, call=None, max_steps=10):
+        hits, total, chan = await search("(motorized turntable) (video conferencing) CPC=H04N7/low")
+        return [{"n": 1, "kind": "react", "query": "(motorized turntable) (video conferencing) CPC=H04N7/low", "observation": "o", "decision": "d",
+                 "channel": chan, "total": total, "hits": len(hits), "returned": len(hits), "new": len(hits), "pubs": [c.pub_num for c in hits],
+                 "new_pubs": [], "facets_used": {"specific": ["motorized turntable"], "broad": broad, "cpc": ["H04N7"]}, "elements": ["inv1.e1"],
+                 "top": [], "_hits": hits}]
+    monkeypatch.setattr(L, "run_react", fake_react)
+
+    async def fake_gp(query, num=20, page=0, before=None):
+        L.gp.last_total[query] = 7
+        return [_cand("US1", "Teleconferencing robot")], None
+    monkeypatch.setattr(L.gp, "search", fake_gp)
+    monkeypatch.setattr(L.gp, "is_blocked", lambda: False)
+
+    async def fake_expand(seeds, known, max_cited=200, before=None, light=False, forward=False):
+        return [], {"cpc_subclasses": {}, "seeds_after_cutoff": []}
+    monkeypatch.setattr(L, "expand", fake_expand)
+
+    async def fake_similar(seeds, known, before=None, **kw):
+        return [], {}
+    monkeypatch.setattr(L, "similar_neighbours", fake_similar)
+
+    async def fake_neigh(*a, **k):
+        return [], {"n": 0}
+    monkeypatch.setattr(L, "paper_neighbourhood", fake_neigh)
+    cands, stats = asyncio.run(L.run_loop(state, lambda: 0, lambda: False, lambda k, m, p=None: None))
+    q = stats["rounds"][0]["queries"][0]
+    assert q["kind"] == "react" and q["observation"] == "o" and q["pubs"] == ["US1"] and q["candidate"] == "inv1"
+    assert "US1" in {c.pub_num for c in cands}

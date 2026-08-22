@@ -34,7 +34,7 @@ MODEL = os.getenv("LLM_MODEL", "gemini-2.5-pro")
 MAX_TOKENS = 8192
 
 # Per-stage override: LLM_MODEL_<STAGE> (extract / screen / eval / idca); unset → MODEL.
-STAGES = ("extract", "screen", "eval", "idca")
+STAGES = ("extract", "screen", "eval", "idca", "search")
 
 
 # J5 gates (outputs/eval_status/J5.md, 2026-09-18): the screen stage keeps the same gold with
@@ -2030,6 +2030,46 @@ async def explain_obviousness(adjudication: dict, chart: dict, invention_summary
         return (await call_llm(system, prompt)).strip()   # default max_tokens: thinking tokens count against it on 2.5-pro
     except Exception:
         return ""
+
+
+SEARCH_REACT_STEP_PROMPT = prompts.register_default("search.react_step", """You are running a prior-art search on Google Patents for the invention below, one query at a
+time, like an examiner at the search box. Each query has the FIXED shape
+    (specific items OR ...) AND (neighbourhood terms OR ...) [CPC=<main group>/low]
+The neighbourhood group (8-15 terms: domain words, patent-vocabulary hypernyms, terms from the
+paper's citation neighbourhood) defines the ~100,000-document field; the specific group (2-4
+items of ONE or TWO elements: distinctive nouns, names, parameters, structure names) narrows it.
+Google returns only the top 100 of the field, so what matters is which words the target
+documents actually use.
+
+ELEMENTS (the limitations you are searching prior art for):
+{elements}
+
+NEIGHBOURHOOD TERMS available: {broad}
+PREDICTED CPC MAIN GROUPS: {cpc_groups}
+ELEMENTS STILL WITHOUT CANDIDATES: {uncovered}
+VOCABULARY LEARNED FROM RESULTS SO FAR: {learned}
+QUERIES LEFT: {budget_left}
+
+HISTORY (each step: what was asked, the total on Google, and the top titles that came back):
+{history}
+
+Decide the next query. Rules of thumb:
+- total > 100,000 or titles all off-topic → the neighbourhood group is too wide or the specific
+  items too generic: add a limiting item, swap a hypernym for a narrower term, or add the CPC group.
+- total < 200 → too narrow: drop an item, or use a synonym / stemmed form; never repeat a query.
+- READ the returned titles: when they use patent vocabulary for what the paper calls something
+  else (e.g. the paper says "kinetic proxy", patents say "teleconferencing robot",
+  "swiveling monitor"), put those words in `learned_terms` and use them next.
+- Mark an element covered when several returned titles plausibly disclose it; then move to an
+  element that still has no candidates. Prefer elements with distinctive items.
+- Use the CPC group on at most every other query; alternate groups when several are predicted.
+- Stop only when every element has candidates or nothing sensible is left to try.
+
+Output JSON: {{"observation": "<=40 words on what the last results showed",
+ "decision": "<=30 words on why this next query",
+ "covered_elements": ["<element id>", ...], "learned_terms": ["..."],
+ "next": {{"target_elements": ["<element id>"], "specific": ["2-4 items"], "broad": ["8-15 terms"], "cpc_group": "H04N7 or empty"}},
+ "stop": false}}""")
 
 
 SEARCH_FACETS_PROMPT = prompts.register_default("search.facets", """For EACH element below, give five facets of search terms:
