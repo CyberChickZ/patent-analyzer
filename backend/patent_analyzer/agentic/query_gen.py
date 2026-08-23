@@ -19,10 +19,16 @@ MODES = ("strict", "loose", "core")
 FORMS_PER_FACET = 8
 
 
+def _clean(t: str) -> str:
+    # a hyphen inside a word is read as Google's minus/NOT ("pan-tilt" → pan NOT tilt):
+    # ReAct h1i H1-01 steps 2/3 returned 0, the same queries with "pan tilt" 124k/129k
+    return " ".join(str(t).replace("-", " ").split()).strip().strip('"')
+
+
 def _group(terms: list[str], cap: int = FORMS_PER_FACET) -> str:
     ts = []
     for t in terms:
-        t = " ".join(str(t).split()).strip().strip('"')
+        t = _clean(t)
         if t and t not in ts:
             ts.append(t)
     ts = ts[:cap]
@@ -54,7 +60,7 @@ def _named_group(terms: list[str], cap: int = 6) -> str:
     "phrase" (indocyanine green), acronyms a bare word."""
     ts = []
     for t in terms:
-        t = " ".join(str(t).split()).strip().strip('"')
+        t = _clean(t)
         if t and t not in ts:
             ts.append(t)
     ts = ts[:cap]
