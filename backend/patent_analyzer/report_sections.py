@@ -107,8 +107,21 @@ def loop_html(search_stats: dict | None) -> str:
     if q:
         out.append('<div class="sec-note">SerpAPI keys this month: ' +
                    ", ".join(f'{_e(k["key"])} {k["used"]}/{k["cap"]}' for k in q) + "</div>")
+    out.append(lens_attribution_html(search_stats))
     out.append("</div>")
     return "\n".join(out)
+
+
+def lens_attribution_html(search_stats: dict | None) -> str:
+    """Lens trial terms: results sourced from Lens carry "Data Sourced from The Lens"
+    with a link and the logo (Lens.org attribution requirement, trial to 2026-10-02)."""
+    used = any((r.get("lens") or {}).get("bridge_patents") or (r.get("lens") or {}).get("search_calls")
+               for r in (search_stats or {}).get("loop_rounds") or [])
+    if not used:
+        return ""
+    return ('<div class="sec-note" style="margin-top:.5rem"><a href="https://www.lens.org" target="_blank" rel="noopener">'
+            '<img src="https://about.lens.org/wp-content/uploads/2021/04/Lens-logo-tagline.png" alt="The Lens" style="height:18px;vertical-align:middle;margin-right:.35rem">'
+            'Data Sourced from The Lens</a> — paper→patent bridge and CPC-scoped patent searches (lens_bridge / lens_search sources).</div>')
 
 
 _KIND_NOTE = {

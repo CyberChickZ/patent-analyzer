@@ -222,3 +222,11 @@ def test_report_node_builds_chart_and_calls_the_explanation_only_for_103(monkeyp
     state.update(scoring_report=[d("US-A", E)], eval_stats={"adjudication": adj}, output_dir=str(tmp_path / "b"))
     asyncio.run(report_mod.report_node(state))
     assert calls == [] and json.loads((tmp_path / "b" / "results.json").read_text())["adjudication"]["obviousness_explanation"] == ""
+
+
+def test_lens_attribution_only_when_lens_was_used():
+    from patent_analyzer.report_sections import lens_attribution_html
+    h = lens_attribution_html({"loop_rounds": [{"lens": {"bridge_patents": 800, "search_calls": 5}}]})
+    assert "Data Sourced from The Lens" in h and 'href="https://www.lens.org"' in h and "<img" in h
+    assert lens_attribution_html({"loop_rounds": [{"lens": {"bridge_patents": 0, "search_calls": 0}}]}) == ""
+    assert lens_attribution_html(None) == ""
