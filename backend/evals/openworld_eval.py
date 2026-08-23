@@ -365,7 +365,8 @@ async def main():
     from patent_analyzer.recall import serpapi as sp
     sp.sync_account()
     print("serpapi keys:", [f"{q['key']} used {q['used']}/{q['cap']}" for q in sp.quota_status()] or "NONE")
-    todo = [(k, g) for k, g in gold.items() if g["gold_families"]][:args.limit]
+    only = {k for k in os.environ.get("E4_KEYS", "").split(",") if k}
+    todo = [(k, g) for k, g in gold.items() if g["gold_families"] and (not only or k in only)][:args.limit]
     sem = asyncio.Semaphore(args.concurrency)
 
     async def one(k, g):
