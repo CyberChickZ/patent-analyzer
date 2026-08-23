@@ -33,8 +33,8 @@ GC_PROJECT = os.getenv("GC_PROJECT", "aime-hello-world")
 MODEL = os.getenv("LLM_MODEL", "gemini-2.5-pro")
 MAX_TOKENS = 8192
 
-# Per-stage override: LLM_MODEL_<STAGE> (extract / screen / eval / idca); unset → MODEL.
-STAGES = ("extract", "screen", "eval", "idca", "search")
+# Per-stage override: LLM_MODEL_<STAGE> (extract / screen / eval / idca / search / draft); unset → MODEL.
+STAGES = ("extract", "screen", "eval", "idca", "search", "draft")
 
 
 # J5 gates (outputs/eval_status/J5.md, 2026-09-18): the screen stage keeps the same gold with
@@ -2386,3 +2386,227 @@ and kind for each. Do not rewrite, merge, or split them.
             "dependent_hints": [str(h).strip() for h in (raw.get("dependent_hints") or []) if str(h).strip()][:4],
         })
     return {"candidate_inventions": out}
+
+
+# ════════════════════════════════════════════════════════════
+# Draft claims (Step 6): wording only — content comes from the elements
+# ════════════════════════════════════════════════════════════
+
+DRAFT_CLAIMS_PROMPT = prompts.register_default("draft.claims", """════ TASK ════
+You are polishing the wording of an independent claim that was ASSEMBLED BY RULE from the grounded
+elements of the DOCUMENT below. You may reword; you may NOT add, drop, merge, split or reorder
+limitations, and you may not change their technical meaning. One output limitation per input
+limitation, same order, same lid. Use the document's own terms. Each limitation is one clause with
+no semicolon inside it and no "wherein" inside a step/structure limitation (a condition limitation
+may start with "wherein"). Introduce every noun with "a/an" the first time and refer back with "the".
+No "such as", "for example", "preferably", "about", "substantially", "efficient", "improved".
+
+INDEPENDENT CLAIM — {primary_form} form (rule wording)
+{primary_lines}
+
+MIRROR — {mirror_form} form (rule wording; make it a proper {mirror_form} claim: steps become
+structure "configured to …" or structure becomes steps, same limitations, same order, same lids)
+{mirror_lines}
+
+CANDIDATE DEPENDENT LIMITATIONS (from the document; reword in claim language; for every one that has
+no evidence_quote yet, COPY 10-40 words verbatim from the DOCUMENT that support it — if you cannot,
+leave evidence_quote empty)
+{pool_lines}
+
+REFINEMENT TARGETS (0-3 narrower statements of these elements taken from the passage around their
+evidence: a numeric value, a concrete structure, an ordering. Each must COPY its own verbatim
+evidence_quote from the passage. Skip when the passage adds nothing.)
+{refine_lines}
+
+COVERAGE (which evaluated references disclose which elements; context only)
+{coverage_lines}
+
+RULES
+- COPY every evidence_quote verbatim. DO NOT paraphrase, DO NOT stitch sentences.
+- Do not invent limitations that are not in the document.
+
+Output strictly this JSON, no preamble:
+{{"primary": [{{"lid": "c1.l1", "text": "..."}}],
+  "mirror": [{{"lid": "m.l1", "text": "..."}}],
+  "pool": [{{"pid": "hint0", "text": "...", "evidence_quote": "..."}}],
+  "refinements": [{{"element_id": "inv1.e3", "text": "...", "evidence_quote": "..."}}]}}
+
+════ DOCUMENT ════
+```
+{document}
+```""")
+
+
+def _lines(items: list[dict], key: str, extra: str = "") -> str:
+    out = []
+    for it in items:
+        line = f"  {it.get(key, '')}: {it.get('text', '')}"
+        if extra and it.get(extra):
+            line += f"\n      {extra}: {it[extra]}"
+        out.append(line)
+    return "\n".join(out) or "  (none)"
+
+
+async def draft_claims(primary_form: str, primary: list[dict], mirror: list[dict], pool: list[dict],
+                       refine_targets: list[dict], coverage_lines: list[str], document_text: str) -> dict:
+    """ONE call: reworded limitations for both forms (count / order fixed by
+    lid), claim-language texts + verbatim quotes for the pool, 0-3 refinements.
+    Returns {"primary": {lid: text}, "mirror": {lid: text}, "pool": {pid: {text, evidence_quote}},
+    "refinements": [{element_id, text, evidence_quote}], "error"?}."""
+    mirror_form = "system" if primary_form == "method" else "method"
+    refine_lines = "\n".join(f"  {t['element_id']}: {t['text']}\n      passage: {t.get('passage', '')[:1400]}"
+                              for t in refine_targets) or "  (none)"
+    prompt = prompts.render("draft.claims", primary_form=primary_form, mirror_form=mirror_form,
+                            primary_lines=_lines(primary, "lid"), mirror_lines=_lines(mirror, "lid"),
+                            pool_lines=_lines(pool, "pid", "evidence_quote"), refine_lines=refine_lines,
+                            coverage_lines="\n".join(f"  {c}" for c in coverage_lines) or "  (no evaluated references)",
+                            document=(document_text or "")[:_EXTRACTION_DOC_CAP])
+    system = "You are a patent attorney polishing claim wording. Output JSON only."
+    out = {"primary": {}, "mirror": {}, "pool": {}, "refinements": []}
+    try:
+        resp = await call_llm(system, prompt, max_tokens=12288, thinking_budget=2048, model=stage_model("draft"))
+    except Exception as e:
+        out["error"] = f"draft.claims call failed: {type(e).__name__}: {str(e)[:160]}"
+        return out
+    data = _extraction_json(resp)
+    if not data:
+        out["error"] = "draft.claims response could not be parsed"
+        return out
+    for key in ("primary", "mirror"):
+        for it in data.get(key) or []:
+            if isinstance(it, dict) and it.get("lid") and str(it.get("text") or "").strip():
+                out[key][str(it["lid"]).strip()] = " ".join(str(it["text"]).split())
+    for it in data.get("pool") or []:
+        if isinstance(it, dict) and it.get("pid"):
+            out["pool"][str(it["pid"]).strip()] = {"text": " ".join(str(it.get("text") or "").split()),
+                                                    "evidence_quote": " ".join(str(it.get("evidence_quote") or "").split())}
+    for it in data.get("refinements") or []:
+        if len(out["refinements"]) >= 3:
+            break
+        if isinstance(it, dict) and str(it.get("text") or "").strip():
+            out["refinements"].append({"element_id": str(it.get("element_id") or "").strip(),
+                                       "text": " ".join(str(it["text"]).split()),
+                                       "evidence_quote": " ".join(str(it.get("evidence_quote") or "").split())})
+    return out
+
+
+DRAFT_REWORD_PROMPT = prompts.register_default("draft.reword", """════ TASK ════
+Each claim limitation below was flagged by a rule check under 35 U.S.C. 112(b). Rewrite ONLY the
+flagged limitations so the flag no longer applies. Keep the technical meaning, keep one limitation
+per lid (no semicolons, do not split, do not merge, do not add limitations), use the terms of the
+evidence quote.
+
+How to fix each category:
+- antecedent_basis: introduce the noun with "a/an" the first time it appears, or refer back to the
+  exact phrase introduced earlier ("the first lever", not "the lever" when two levers exist).
+- relative_term: remove the term of degree, or replace it with the standard the evidence quote
+  gives (a number, a unit, a comparison basis). Do not invent a number.
+- exemplary_phrasing: remove "such as / for example / preferably / e.g." and the examples.
+- functional_claiming: replace the generic placeholder (module / unit / means / device …) with the
+  concrete structure named in the evidence quote, or state the act as a step.
+
+FLAGGED LIMITATIONS
+{flag_lines}
+
+Output strictly this JSON, no preamble:
+{{"limitations": [{{"lid": "c1.l2", "text": "..."}}]}}""")
+
+
+async def reword_limitations(flagged: list[dict]) -> dict[str, str]:
+    """ONE call: {lid: new text} for the flagged limitations ({lid, text, flags[{category, span, note}], quotes[]})."""
+    if not flagged:
+        return {}
+    lines = []
+    for f in flagged:
+        lines.append(f"  {f['lid']}: {f['text']}")
+        for fl in f.get("flags") or []:
+            lines.append(f"      flag: {fl.get('category')} — '{fl.get('span')}' ({fl.get('note', '')})")
+        for q in (f.get("quotes") or [])[:2]:
+            lines.append(f"      evidence: \"{q[:300]}\"")
+    prompt = prompts.render("draft.reword", flag_lines="\n".join(lines))
+    system = "You are a patent attorney fixing claim wording under 35 U.S.C. 112(b). Output JSON only."
+    try:
+        resp = await call_llm(system, prompt, max_tokens=4096, thinking_budget=1024, model=stage_model("draft"))
+        data = _extraction_json(resp) or {}
+    except Exception:
+        return {}
+    out = {}
+    for it in data.get("limitations") or []:
+        if isinstance(it, dict) and it.get("lid") and str(it.get("text") or "").strip():
+            out[str(it["lid"]).strip()] = " ".join(str(it["text"]).split())
+    return out
+
+
+DRAFT_DEFINITENESS_PROMPT = prompts.register_default("draft.definiteness", """Examine each patent claim below with respect to definiteness (35 U.S.C. 112(b)).
+
+### Guidelines
+
+- Carefully dissect the claim and its features and search for common patterns that cause indefiniteness.
+- Think step by step and reason about potential issues! Only the final verdict counts.
+- Be very thorough and list all potential issues you can find!
+- Ultimately, estimate the likelihood of the claim being rejected due to indefiniteness. Note that a single issue renders the entire claim indefinite.
+- Completely ignore all other aspects like novelty or non-obviousness, focus entirely on indefiniteness.
+- A dependent claim is read together with the claims it depends on (given below); do not report as missing antecedent a term its parent introduces.
+
+### Categories of Indefiniteness
+
+{indefiniteness_categories}
+
+### Description (the specification the claims must find support in; may be truncated)
+
+{description}
+
+### Claims
+
+{claim_lines}
+
+### Output
+
+Put your examination into JSON with this schema, one entry per claim:
+{{"claims": [{{"no": 1, "likelihood_indefinite": "<expression>", "indefiniteness_reasons": [
+    {{"category": "<one of the categories above>", "reason_text": "...", "claim_recitations": ["exact words from the claim"], "likelihood": "<expression>"}}]}}]}}
+
+In `likelihood_indefinite`, indicate how likely the claim is to be rejected for indefiniteness by the USPTO. Use one of these expressions verbatim:
+{likelihood_expressions}
+Keep `claim_recitations` as specific and narrow as possible.""")
+
+
+async def definiteness_advisory(claims: list[dict], description: str, thinking_budget: int = 2048) -> dict:
+    """ONE call over a claim set (PEDANTIC examination prompt, categories and
+    likelihood expressions; the get_claim / search_description tools replaced
+    by the parents and the description inline). claims: [{no, text, depends_on}].
+    Returns {no: {"p_indefinite", "likelihood", "reasons": [{category, reason_text, claim_recitations, p}]}}."""
+    from patent_analyzer.draft.pedantic_categories import LIKELIHOOD, format_categories, likelihood_p, normalize_category
+    if not claims:
+        return {}
+    by_no = {c.get("no"): c for c in claims}
+    lines = []
+    for c in claims:
+        dep = c.get("depends_on")
+        head = f"Claim {c.get('no')}" + (f" (depends on claim {dep}; parent text: {(by_no.get(dep) or {}).get('text', '')[:1200]})" if dep else "")
+        lines.append(f"{head}:\n{c.get('text', '')}\n")
+    prompt = prompts.render("draft.definiteness", indefiniteness_categories=format_categories(), description=(description or "")[:60000],
+                            claim_lines="\n".join(lines), likelihood_expressions="\n".join(f"- {k}" for k in LIKELIHOOD))
+    system = "You are a USPTO examiner examining claims for definiteness under 35 U.S.C. 112(b). Output JSON only."
+    try:
+        resp = await call_llm(system, prompt, max_tokens=8192, thinking_budget=thinking_budget, model=stage_model("draft"))
+        data = _extraction_json(resp) or {}
+    except Exception as e:
+        return {"_error": f"{type(e).__name__}: {str(e)[:160]}"}
+    out = {}
+    for it in data.get("claims") or []:
+        if not isinstance(it, dict):
+            continue
+        try:
+            no = int(it.get("no"))
+        except (TypeError, ValueError):
+            continue
+        reasons = []
+        for r in it.get("indefiniteness_reasons") or []:
+            if isinstance(r, dict):
+                reasons.append({"category": normalize_category(r.get("category")), "reason_text": str(r.get("reason_text") or "")[:600],
+                                "claim_recitations": [str(x)[:200] for x in (r.get("claim_recitations") or [])][:5],
+                                "p": likelihood_p(r.get("likelihood") or "")})
+        out[no] = {"likelihood": str(it.get("likelihood_indefinite") or ""), "p_indefinite": likelihood_p(it.get("likelihood_indefinite") or ""),
+                   "reasons": reasons}
+    return out
