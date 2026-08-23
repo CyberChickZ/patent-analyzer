@@ -29,8 +29,8 @@ def test_pause_persist_new_process_resume(tmp_path):
     ext = snap.values["extraction"]
     ext["candidate_inventions"][0]["elements"][0]["text"] = "A method, restored"
     out = asyncio.run(g2.ainvoke(Command(resume={"type": "edit", "args": {"extraction": ext}}), cfg))
-    assert calls2 == ["search", "evaluate", "report"]        # nothing before the gate re-ran
-    assert out["overall_summary"] == "elements=A method, restored*"
+    assert calls2 == ["search", "evaluate", "draft", "report"]        # nothing before the gate re-ran
+    assert out["overall_summary"] == "elements=A method, restored*|draft=x"
     hist = list(g2.get_state_history(cfg))
     assert any(s.next == ("ssr",) for s in hist)              # replay point for "rerun this phase" survives too
 
