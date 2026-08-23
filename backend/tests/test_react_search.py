@@ -57,3 +57,18 @@ def test_react_stops_when_budget_is_zero():
     async def fake_search(q):
         return [], 0, "none"
     assert asyncio.run(run_react(ELS, ["x"], [], fake_search, lambda: 0, call=fake_call)) == []
+
+
+def test_react_tries_every_predicted_group_before_reusing_one():
+    async def fake_call(*a, **k):
+        return json.dumps({"observation": "o", "decision": "d", "covered_elements": [], "learned_terms": [],
+                           "next": {"target_elements": ["inv1.e1"], "specific": ["motorized turntable"],
+                                    "broad": ["video conferencing"], "cpc_group": "H04N7"}, "stop": False})
+    budget = {"n": 3}
+
+    async def fake_search(q):
+        budget["n"] -= 1
+        return [], 5, "serpapi_patents"
+    steps = asyncio.run(run_react(ELS, ["video conferencing"], ["H04N7", "G01S5", "G05D1"], fake_search, lambda: budget["n"], call=fake_call))
+    assert [s["cpc_group"] for s in steps] == ["H04N7", "G01S5", "G05D1"]
+    assert [s["cpc_forced"] for s in steps] == [None, "G01S5", "G05D1"]

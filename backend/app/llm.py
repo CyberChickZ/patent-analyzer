@@ -2062,7 +2062,9 @@ Decide the next query. Rules of thumb:
   "swiveling monitor"), put those words in `learned_terms` and use them next.
 - Mark an element covered when several returned titles plausibly disclose it; then move to an
   element that still has no candidates. Prefer elements with distinctive items.
-- Use the CPC group on at most every other query; alternate groups when several are predicted.
+- Every predicted CPC main group must be tried at least once before any group is reused —
+  examiners search "all analogous arts ... regardless of where the claimed invention is
+  classified" (MPEP 904.01(c)); the neighbouring groups are where cross-field references sit.
 - Never end with queries left: once every element has candidates, spend the remaining queries
   on PAIRS of elements phrased in the learned patent vocabulary (the examiner's growing synonym
   list), and on the other predicted CPC groups. Stop only when nothing sensible is left to try.

@@ -118,6 +118,15 @@ async def run_react(elements: list[dict], broad_terms: list[str], cpc_groups: li
         specific = [" ".join(str(t).lower().split()) for t in (nx.get("specific") or []) if str(t).strip()][:4]
         broad = [" ".join(str(t).lower().split()) for t in (nx.get("broad") or []) if str(t).strip()][:15] or broad_terms[:12]
         cpc = str(nx.get("cpc_group") or "").split("/")[0] or None
+        # MPEP 904.01(c): "all analogous arts must be searched regardless of where the claimed
+        # invention is classified" — every predicted group is tried once before any is reused.
+        # h1i H1-02: the facet call predicted A61B6 / G01S5 / G05D1 (three of the six gold
+        # families' groups) but the model kept to A61N5 / G06T7 / G16H40 for all nine steps.
+        used = {s.get("cpc_group") for s in steps if s.get("cpc_group")}
+        unused = [g for g in cpc_groups if g not in used]
+        forced = None
+        if unused and (cpc in used or not cpc) and budget_left() <= len(unused):
+            forced, cpc = unused[0], unused[0]
         query = compose(specific, broad, cpc)
         if not query or any(s.get("query") == query for s in steps):
             # a repeated or empty query: spend the step on the broad group alone with a different CPC
@@ -129,7 +138,7 @@ async def run_react(elements: list[dict], broad_terms: list[str], cpc_groups: li
         new = [p for p in pubs if p not in seen_pubs]
         seen_pubs.update(pubs)
         row = {"n": n, "kind": "react", "query": query, "target_elements": nx.get("target_elements") or [], "specific": specific,
-               "broad": broad, "cpc_group": cpc, "observation": d.get("observation"), "decision": d.get("decision"),
+               "broad": broad, "cpc_group": cpc, "cpc_forced": forced, "observation": d.get("observation"), "decision": d.get("decision"),
                "channel": chan, "total": total, "hits": len(hits), "returned": len(hits), "new": len(new), "pubs": pubs, "new_pubs": new,
                "papers": sum(1 for c in hits if c.match_type != "Patent"),
                "facets_used": {"specific": specific, "broad": broad, **({"cpc": [cpc]} if cpc else {})},
