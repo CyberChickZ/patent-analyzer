@@ -110,7 +110,7 @@ async def run_react(elements: list[dict], broad_terms: list[str], cpc_groups: li
         for eid in d.get("covered_elements") or []:
             if eid in uncovered:
                 uncovered.remove(eid)
-        if d.get("stop") and steps:
+        if d.get("stop") and steps and (budget_left() <= 1 or not (d.get("next") or {}).get("specific")):
             steps.append({"n": n, "observation": d.get("observation"), "decision": d.get("decision"), "query": "", "kind": "react:stop",
                           "total": None, "returned": 0, "hits": 0, "new": 0, "pubs": [], "new_pubs": [], "channel": "none", "top": []})
             break
@@ -140,6 +140,6 @@ async def run_react(elements: list[dict], broad_terms: list[str], cpc_groups: li
         if event:
             event("react_step", f"step {n}: {d.get('decision', '')[:120]} → total {total}, new {len(new)}",
                   {k: v for k, v in row.items() if k not in ("_hits", "pubs", "new_pubs", "top")})
-        if not uncovered and n >= 3:
-            break
+        # every element covered is not the end: the budget is spent on element pairs in the
+        # learned vocabulary (h1i H1-01 stopped at 6/10 with 2 of 5 gold found)
     return steps

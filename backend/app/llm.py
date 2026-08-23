@@ -2063,7 +2063,9 @@ Decide the next query. Rules of thumb:
 - Mark an element covered when several returned titles plausibly disclose it; then move to an
   element that still has no candidates. Prefer elements with distinctive items.
 - Use the CPC group on at most every other query; alternate groups when several are predicted.
-- Stop only when every element has candidates or nothing sensible is left to try.
+- Never end with queries left: once every element has candidates, spend the remaining queries
+  on PAIRS of elements phrased in the learned patent vocabulary (the examiner's growing synonym
+  list), and on the other predicted CPC groups. Stop only when nothing sensible is left to try.
 
 Output JSON: {{"observation": "<=40 words on what the last results showed",
  "decision": "<=30 words on why this next query",
