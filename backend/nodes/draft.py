@@ -368,6 +368,8 @@ async def draft_node(state: GraphState) -> dict:
             draft["search_calls"] = {"gp": rc.get("gp_calls", 0), "serpapi": rc.get("serp_calls", 0)}
             if rc.get("strategy"):
                 draft["strategy"] = rc["strategy"]
+            if rc.get("reason"):
+                draft["avoidance"]["recheck_reason"] = rc["reason"]
             _event("draft_recheck", f"Re-check: {len(rc.get('queries') or [])} queries, {len(rc.get('new_docs') or [])} new docs, "
                                     f"{rc.get('evaluated', 0)} evaluated; strategy {draft['strategy']}")
         except Exception as e:
