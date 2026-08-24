@@ -37,7 +37,8 @@ async def _determination(state: GraphState, checklist: list, scoring_report: lis
         return adj or {}
     from patent_analyzer.adjudicate import claim_chart
     adj = dict(adj)
-    adj["claim_chart"] = claim_chart(adj, checklist, scoring_report)
+    if not adj.get("claim_chart"):            # the draft node already built it from the same evidence
+        adj["claim_chart"] = claim_chart(adj, checklist, scoring_report)
     adj["obviousness_explanation"] = ""
     if adj.get("label") == "103":
         try:
@@ -75,6 +76,7 @@ async def report_node(state: GraphState) -> dict:
     checklist = state.get("checklist", [])
 
     adjudication = await _determination(state, checklist, scoring_report, _event)
+    draft = state.get("draft_claims") or {}
 
     results = {
         "job_id": job_id,
@@ -110,6 +112,7 @@ async def report_node(state: GraphState) -> dict:
         "user_edits": state.get("user_edits", []),           # reviewer changes at the phase gates
         "prompt_versions": {**_used_prompt_versions(), **(state.get("prompt_versions") or {})},
         "adjudication": adjudication,
+        "draft_claims": draft,
         "evaluation": {
             "scoring_report": scoring_report,
             "summary": state.get("overall_summary", ""),
@@ -137,12 +140,12 @@ async def report_node(state: GraphState) -> dict:
     from patent_analyzer.report_sections import inject_html, inject_md
     # generate_html/markdown render the determination themselves (top of the report); inject_* add the other sections
     html = inject_html(generate_html(results), results["extraction"], results["search"]["summary"],
-                       scoring_report, checklist)
+                       scoring_report, checklist, draft=draft)
     (job_dir / "report.html").write_text(html, encoding="utf-8")
     _save_to_gcs(job_id, "report.html", html, "text/html")
 
     md = inject_md(generate_markdown(results), results["extraction"], results["search"]["summary"],
-                   scoring_report, checklist)
+                   scoring_report, checklist, draft=draft)
     (job_dir / "report.md").write_text(md, encoding="utf-8")
     _save_to_gcs(job_id, "report.md", md, "text/markdown")
 

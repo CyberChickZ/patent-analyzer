@@ -267,6 +267,218 @@ def quote_matrix_md(scoring_report: list[dict] | None, checklist: list[dict] | N
     return lines
 
 
+# ── 3b. draft claims (nodes/draft.py output; for attorney review) ──
+
+_DRAFT_NOTE = ("Drafted from the grounded elements and the evidence matrix above. Each limitation cites the passage of your "
+               "document it comes from and which evaluated references disclose it. This is a starting point for a patent "
+               "attorney; it does not predict grant.")
+_ORIGIN_ICON = {"element": "●", "dependent_hint": "◆", "component_element": "◇", "refinement": "▹", "distinguishing": "★"}
+_STRATEGY_TEXT = {"as_is": "Independent claims as extracted",
+                  "narrowed": "Independent claims narrowed by a limitation none of the charted references discloses",
+                  "unresolved": "Unresolved — every candidate limitation is disclosed by the charted references",
+                  "no_prior_art": "No evaluated prior art — claims drafted, coverage unknown",
+                  "no_elements": "No grounded elements to draft from"}
+
+
+def _cov_badge(l: dict) -> str:
+    cov = l.get("coverage") or {}
+    rc = cov.get("recheck") or {}
+    if cov.get("status") == "unknown" or not cov.get("checked_against"):
+        badge = '<span class="badge" style="background:#f1f5f9;color:#475569">unknown</span>'
+    elif cov.get("covered_by"):
+        badge = f'<span class="badge" style="background:#e2e8f0;color:#334155">disclosed by {_e(", ".join(cov["covered_by"]))}</span>'
+    else:
+        badge = '<span class="badge" style="background:#dcfce7;color:#166534">not disclosed by charted refs</span>'
+    if rc.get("queried"):
+        if rc.get("covered_by_new"):
+            badge += f' <span class="badge" style="background:#fee2e2;color:#991b1b">re-check: disclosed by {_e(", ".join(rc["covered_by_new"]))}</span>'
+        else:
+            badge += f' <span class="badge" style="background:#e0f2fe;color:#075985">re-check: {rc.get("new_docs", 0)} new docs, none disclose</span>'
+    return badge
+
+
+def _footnotes(draft: dict) -> tuple[dict[str, int], list[tuple[int, str, dict]]]:
+    """lid -> footnote number; [(n, lid, basis)] in claim order."""
+    idx, rows = {}, []
+    for c in draft.get("claims") or []:
+        for l in c.get("limitations") or []:
+            for b in l.get("basis") or []:
+                n = len(rows) + 1
+                idx.setdefault(l.get("lid"), n)
+                rows.append((n, l.get("lid", ""), b))
+    return idx, rows
+
+
+def _where(loc) -> str:
+    if not isinstance(loc, dict):
+        return ""
+    return ", ".join(f"{k} {loc[k]}" for k in ("section", "heading", "para", "source", "method") if loc.get(k) not in (None, "", []))
+
+
+def draft_html(draft: dict | None, extraction: dict | None = None) -> str:
+    if not draft or not draft.get("claims"):
+        if (draft or {}).get("strategy") == "no_elements":
+            return ('<div class="sec"><div class="sec-t">Draft Claims (for attorney review)</div>'
+                    '<div class="sec-b">No grounded elements were available to draft from.</div></div>')
+        return ""
+    strategy = draft.get("strategy", "")
+    av = draft.get("avoidance") or {}
+    fn, rows = _footnotes(draft)
+    out = ['<div class="sec draft-sec"><div class="sec-t">Draft Claims (for attorney review)</div>',
+           f'<div class="sec-note">{_e(_DRAFT_NOTE)}</div>']
+    # 1. strategy line
+    color = {"narrowed": ("#dcfce7", "#166534"), "unresolved": ("#fee2e2", "#991b1b"), "as_is": ("#e0f2fe", "#075985")}.get(strategy, ("#f1f5f9", "#475569"))
+    out.append(f'<div class="sec-b"><span class="badge" style="background:{color[0]};color:{color[1]}">{_e(strategy)}</span> '
+               f'<b>{_e(_STRATEGY_TEXT.get(strategy, strategy))}</b><br><span style="font-size:.85em">{_e(av.get("reason", ""))}'
+               + (f' <i>{_e(av.get("recheck_reason", ""))}</i>' if av.get("recheck_reason") else "") + '</span></div>')
+    # 2. claims
+    out.append('<div class="sec-b" style="font-family:Georgia,serif;line-height:1.55">')
+    for c in draft["claims"]:
+        edited = ' <span class="badge" style="background:#fef3c7;color:#92400e">edited by reviewer</span>' if c.get("edited_by_user") else ""
+        out.append(f'<div style="margin:.7rem 0"><b>{c.get("no")}.</b> {_e(c.get("preamble", ""))}{edited}')
+        lims = c.get("limitations") or []
+        for i, l in enumerate(lims):
+            icon = _ORIGIN_ICON["distinguishing"] if l.get("distinguishing") else _ORIGIN_ICON.get(l.get("origin", ""), "")
+            tail = ";" if i < len(lims) - 2 else ("; and" if i == len(lims) - 2 else ".")
+            n = fn.get(l.get("lid"))
+            flags = [f for f in l.get("flags") or [] if not f.get("fixed")]
+            red = ' style="background:#fee2e2"' if flags else ""
+            ed = ' <span class="badge" style="background:#fef3c7;color:#92400e">edited by reviewer</span>' if l.get("edited_by_user") else ""
+            out.append(f'<div style="margin-left:1.6rem"{red}><span title="{_e(l.get("origin", ""))}" style="color:var(--text2)">{icon}</span> '
+                       f'{_e(l.get("text", ""))}{tail}<sup>[{n}]</sup> {_cov_badge(l)}{ed}</div>')
+        if c.get("depends_on") is None and not lims:
+            out.append("</div>")
+        else:
+            out.append("</div>")
+    out.append('<div class="sec-note">● element · ◆ dependent hint · ◇ component element · ▹ refinement · ★ distinguishing (not disclosed by the '
+               'charted references). Superscripts refer to the basis table; "disclosed by" reflects the charted references and the re-check only.</div></div>')
+    # 3. basis footnotes
+    out.append('<details open style="margin:.5rem 0"><summary><b>Basis</b> — where each limitation comes from (verbatim)</summary>'
+               '<table class="tbl"><thead><tr><th>#</th><th>limitation</th><th>element</th><th>verbatim quote</th><th>where</th></tr></thead><tbody>')
+    for n, lid, b in rows:
+        out.append(f'<tr><td>{n}</td><td>{_e(lid)}</td><td>{_e(b.get("element_id", ""))}</td><td><q>{_e(b.get("evidence_quote", ""))}</q></td>'
+                   f'<td>{_e(_where(b.get("evidence_loc")))}</td></tr>')
+    out.append("</tbody></table></details>")
+    # 4. 112(b)
+    d = draft.get("definiteness") or {}
+    flags = d.get("flags") or []
+    out.append(f'<details {"open" if d.get("open_flags") else ""} style="margin:.5rem 0"><summary><b>112(b) self-check</b> — '
+               f'{len(flags)} rule flag(s), {len(d.get("open_flags") or [])} open after {d.get("passes", 0)} pass(es)</summary>')
+    if flags:
+        out.append('<table class="tbl"><thead><tr><th>claim.limitation</th><th>category</th><th>span</th><th>rule</th><th>fixed?</th><th>note</th></tr></thead><tbody>')
+        for f in flags:
+            st = "" if f.get("fixed") else ' style="background:#fee2e2"'
+            out.append(f'<tr{st}><td>{_e(f.get("lid", ""))}</td><td>{_e(f.get("category", ""))}</td><td>{_e(f.get("span", ""))}</td>'
+                       f'<td>{_e(f.get("rule", ""))}</td><td>{"yes" if f.get("fixed") else "open"}</td><td>{_e(f.get("note", ""))}</td></tr>')
+        out.append("</tbody></table>")
+    else:
+        out.append('<div class="sec-b">No rule flags (antecedent basis, relative terms, exemplary phrasing, 112(f) placeholders).</div>')
+    adv = d.get("llm_advisory") or {}
+    if adv:
+        out.append('<details style="margin:.3rem 0"><summary>LLM advisory (undefined terms, contradictions, omissions — advisory only, text unchanged)</summary><ul>')
+        for no in sorted(adv, key=lambda x: int(x) if str(x).isdigit() else 0):
+            a = adv[no] or {}
+            reasons = "; ".join(f'{r.get("category")}: {", ".join(r.get("claim_recitations") or [])[:120]}' for r in a.get("reasons") or []) or "no issue raised"
+            out.append(f'<li>claim {_e(no)} — {_e(a.get("likelihood", ""))} ({a.get("p_indefinite", 0):.2f}): {_e(reasons)}</li>')
+        out.append("</ul></details>")
+    out.append("</details>")
+    # 5. re-check
+    rc = draft.get("recheck") or {}
+    if rc and not rc.get("skipped"):
+        out.append(f'<details style="margin:.5rem 0"><summary><b>Re-check</b> — {len(rc.get("queries") or [])} queries, '
+                   f'{len(rc.get("new_docs") or [])} new documents, {rc.get("evaluated", 0)} evaluated on the new limitations</summary>')
+        if rc.get("queries"):
+            out.append('<table class="tbl"><thead><tr><th>query</th><th>channel</th><th>total</th><th>new</th></tr></thead><tbody>')
+            for q in rc["queries"]:
+                out.append(f'<tr><td><code>{_e(q.get("query", ""))}</code></td><td>{_e(q.get("channel", ""))}</td><td>{_e(q.get("total"))}</td><td>{q.get("new", 0)}</td></tr>')
+            out.append("</tbody></table>")
+        if rc.get("new_docs"):
+            out.append('<table class="tbl"><thead><tr><th>document</th><th>text</th><th>discloses</th></tr></thead><tbody>')
+            for nd in rc["new_docs"]:
+                name = _e(nd.get("pub_num") or nd.get("title", ""))
+                name = f'<a href="{_e(nd["url"])}" target="_blank">{name}</a>' if nd.get("url") else name
+                out.append(f'<tr><td>{name} <span style="color:var(--text2)">{_e((nd.get("title") or "")[:80])}</span></td><td>{_e(nd.get("text_mode", ""))}</td>'
+                           f'<td>{_e(", ".join(nd.get("covered") or [])) or "—"}</td></tr>')
+            out.append("</tbody></table>")
+        out.append("</details>")
+    elif rc.get("skipped"):
+        out.append(f'<div class="sec-note">Re-check skipped{": " + _e(rc.get("reason") or rc.get("error") or "") if (rc.get("reason") or rc.get("error")) else ""}.</div>')
+    # 6. A2 draft for comparison
+    core = next((c for c in (extraction or {}).get("candidate_inventions") or [] if c.get("id") == draft.get("candidate_id")), None)
+    a2 = (core or {}).get("independent_claim_draft") or {}
+    if a2.get("method") or a2.get("system"):
+        out.append('<details style="margin:.5rem 0"><summary>Pre-search draft (A2) for comparison</summary>')
+        for k in ("method", "system"):
+            if a2.get(k):
+                out.append(f'<div class="sec-b" style="margin:.3rem 0"><b>{k}:</b> {_e(a2[k])}</div>')
+        out.append("</details>")
+    out.append("</div>")
+    return "\n".join(out)
+
+
+def draft_md(draft: dict | None, extraction: dict | None = None) -> list[str]:
+    if not draft or not draft.get("claims"):
+        return ["## Draft Claims (for attorney review)", "", "No grounded elements were available to draft from.", ""] \
+            if (draft or {}).get("strategy") == "no_elements" else []
+    av = draft.get("avoidance") or {}
+    fn, rows = _footnotes(draft)
+    lines = ["## Draft Claims (for attorney review)", "", f"_{_DRAFT_NOTE}_", "",
+             f"**Strategy: {draft.get('strategy')}** — {_STRATEGY_TEXT.get(draft.get('strategy'), '')}. {av.get('reason', '')}"
+             + (f" {av.get('recheck_reason')}" if av.get("recheck_reason") else ""), ""]
+    for c in draft["claims"]:
+        lines.append(f"**{c.get('no')}.** {c.get('preamble', '')}")
+        lims = c.get("limitations") or []
+        for i, l in enumerate(lims):
+            cov = l.get("coverage") or {}
+            if cov.get("status") == "unknown" or not cov.get("checked_against"):
+                tag = "unknown"
+            elif cov.get("covered_by"):
+                tag = "disclosed by " + ", ".join(cov["covered_by"])
+            else:
+                tag = "not disclosed by charted refs"
+            rc = cov.get("recheck") or {}
+            if rc.get("queried"):
+                tag += "; re-check: " + (("disclosed by " + ", ".join(rc["covered_by_new"])) if rc.get("covered_by_new") else f"{rc.get('new_docs', 0)} new docs, none disclose")
+            tail = ";" if i < len(lims) - 2 else ("; and" if i == len(lims) - 2 else ".")
+            star = " ★" if l.get("distinguishing") else ""
+            open_f = [f for f in l.get("flags") or [] if not f.get("fixed")]
+            lines.append(f"    - {l.get('text', '')}{tail} [^{fn.get(l.get('lid'))}] _({l.get('origin', '')}{star}; {tag}"
+                         + (f"; 112(b) open: {', '.join(f['category'] for f in open_f)}" if open_f else "") + ")_")
+        lines.append("")
+    lines += ["**Basis**", "", "| # | limitation | element | verbatim quote | where |", "|---|---|---|---|---|"]
+    for n, lid, b in rows:
+        q = (b.get("evidence_quote") or "").replace("|", "\\|")
+        lines.append(f"| {n} | {lid} | {b.get('element_id', '')} | {q} | {_where(b.get('evidence_loc'))} |")
+    d = draft.get("definiteness") or {}
+    lines += ["", f"**112(b) self-check** — {len(d.get('flags') or [])} rule flag(s), {len(d.get('open_flags') or [])} open after {d.get('passes', 0)} pass(es)", ""]
+    if d.get("flags"):
+        lines += ["| claim.limitation | category | span | rule | fixed? |", "|---|---|---|---|---|"]
+        lines += [f"| {f.get('lid', '')} | {f.get('category', '')} | {f.get('span', '')} | {f.get('rule', '')} | {'yes' if f.get('fixed') else 'OPEN'} |" for f in d["flags"]]
+    adv = d.get("llm_advisory") or {}
+    if adv:
+        lines += ["", "LLM advisory (advisory only):"]
+        for no in sorted(adv, key=lambda x: int(x) if str(x).isdigit() else 0):
+            a = adv[no] or {}
+            reasons = "; ".join(f"{r.get('category')}: {', '.join(r.get('claim_recitations') or [])[:120]}" for r in a.get("reasons") or []) or "no issue raised"
+            lines.append(f"- claim {no} — {a.get('likelihood', '')} ({a.get('p_indefinite', 0):.2f}): {reasons}")
+    rc = draft.get("recheck") or {}
+    if rc and not rc.get("skipped"):
+        lines += ["", f"**Re-check** — {len(rc.get('queries') or [])} queries, {len(rc.get('new_docs') or [])} new documents, {rc.get('evaluated', 0)} evaluated", ""]
+        if rc.get("queries"):
+            lines += ["| query | channel | total | new |", "|---|---|---|---|"]
+            lines += [f"| `{q.get('query', '')}` | {q.get('channel', '')} | {q.get('total')} | {q.get('new', 0)} |" for q in rc["queries"]]
+        if rc.get("new_docs"):
+            lines += ["", "| document | text | discloses |", "|---|---|---|"]
+            lines += [f"| {nd.get('pub_num') or nd.get('title', '')} | {nd.get('text_mode', '')} | {', '.join(nd.get('covered') or []) or '—'} |" for nd in rc["new_docs"]]
+    core = next((c for c in (extraction or {}).get("candidate_inventions") or [] if c.get("id") == draft.get("candidate_id")), None)
+    a2 = (core or {}).get("independent_claim_draft") or {}
+    if a2.get("method") or a2.get("system"):
+        lines += ["", "Pre-search draft (A2) for comparison:"]
+        lines += [f"- {k}: {a2[k]}" for k in ("method", "system") if a2.get(k)]
+    lines.append("")
+    return lines
+
+
 # ── 4. prior-art determination (rule output of patent_analyzer.adjudicate + claim chart) ──
 
 _RISK_STYLE = {"blocking": ("#fee2e2", "#991b1b"), "relevant": ("#fef3c7", "#92400e"), "related": ("#e0f2fe", "#075985")}
@@ -440,11 +652,11 @@ adjudication_md = determination_md
 
 def inject_html(report_html: str, extraction: dict | None, search_stats: dict | None,
                 scoring_report: list[dict] | None, checklist: list[dict] | None,
-                adjudication: dict | None = None) -> str:
+                adjudication: dict | None = None, draft: dict | None = None) -> str:
     anchor = '<div class="sec-t">Invention Summary</div>'
     adj_block = determination_html(adjudication) if adjudication and "Prior-Art Determination" not in report_html else ""
     block = "\n".join(x for x in (extraction_html(extraction), loop_html(search_stats),
-                                  quote_matrix_html(scoring_report, checklist), adj_block) if x)
+                                  quote_matrix_html(scoring_report, checklist), adj_block, draft_html(draft, extraction)) if x)
     if not block:
         return report_html
     i = report_html.find(anchor)
@@ -457,9 +669,10 @@ def inject_html(report_html: str, extraction: dict | None, search_stats: dict | 
 
 def inject_md(report_md: str, extraction: dict | None, search_stats: dict | None,
               scoring_report: list[dict] | None, checklist: list[dict] | None,
-              adjudication: dict | None = None) -> str:
+              adjudication: dict | None = None, draft: dict | None = None) -> str:
     adj_lines = determination_md(adjudication) if adjudication and "## Prior-Art Determination" not in report_md else []
-    lines = extraction_md(extraction) + loop_md(search_stats) + quote_matrix_md(scoring_report, checklist) + adj_lines
+    lines = (extraction_md(extraction) + loop_md(search_stats) + quote_matrix_md(scoring_report, checklist) + adj_lines
+             + draft_md(draft, extraction))
     if not lines:
         return report_md
     block = "\n".join(lines)

@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from patent_analyzer.report_sections import extraction_html, inject_html, inject_md, loop_md, quote_matrix_html
+from patent_analyzer.report_sections import draft_html, extraction_html, inject_html, inject_md, loop_md, quote_matrix_html
 
 EXT = {"candidate_inventions": [{"id": "inv1", "level": "core", "concept": "kinetic proxy", "cpc_pred": ["H04N7"],
                                  "independent_claim_draft": {"method": "A method comprising: a; b."},
@@ -230,3 +230,57 @@ def test_lens_attribution_only_when_lens_was_used():
     assert "Data Sourced from The Lens" in h and 'href="https://www.lens.org"' in h and "<img" in h
     assert lens_attribution_html({"loop_rounds": [{"lens": {"bridge_patents": 0, "search_calls": 0}}]}) == ""
     assert lens_attribution_html(None) == ""
+
+
+DRAFT = {"candidate_id": "inv1", "primary_form": "method", "strategy": "narrowed",
+         "avoidance": {"reason": "US1B2 discloses every element (2/2, §102); the independent claim adds a limitation from dependent_hint[0] that none of the 1 charted references (US1B2) discloses."},
+         "claims": [
+             {"no": 1, "form": "method", "depends_on": None, "preamble": "A method of tracking gaze, comprising:", "limitations": [
+                 {"lid": "c1.l1", "text": "sensing a gaze direction", "origin": "element",
+                  "basis": [{"element_id": "e1", "evidence_quote": "the sensor tracks gaze", "evidence_loc": {"para": 3, "section": "2.1"}}],
+                  "coverage": {"covered_by": ["US1B2"], "checked_against": ["US1B2"], "verified": True}, "flags": []},
+                 {"lid": "c1.l2", "text": "wherein the sensor samples at 120 Hz", "origin": "dependent_hint", "distinguishing": True,
+                  "basis": [{"element_id": "hint[0]", "evidence_quote": "sampled at 120 Hz", "evidence_loc": {"char": [10, 30], "method": "exact"}}],
+                  "coverage": {"covered_by": [], "checked_against": ["US1B2"], "verified": True,
+                               "recheck": {"queried": True, "new_docs": 2, "covered_by_new": []}},
+                  "flags": [{"lid": "c1.l2", "category": "relative_term", "span": "high", "rule": "MPEP 2173.05(b)", "fixed": False, "note": "no standard"}]}]},
+             {"no": 2, "form": "method", "depends_on": 1, "preamble": "The method of claim 1, further comprising", "limitations": [
+                 {"lid": "c2.l1", "text": "logging the gaze direction", "origin": "component_element",
+                  "basis": [{"element_id": "inv2.e1", "evidence_quote": "a log of gaze", "evidence_loc": None}],
+                  "coverage": {"covered_by": [], "checked_against": [], "verified": False, "status": "unknown"}, "flags": []}]}],
+         "definiteness": {"passes": 2, "flags": [{"lid": "c1.l2", "category": "relative_term", "span": "high", "rule": "MPEP 2173.05(b)", "fixed": False, "note": "no standard"},
+                                                 {"lid": "c2.l1", "category": "exemplary_phrasing", "span": "such as", "rule": "MPEP 2173.05(d)", "fixed": True}],
+                          "open_flags": [{"lid": "c1.l2", "category": "relative_term", "span": "high"}],
+                          "llm_advisory": {"1": {"likelihood": "unlikely", "p_indefinite": 0.2, "reasons": [{"category": "undefined_term", "claim_recitations": ["gaze direction"]}]}}},
+         "recheck": {"queries": [{"query": "(gaze sensor) (eye tracker)", "channel": "google_patents", "total": 120, "new": 2}],
+                     "new_docs": [{"pub_num": "US7B2", "title": "Eye tracker", "url": "http://x", "text_mode": "google_patents_page", "covered": []}], "evaluated": 1}}
+
+
+def test_draft_html_six_blocks():
+    from patent_analyzer.report_sections import draft_html
+    h = draft_html(DRAFT, EXT)
+    assert "Draft Claims (for attorney review)" in h and "does not predict grant" in h
+    assert "narrowed" in h and "adds a limitation from dependent_hint[0]" in h                  # 1 strategy
+    assert "<b>1.</b> A method of tracking gaze, comprising:" in h and "sensing a gaze direction;" in h  # 2 claims
+    assert "disclosed by US1B2" in h and "not disclosed by charted refs" in h and "unknown" in h and "re-check: 2 new docs, none disclose" in h
+    assert "★" in h and 'background:#fee2e2' in h                                                # distinguishing + open flag in red
+    assert "<q>the sensor tracks gaze</q>" in h and "section 2.1, para 3" in h and "char" not in h.split("Basis")[1][:400]  # 3 basis
+    assert "112(b) self-check" in h and "2 rule flag(s), 1 open after 2 pass(es)" in h and "undefined_term: gaze direction" in h  # 4
+    assert "(gaze sensor) (eye tracker)" in h and "US7B2" in h                                    # 5 re-check
+    assert "Pre-search draft (A2)" in h and "A method comprising: a; b." in h                     # 6 A2 draft
+    assert draft_html({}, EXT) == "" and "No grounded elements" in draft_html({"strategy": "no_elements"}, EXT)
+
+
+def test_draft_md_and_injection():
+    from patent_analyzer.report_sections import draft_md
+    md = "\n".join(draft_md(DRAFT, EXT))
+    assert md.startswith("## Draft Claims (for attorney review)") and "**Strategy: narrowed**" in md
+    assert "- sensing a gaze direction; and [^1]" in md and "not disclosed by charted refs" in md and "112(b) open: relative_term" in md
+    assert "| 1 | c1.l1 | e1 | the sensor tracks gaze |" in md and "| c1.l2 | relative_term | high | MPEP 2173.05(b) | OPEN |" in md
+    assert "`(gaze sensor) (eye tracker)`" in md
+    unresolved = {**DRAFT, "strategy": "unresolved", "avoidance": {"reason": "needs input from the inventor"}}
+    assert "Unresolved — every candidate limitation is disclosed" in draft_html(unresolved, EXT)
+    base_html = '<div class="sec"><div class="sec-t">Invention Summary</div><div class="sec-b">s</div>\n</div>\n<div class="sec">## Evaluation Criteria</div>'
+    assert "Draft Claims (for attorney review)" in inject_html(base_html, EXT, STATS, SR, CL, draft=DRAFT)
+    assert "Draft Claims" not in inject_html(base_html, EXT, STATS, SR, CL)
+    assert "## Draft Claims (for attorney review)" in inject_md("# R\n## Evaluation Criteria\n", EXT, STATS, SR, CL, draft=DRAFT)
