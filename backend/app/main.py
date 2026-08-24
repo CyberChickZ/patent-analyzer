@@ -99,7 +99,7 @@ _SNAPSHOT_KEYS = ("summary", "checklist", "delegation", "innovation_axes", "tech
                   "doc_type", "input_mode", "personas", "input_local_path", "notify_email", "evolve", "hitl_enabled",
                   "phase_results", "extraction", "document_text", "ranked_candidates", "search_stats", "scoring_report",
                   "eval_stats", "pause_after", "user_edits", "prompt_versions", "category", "publication_date",
-                  "adjudication", "draft_claims")
+                  "adjudication", "draft_claims", "doc_json", "doc_json_stats")
 
 
 def _checkpointer():
