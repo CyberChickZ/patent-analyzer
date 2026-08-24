@@ -272,10 +272,6 @@ async def draft_node(state: GraphState) -> dict:
     for p in kept:
         claims.append(A.dependent_claim(mirror, _lim_from_pool(p, "x", mirror_form, primary_form, disclosed_by, cols)))
     _renumber(claims)
-    for c in claims:
-        for l in c["limitations"]:
-            if l.get("pid") and by_pid.get(l["pid"], {}).get("coverage_note"):
-                l["coverage"]["note"] = by_pid[l["pid"]]["coverage_note"]
 
     # ── 112(b): rules -> auto_fix -> reword (<= 2 calls) -> rules ──
     from app.llm import reword_limitations
