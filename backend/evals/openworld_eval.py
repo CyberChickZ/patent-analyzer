@@ -238,6 +238,8 @@ async def run_pipeline_one(key: str, g: dict) -> dict:
         rec["events"] = [e.get("message", "") for e in p3.get("events", [])
                          if e.get("kind") in ("channel_done", "channel_crashed", "channel_limited")]
         rec["channel_stats"] = [e.get("payload") for e in p3.get("events", []) if e.get("kind") == "channel_done"]
+    from app import llm as _llm
+    rec["llm_usage"] = {m: dict(u) for m, u in _llm.usage.items()}
     out_path.write_text(json.dumps(rec, ensure_ascii=False, indent=1))
     return rec
 
