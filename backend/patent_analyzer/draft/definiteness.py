@@ -202,7 +202,25 @@ def check_antecedent(text: str, intro: dict) -> list[dict]:
 
     def on_ref(span, np, cur):
         key = _key(np)
-        hits = [(k, e) for k, e in cur.items() if k != ("_ev",) and _contains(k, key)]
+        if key[-1] in ("claim", "claims"):          # "the method of claim 1" — the reference is the parent claim
+            return
+        hits: list = []
+        # the phrase may carry a trailing verb ("the clause begins"): drop trailing words until something matches
+        probe = key
+        while probe and not hits:
+            hits = [(k, e) for k, e in cur.items() if k != ("_ev",) and _contains(k, probe)]
+            if hits:
+                break
+            probe = probe[:-1]
+        # a participle modifier refers back to the step that produced it ("the determined classifier" after
+        # "determining a classifier"), so it is not the 2173.05(e) "said aluminum lever" case
+        probe2 = key
+        while not hits and probe2 and _participle(probe2[0]):
+            probe2 = probe2[1:]
+            p2 = probe2
+            while p2 and not hits:
+                hits = [(k, e) for k, e in cur.items() if k != ("_ev",) and _contains(k, p2)]
+                p2 = p2[:-1]
         if not hits:
             base = [k for k, _ in cur.items() if k != ("_ev",) and key[-1] in k]
             note = (f"only '{' '.join(base[0])}' was introduced" if base else "no earlier introduction")
