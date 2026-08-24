@@ -211,3 +211,58 @@ the 67 rescued quotes are found by the exact 60-char prefix match). AND
 of both verifiers equals locate alone, since dual is a superset. The two
 quotes dual rejects are genuine cross-paragraph splices. 116 Gemini calls
 (58 x 2), ~2.3M tok in.
+
+
+## Draft eval (Step 6 — claim drafting)
+
+Two gates for `nodes/draft.py`. Both are about the *draft*, not the search:
+gate 1 runs with no prior art at all, gate 2 only reads the drafted claims.
+
+### Gate 1 — Dis2Pat element overlap
+
+```bash
+python3 evals/draft_eval.py --limit 5 --max-live-calls 60
+```
+
+Data: HF `lj408/Dis2Pat` test split (943 rows, CC-BY-SA-4.0; Jiang, Sun,
+Goetz, arXiv 2608.21249), cached at `eval_data/dis2pat/dis2pat_test.jsonl`.
+Sample: seed-42 permutation, first `--limit`. **Input is only the seven
+`disclosure` fields** (title / problem / core_idea / how_it_works / novelty /
+benefits / optional_variants) through `adapters.disclosure.doc_from_fields`;
+no field of the patent reaches the pipeline. `DRAFT_RECHECK=0`,
+`DRAFT_ADVISORY=0` — the Dis2Pat patents are on Google Patents and would
+find themselves, so gate 1 does not search.
+
+Gold: the granted `claims` string, independent claims cut with
+`nodes.claim_mode._parse_claim_limitations` + `_split_preamble` (the cutter
+the extraction evals use), dependent claims reduced to their added
+limitation. Matching: `extraction_eval.embed` (te005) + `greedy_match`, 1:1,
+tau = .7 — the same rule as the Pap2Pat coverage eval.
+
+Columns: the drafted claim 1 (preamble + limitations), the A2 pre-search
+`independent_claim_draft` (same cutter) as the control, the extraction
+elements joined directly as the upper-bound candidate, gold against itself
+(= 1.0), and the drafted dependents against the gold dependents.
+
+### Gate 2 — indefiniteness rate (PEDANTIC)
+
+```bash
+python3 evals/pedantic_definiteness_eval.py calibrate --limit 100    # detector vs their labels
+python3 evals/pedantic_definiteness_eval.py draft --limit 100        # our drafts
+```
+
+Detector D = the `patent_analyzer/draft/definiteness.py` rules (antecedent
+basis / relative term / exemplary phrasing / 112(f)) plus the PEDANTIC
+examination prompt (Knappich et al., arXiv 2505.21342;
+github.com/boschresearch/pedantic-patentsemtech, MIT) with their category
+list and likelihood expressions verbatim, run on Gemini through
+`app.llm.definiteness_advisory`; their `get_claim` / `search_description`
+tools are replaced by the parent claims and the description inline. Data:
+`eval_data/pedantic/dataset.pkl` (git-lfs; fetched from the media host —
+`src/pedantic` is not installed, the eval ships a pickle shim). Calibration
+is reported next to the paper's Logistic-Regression baseline (F1 .563 /
+AUROC .595) and their Qwen-2.5-72B + LR ensemble (F1 .588 / AUROC .603);
+**D is used as a gate only if it beats the LR baseline**, otherwise the
+draft numbers are reported as numbers. `draft` pools every claim of the
+runs `draft_eval.py` wrote, reports the rule-flag rate before and after the
+node's reword pass, D's indefinite rate, and the same for the A2 draft.
