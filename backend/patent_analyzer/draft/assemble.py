@@ -21,8 +21,14 @@ _SYSTEM_HEAD = re.compile(r"^(an?)\s+(.*?)\b(?:system|apparatus|device|assembly|
 _VOWELS = set("aeiou")
 
 
+_TRAIL_CONJ = re.compile(r"[\s;.,]*\b(?:and|or)\s*[;.,]*$", re.I)
+
+
 def clean_text(t: str) -> str:
-    return " ".join((t or "").split()).strip(" ;.,")
+    """One line, no trailing punctuation and no trailing conjunction — the
+    renderer supplies the ';' / '; and' between limitations (37 CFR 1.75(i))."""
+    t = " ".join((t or "").split()).strip(" ;.,")
+    return _TRAIL_CONJ.sub("", t).strip(" ;.,") or t
 
 
 def _infinitive(word: str) -> str:

@@ -41,6 +41,17 @@ def test_mirror_system_form_fallback_wording():
     assert gerund_to_infinitive("training a model") == "train a model"
 
 
+def test_trailing_conjunction_never_reaches_the_rendered_claim():
+    from patent_analyzer.draft.assemble import clean_text
+    cand = {"id": "inv1", "primary_form": "method", "elements": [
+        {"id": "inv1.e0", "text": "A method of braking", "kind": "structure", "evidence_quote": "q"},
+        {"id": "inv1.e1", "text": "computing a torque request, and", "kind": "step", "evidence_quote": "q"},
+        {"id": "inv1.e2", "text": "applying the torque;", "kind": "step", "evidence_quote": "q"}]}
+    assert clean_text("computing a torque request, and") == "computing a torque request"
+    assert clean_text("a brake and a motor") == "a brake and a motor"
+    assert "and;" not in render_claim(assemble_independent(cand, "method", claim_no=1))
+
+
 def test_dependent_claim_bridges_and_render():
     parent = assemble_independent(CAND, "method", claim_no=1)
     d = dependent_claim(parent, {"text": "wherein the pulses are emitted at 10 Hz", "kind": "condition", "origin": "dependent_hint", "basis": []}, claim_no=2)
