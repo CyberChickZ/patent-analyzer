@@ -170,6 +170,12 @@ def queries_html(search_stats: dict | None) -> str:
                    f'<td>{q.get("total") if q.get("total") is not None else "?"}</td><td>{q.get("hits")}</td>'
                    f'<td>{q.get("new") if q.get("new") is not None else "–"}</td><td>{kept if pubs else "–"}</td><td>{top if pubs else "–"}</td>'
                    f'<td>{_e(", ".join(touched)) if touched else "–"}</td></tr>')
+        if q.get("observation") or q.get("decision"):
+            # the ReAct loop's own reasoning for this query (Harry H6: every step must be readable)
+            out.append(f'<tr><td></td><td colspan="9" class="sec-note"><b>saw:</b> {_e(q.get("observation") or "")} '
+                       f'<b>· chose:</b> {_e(q.get("decision") or "")}'
+                       + (f' <b>· CPC</b> {_e(q.get("cpc_group"))}' + (" (forced: an unused predicted group)" if q.get("cpc_forced") else "")
+                          if q.get("cpc_group") else "") + '</td></tr>')
     out.append("</tbody></table></div>")
     r0 = rounds[0]
     if r0.get("cited_total") is not None:

@@ -284,3 +284,12 @@ def test_draft_md_and_injection():
     assert "Draft Claims (for attorney review)" in inject_html(base_html, EXT, STATS, SR, CL, draft=DRAFT)
     assert "Draft Claims" not in inject_html(base_html, EXT, STATS, SR, CL)
     assert "## Draft Claims (for attorney review)" in inject_md("# R\n## Evaluation Criteria\n", EXT, STATS, SR, CL, draft=DRAFT)
+
+
+def test_react_steps_show_their_observation_and_decision():
+    from patent_analyzer.report_sections import queries_html
+    h = queries_html({"loop_rounds": [{"queries": [
+        {"n": 1, "kind": "react", "query": "(a) (b) CPC=H04N7/low", "total": 123, "hits": 100, "new": 100, "pubs": [],
+         "observation": "titles say swiveling monitor", "decision": "use the learned word", "cpc_group": "H04N7", "cpc_forced": "H04N7"}]}]})
+    assert "saw:</b> titles say swiveling monitor" in h and "chose:</b> use the learned word" in h
+    assert "H04N7" in h and "forced" in h
