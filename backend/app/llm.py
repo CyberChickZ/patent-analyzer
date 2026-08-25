@@ -41,7 +41,11 @@ STAGES = ("extract", "screen", "eval", "idca", "search", "draft")
 # gemini-3.1-flash-lite at 13x the speed, 23x cheaper and 0/45 429s vs 2.5-pro (which also
 # loses batches to thinking overrunning max_output_tokens); extract/eval stay on the global model
 # (3.5-flash scored lower on both). 2.5-pro/flash/flash-lite retire 2026-10-20 — re-gate before then.
-STAGE_DEFAULTS = {"screen": "gemini-3.1-flash-lite"}
+# Harry, 2026-09-18: idca / extract / search move to gemini-3.5-flash (cost); eval stays on
+# 2.5-pro. J5 measured what 3.5-flash costs on extraction (J5.md §3): Pap2Pat cov@3 .708 vs
+# .779, cov@1 .475 vs .600, quote survival .837 vs 1.000, fabrication .165 (13/79) vs .000.
+STAGE_DEFAULTS = {"screen": "gemini-3.1-flash-lite", "idca": "gemini-3.5-flash",
+                  "extract": "gemini-3.5-flash", "search": "gemini-3.5-flash"}
 
 
 def stage_model(stage: str) -> str:
