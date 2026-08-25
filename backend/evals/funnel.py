@@ -266,6 +266,26 @@ def summary_table(funnels: list[dict]) -> str:
     return "\n".join(L) + "\n"
 
 
+def reach_table(funnels: list[dict]) -> str:
+    """Per-case pool reach and where the prune left it (L1 8-paper table)."""
+    L = ["| case | gold families | in pool | pool reach | after embedding | after screen | in top-30 |", "|---|---:|---:|---:|---:|---:|---:|"]
+    tot = [0, 0, 0, 0, 0]
+    for f in sorted(funnels, key=lambda x: x["key"]):
+        by = {r["stage"]: r for r in f["rows"]}
+        s1 = len((by.get("prune_stage1_embed") or {}).get("gold_out") or []) if "prune_stage1_embed" in by else None
+        s2 = len((by.get("prune_stage2_llm") or {}).get("gold_out") or []) if "prune_stage2_llm" in by else None
+        if s2 is None and "prune" in by:
+            s2 = len(by["prune"].get("gold_out") or [])
+        rr = len({g["family"] for g in (by.get("rerank") or {}).get("gold_ranks") or []})
+        L.append(f"| {f['key']} | {f['n_gold']} | {f['reach_pool']} | {f['reach_pool'] / f['n_gold']:.2f} | "
+                 f"{'' if s1 is None else s1} | {'' if s2 is None else s2} | {'' if rr is None else rr} |")
+        tot[0] += f["n_gold"]; tot[1] += f["reach_pool"]
+        for i, v in enumerate((s1, s2, rr)):
+            tot[2 + i] += v or 0
+    L.append(f"| **total** | **{tot[0]}** | **{tot[1]}** | **{tot[1] / max(1, tot[0]):.3f}** | {tot[2]} | {tot[3]} | {tot[4]} |")
+    return "\n".join(L) + "\n"
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tag", required=True)
@@ -289,6 +309,7 @@ async def main():
         print(f"{rec['key']}: gold {fn['n_gold']} in pool {fn['reach_pool']} → {RUN_DIR / (rec['key'] + '_funnel_' + args.tag + '.md')}")
     if args.summary and funnels:
         print(summary_table(funnels))
+        print(reach_table(funnels))
 
 
 if __name__ == "__main__":
