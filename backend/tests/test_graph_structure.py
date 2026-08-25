@@ -73,6 +73,18 @@ def test_extraction_subgraph_compiles_inside_main_graph(monkeypatch):
                                                      "evaluate", "gate_evaluate", "draft", "gate_draft", "report"}
 
 
+def interrupt_value(graph, cfg, out):
+    """The HumanInterrupt payload, whether or not this langgraph version puts
+    `__interrupt__` in the invoke result (0.2.x does not; 0.6.x does)."""
+    if isinstance(out, dict) and out.get("__interrupt__"):
+        i = out["__interrupt__"][0]
+        return i.value if hasattr(i, "value") else i
+    for task in graph.get_state(cfg).tasks or ():
+        for i in getattr(task, "interrupts", ()) or ():
+            return i.value if hasattr(i, "value") else i
+    return None
+
+
 def _fake_nodes(calls):
     async def idca(state):
         calls.append("idca")
@@ -123,8 +135,8 @@ def test_pause_after_extract_interrupts_edit_resumes_and_report_sees_the_edit():
     g = build_graph(checkpointer=MemorySaver(), nodes=_fake_nodes(calls))
     cfg = {"configurable": {"thread_id": "t1"}}
     out = asyncio.run(g.ainvoke({"events": [], "pause_after": ["extract"]}, cfg))
-    assert "__interrupt__" in out and calls == ["idca", "ssr"]
-    hi = out["__interrupt__"][0].value
+    hi = interrupt_value(g, cfg, out)
+    assert hi is not None and calls == ["idca", "ssr"]
     assert hi["action_request"]["action"] == "review_extract"
     ext = hi["action_request"]["args"]["extraction"]
     ext["candidate_inventions"][0]["elements"][0]["text"] = "A method, reviewed"
@@ -155,7 +167,7 @@ def test_rerun_phase_replays_from_the_checkpoint_before_it_and_pauses_again():
     before = next(s for s in g.get_state_history(cfg) if s.next == ("ssr",))
     cid = before.config["configurable"]["checkpoint_id"]
     out = asyncio.run(g.ainvoke(None, {"configurable": {"thread_id": "t2", "checkpoint_id": cid}}))
-    assert calls == ["idca", "ssr", "ssr"] and "__interrupt__" in out
+    assert calls == ["idca", "ssr", "ssr"] and interrupt_value(g, cfg, out) is not None
 
 
 def test_pause_after_draft_edit_reaches_report():
@@ -166,8 +178,8 @@ def test_pause_after_draft_edit_reaches_report():
     g = build_graph(checkpointer=MemorySaver(), nodes=_fake_nodes(calls))
     cfg = {"configurable": {"thread_id": "t3"}}
     out = asyncio.run(g.ainvoke({"events": [], "pause_after": ["draft"]}, cfg))
-    assert "__interrupt__" in out and calls == ["idca", "ssr", "search", "evaluate", "draft"]
-    hi = out["__interrupt__"][0].value
+    hi = interrupt_value(g, cfg, out)
+    assert hi is not None and calls == ["idca", "ssr", "search", "evaluate", "draft"]
     assert hi["action_request"]["action"] == "review_draft"
     draft = hi["action_request"]["args"]["draft_claims"]
     draft["claims"][0]["limitations"][0]["text"] = "x, reviewed"

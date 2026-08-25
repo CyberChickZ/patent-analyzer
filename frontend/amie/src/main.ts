@@ -23,7 +23,7 @@ function inputMode(): string {
 const PAUSE_LABEL: Record<string, string> = { idca: "Invention Detection", extract: "Decomposition", search: "Prior Art Search", evaluate: "Deep Evaluation" };
 const PAUSE_AFTER_PHASE: Record<string, string> = { idca: "phase1", extract: "phase2", search: "phase3b", evaluate: "phase4" };
 
-const PHASE_PROMPTS: Record<string, string[]> = { idca: ["idca.summarize", "idca.docjson"], extract: ["extract.candidates", "extract.elements"], search: ["search.facets", "search.react_step"], evaluate: ["evaluate.document_text", "evaluate.document_pdf"] };
+const PHASE_PROMPTS: Record<string, string[]> = { idca: ["idca.summarize", "idca.docjson"], extract: ["extract.candidates", "extract.elements"], search: ["search.facets", "search.react_step"], evaluate: ["evaluate.document_text", "evaluate.document_pdf"], draft: ["draft.claims", "draft.reword", "draft.definiteness"] };
 
 const PHASES = [
   { key: "phase1", label: "Invention Detection" },

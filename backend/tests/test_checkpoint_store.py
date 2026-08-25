@@ -10,7 +10,7 @@ from langgraph.types import Command
 
 from graph.main_graph import build_graph
 from patent_analyzer.checkpoint_store import make_checkpointer
-from tests.test_graph_structure import _fake_nodes
+from tests.test_graph_structure import _fake_nodes, interrupt_value
 
 
 def test_pause_persist_new_process_resume(tmp_path):
@@ -18,7 +18,7 @@ def test_pause_persist_new_process_resume(tmp_path):
     calls1 = []
     g1 = build_graph(checkpointer=make_checkpointer("file", tmp_path), nodes=_fake_nodes(calls1))
     out = asyncio.run(g1.ainvoke({"events": [], "pause_after": ["extract"]}, cfg))
-    assert "__interrupt__" in out and calls1 == ["idca", "ssr"]
+    assert interrupt_value(g1, cfg, out) is not None and calls1 == ["idca", "ssr"]
     assert (tmp_path / "job-42.json").exists()
     del g1  # "process dies"
 
