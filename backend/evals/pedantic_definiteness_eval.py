@@ -45,6 +45,7 @@ from common import load_env_yaml
 DATA = Path(__file__).parent.parent / "eval_data" / "pedantic" / "dataset.pkl"
 DRAFT_RUNS = Path(__file__).parent.parent / "eval_data" / "runs" / "draft_eval"
 OUT_DIR = Path(__file__).parent.parent / "eval_data" / "runs" / "pedantic_draft"
+DESCRIPTION_CAP = 30000
 LR_BASELINE = {"f1": 0.563, "auroc": 0.595}          # paper Table 3, Logistic Regression
 ENSEMBLE_BASELINE = {"f1": 0.588, "auroc": 0.603}    # Qwen-2.5-72B + LR
 
@@ -167,26 +168,35 @@ def rule_flags(claim_text: str, parents: list[dict]) -> list[dict]:
     return D.check(_claim(claim_text, 0), ps)
 
 
-async def detect(rows: list[dict], threshold: float = 0.5, use_llm: bool = True, batch: int = 4) -> list[dict]:
+async def detect_one(r: dict, threshold: float, use_llm: bool) -> dict:
     from app.llm import definiteness_advisory
+    flags = rule_flags(r["claim_text"], r.get("parents") or [])
+    rec = {"id": r["id"], "label": r.get("label"), "rule_flags": [{"category": f["category"], "span": f["span"]} for f in flags],
+           "rule_hit": bool(flags), "p_llm": None, "llm_categories": []}
+    if use_llm:
+        claims = [{"no": p["no"], "text": p["text"], "depends_on": None} for p in r.get("parents") or []]
+        claims.append({"no": r.get("claim_no", 1), "text": r["claim_text"],
+                       "depends_on": (r["parents"][-1]["no"] if r.get("parents") else None)})
+        got = await definiteness_advisory(claims, r.get("description", "")[:DESCRIPTION_CAP])
+        a = got.get(r.get("claim_no", 1)) or {}
+        rec["p_llm"] = a.get("p_indefinite")
+        rec["llm_categories"] = sorted({x.get("category") for x in a.get("reasons") or []})
+    rec["pred_llm"] = int((rec["p_llm"] or 0.0) >= threshold)
+    rec["pred_rules"] = int(rec["rule_hit"])
+    rec["pred_union"] = int(rec["pred_llm"] or rec["pred_rules"])
+    return rec
+
+
+async def detect(rows: list[dict], threshold: float = 0.5, use_llm: bool = True, batch: int = 8) -> list[dict]:
+    """One examiner call per claim, `batch` at a time (app.llm paces and retries)."""
     out = []
-    for i in range(0, len(rows), batch if not rows or rows[0].get("_single") else batch):
+    for i in range(0, len(rows), batch):
         chunk = rows[i:i + batch]
-        for r in chunk:
-            flags = rule_flags(r["claim_text"], r.get("parents") or [])
-            rec = {"id": r["id"], "label": r.get("label"), "rule_flags": [{"category": f["category"], "span": f["span"]} for f in flags],
-                   "rule_hit": bool(flags), "p_llm": None, "llm_categories": []}
-            if use_llm:
-                claims = [{"no": p["no"], "text": p["text"], "depends_on": None} for p in r.get("parents") or []]
-                claims.append({"no": r.get("claim_no", 1), "text": r["claim_text"],
-                               "depends_on": (r["parents"][-1]["no"] if r.get("parents") else None)})
-                got = await definiteness_advisory(claims, r.get("description", ""))
-                a = got.get(r.get("claim_no", 1)) or {}
-                rec["p_llm"] = a.get("p_indefinite")
-                rec["llm_categories"] = sorted({x.get("category") for x in a.get("reasons") or []})
-            rec["pred_llm"] = int((rec["p_llm"] or 0.0) >= threshold)
-            rec["pred_rules"] = int(rec["rule_hit"])
-            rec["pred_union"] = int(rec["pred_llm"] or rec["pred_rules"])
+        got = await asyncio.gather(*[detect_one(r, threshold, use_llm) for r in chunk], return_exceptions=True)
+        for r, rec in zip(chunk, got):
+            if isinstance(rec, BaseException):
+                print(f"  {r['id']:<16} FAILED {type(rec).__name__}: {str(rec)[:120]}", flush=True)
+                continue
             out.append(rec)
             print(f"  {rec['id']:<16} label={rec['label']} p_llm={rec['p_llm']} rules={[f['category'] for f in rec['rule_flags']]}", flush=True)
     return out
