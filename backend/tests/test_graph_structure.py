@@ -41,12 +41,12 @@ def test_route_implied():
 
 def test_route_search_failed():
     state = {"status": "failed_recall", "ranked_candidates": []}
-    assert route_after_search(state) == "report"
+    assert route_after_search(state) == "draft"
 
 
 def test_route_search_empty():
     state = {"status": "running", "ranked_candidates": []}
-    assert route_after_search(state) == "report"
+    assert route_after_search(state) == "draft"
 
 
 def test_route_search_has_results():
@@ -70,7 +70,7 @@ def test_extraction_subgraph_compiles_inside_main_graph(monkeypatch):
     monkeypatch.delenv("EXTRACTOR", raising=False)
     assert build_graph() is not None
     assert set(build_graph().get_graph().nodes) >= {"idca", "gate_idca", "ssr", "gate_extract", "search", "gate_search",
-                                                     "evaluate", "gate_evaluate", "report"}
+                                                     "evaluate", "gate_evaluate", "draft", "gate_draft", "report"}
 
 
 def _fake_nodes(calls):
@@ -91,12 +91,19 @@ def _fake_nodes(calls):
         calls.append("evaluate")
         return {"scoring_report": [{"pub_num": "US1", "title": "t", "checklist_results": {"c1": {"score": 2}}}]}
 
+    async def draft(state):
+        calls.append("draft")
+        return {"draft_claims": {"strategy": "as_is", "claims": [{"no": 1, "form": "method", "depends_on": None, "preamble": "A method, comprising:",
+                                                                   "limitations": [{"lid": "c1.l1", "text": "x"}]}]}}
+
     async def report(state):
         calls.append("report")
+        lims = [l.get("text", "") + ("*" if l.get("edited_by_user") else "")
+                for c in (state.get("draft_claims") or {}).get("claims") or [] for l in c.get("limitations") or []]
         return {"overall_summary": "elements=" + ";".join(
             e.get("text", "") + ("*" if e.get("edited_by_user") else "")
-            for c in state["extraction"]["candidate_inventions"] for e in c["elements"])}
-    return {"idca": idca, "ssr": ssr, "search": search, "evaluate": evaluate, "report": report}
+            for c in state["extraction"]["candidate_inventions"] for e in c["elements"]) + "|draft=" + ";".join(lims)}
+    return {"idca": idca, "ssr": ssr, "search": search, "evaluate": evaluate, "draft": draft, "report": report}
 
 
 def test_default_run_never_interrupts():
@@ -104,8 +111,8 @@ def test_default_run_never_interrupts():
     calls = []
     g = build_graph(nodes=_fake_nodes(calls))
     out = asyncio.run(g.ainvoke({"events": [], "pause_after": []}))
-    assert "__interrupt__" not in out and calls == ["idca", "ssr", "search", "evaluate", "report"]
-    assert out["overall_summary"] == "elements=A method"
+    assert "__interrupt__" not in out and calls == ["idca", "ssr", "search", "evaluate", "draft", "report"]
+    assert out["overall_summary"] == "elements=A method|draft=x"
 
 
 def test_pause_after_extract_interrupts_edit_resumes_and_report_sees_the_edit():
@@ -122,8 +129,8 @@ def test_pause_after_extract_interrupts_edit_resumes_and_report_sees_the_edit():
     ext = hi["action_request"]["args"]["extraction"]
     ext["candidate_inventions"][0]["elements"][0]["text"] = "A method, reviewed"
     out = asyncio.run(g.ainvoke(Command(resume={"type": "edit", "args": {"extraction": ext}}), cfg))
-    assert calls == ["idca", "ssr", "search", "evaluate", "report"]
-    assert out["overall_summary"] == "elements=A method, reviewed*"
+    assert calls == ["idca", "ssr", "search", "evaluate", "draft", "report"]
+    assert out["overall_summary"] == "elements=A method, reviewed*|draft=x"
     assert out["user_edits"][0]["id"] == "inv1.e0" and out["user_edits"][0]["op"] == "edit"
     assert any(e["kind"] == "user_edit" for e in out["events"])
 
@@ -135,7 +142,7 @@ def test_entry_mid_pipeline_runs_only_the_tail():
     g = build_graph(nodes=_fake_nodes(calls), entry="search")
     out = asyncio.run(g.ainvoke({"events": [], "pause_after": [],
                                  "extraction": {"candidate_inventions": [{"id": "inv1", "elements": [{"id": "inv1.e0", "text": "kept", "edited_by_user": True}]}]}}))
-    assert calls == ["search", "evaluate", "report"] and out["overall_summary"] == "elements=kept*"
+    assert calls == ["search", "evaluate", "draft", "report"] and out["overall_summary"] == "elements=kept*|draft=x"
 
 
 def test_rerun_phase_replays_from_the_checkpoint_before_it_and_pauses_again():
@@ -149,3 +156,34 @@ def test_rerun_phase_replays_from_the_checkpoint_before_it_and_pauses_again():
     cid = before.config["configurable"]["checkpoint_id"]
     out = asyncio.run(g.ainvoke(None, {"configurable": {"thread_id": "t2", "checkpoint_id": cid}}))
     assert calls == ["idca", "ssr", "ssr"] and "__interrupt__" in out
+
+
+def test_pause_after_draft_edit_reaches_report():
+    import asyncio
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.types import Command
+    calls = []
+    g = build_graph(checkpointer=MemorySaver(), nodes=_fake_nodes(calls))
+    cfg = {"configurable": {"thread_id": "t3"}}
+    out = asyncio.run(g.ainvoke({"events": [], "pause_after": ["draft"]}, cfg))
+    assert "__interrupt__" in out and calls == ["idca", "ssr", "search", "evaluate", "draft"]
+    hi = out["__interrupt__"][0].value
+    assert hi["action_request"]["action"] == "review_draft"
+    draft = hi["action_request"]["args"]["draft_claims"]
+    draft["claims"][0]["limitations"][0]["text"] = "x, reviewed"
+    out = asyncio.run(g.ainvoke(Command(resume={"type": "edit", "args": {"draft_claims": draft}}), cfg))
+    assert calls[-1] == "report" and out["overall_summary"].endswith("|draft=x, reviewed*")
+    assert out["user_edits"][0]["id"] == "c1.l1" and out["user_edits"][0]["kind"] == "limitation"
+
+
+def test_empty_search_skips_evaluate_but_still_drafts():
+    import asyncio
+    calls = []
+    nodes = _fake_nodes(calls)
+
+    async def search(state):
+        calls.append("search")
+        return {"ranked_candidates": [], "search_stats": {}}
+    nodes["search"] = search
+    out = asyncio.run(build_graph(nodes=nodes).ainvoke({"events": [], "pause_after": []}))
+    assert calls == ["idca", "ssr", "search", "draft", "report"]

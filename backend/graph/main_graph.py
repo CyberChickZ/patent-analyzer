@@ -1,4 +1,4 @@
-"""Main LangGraph pipeline: IDCA → Extract(subgraph) → Search → Eval(subgraph) → Report,
+"""Main LangGraph pipeline: IDCA → Extract(subgraph) → Search → Eval(subgraph) → Draft → Report,
 with a gate after each phase.
 
 A gate (graph/gates.py) is a no-op unless its phase is listed in
@@ -14,6 +14,7 @@ from graph.eval_subgraph import build_eval_subgraph
 from graph.extraction_subgraph import build_extraction_subgraph
 from graph.gates import make_gate
 from graph.ssr_subgraph import build_ssr_subgraph  # legacy; kept for EXTRACTOR=ssr
+from nodes.draft import draft_node
 from nodes.idca import idca_node
 from nodes.report import report_node
 from nodes.search import search_node
@@ -29,11 +30,12 @@ def route_after_idca(state: GraphState) -> str:
 
 
 def route_after_search(state: GraphState) -> str:
+    """No candidates → straight to draft (claims are still drafted, coverage unknown)."""
     if state.get("status") == "failed_recall":
-        return "report"
+        return "draft"
     ranked = state.get("ranked_candidates", [])
     if not ranked:
-        return "report"
+        return "draft"
     return "evaluate"
 
 
@@ -46,11 +48,11 @@ def build_graph(checkpointer=None, phase2=None, nodes: dict | None = None, entry
     if phase2 is None:
         phase2 = build_ssr_subgraph if os.environ.get("EXTRACTOR", "extraction") == "ssr" else build_extraction_subgraph
     n = {"idca": idca_node, "ssr": phase2(), "search": search_node, "evaluate": build_eval_subgraph(),
-         "report": report_node, **(nodes or {})}
+         "draft": draft_node, "report": report_node, **(nodes or {})}
     g = StateGraph(GraphState)
-    for name in ("idca", "ssr", "search", "evaluate", "report"):
+    for name in ("idca", "ssr", "search", "evaluate", "draft", "report"):
         g.add_node(name, n[name])
-    for phase in ("idca", "extract", "search", "evaluate"):
+    for phase in ("idca", "extract", "search", "evaluate", "draft"):
         g.add_node(f"gate_{phase}", make_gate(phase))
     g.set_entry_point(entry)
     g.add_edge("idca", "gate_idca")
@@ -58,8 +60,10 @@ def build_graph(checkpointer=None, phase2=None, nodes: dict | None = None, entry
     g.add_edge("ssr", "gate_extract")
     g.add_edge("gate_extract", "search")
     g.add_edge("search", "gate_search")
-    g.add_conditional_edges("gate_search", route_after_search, {"evaluate": "evaluate", "report": "report"})
+    g.add_conditional_edges("gate_search", route_after_search, {"evaluate": "evaluate", "draft": "draft"})
     g.add_edge("evaluate", "gate_evaluate")
-    g.add_edge("gate_evaluate", "report")
+    g.add_edge("gate_evaluate", "draft")
+    g.add_edge("draft", "gate_draft")
+    g.add_edge("gate_draft", "report")
     g.add_edge("report", END)
     return g.compile(checkpointer=checkpointer)
