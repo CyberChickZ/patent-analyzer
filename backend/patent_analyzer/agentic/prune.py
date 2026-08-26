@@ -27,6 +27,8 @@ STAGE1_CAP = int(os.environ.get("PRUNE_STAGE1_CAP", "1200"))   # union cap → �
 STAGE2_BATCH = int(os.environ.get("PRUNE_STAGE2_BATCH", "40"))
 KEEP = int(os.environ.get("PRUNE_KEEP", "60"))
 GRAPH_SOURCES = {"citation_graph", "google_similar", "lens_bridge"}
+STAGE3_IN = int(os.environ.get("PRUNE_STAGE3_IN", "1000"))     # abstract survivors that get their claims read
+STAGE3_BATCH = int(os.environ.get("PRUNE_STAGE3_BATCH", "8"))  # claims are long: fewer per call
 
 SCREEN_SCHEMA = {
     "type": "OBJECT",
@@ -160,12 +162,118 @@ async def stage2_llm(candidates: list[dict], elements: list[dict], docs: list[di
                          "stage2_out": min(len(kept), keep), "unanswered": sum(1 for i in idxs if i not in verdict)}
 
 
+CLAIMS_SCHEMA = SCREEN_SCHEMA
+
+
+def _claims_prompt(elements: list[dict], batch: list[tuple[int, dict, str]]) -> str:
+    els = "\n".join(f'  {e["id"]}: {e["text"][:220]}' for e in elements)
+    rows = []
+    for i, d, claims in batch:
+        rows.append(f'[{i}] {d.get("pub_num") or ""} · {d.get("title") or ""}\n  CLAIMS: {claims[:4000]}')
+    return f"""An examiner cites a reference for what it CLAIMS or DISCLOSES, not for its abstract.
+You are reading the claims of each candidate below. For each document decide whether its claims
+touch ANY element of the invention — the same subject matter in any wording, in any field, at any
+level of generality (a broader claim reads on a narrower element). A document whose claims are in
+a different art but recite the same mechanism still counts. When in doubt, keep it.
+
+ELEMENTS:
+{els}
+
+DOCUMENTS:
+{chr(10).join(rows)}
+
+Answer with JSON {{"verdicts": [{{"i": <document index>, "worth_reading": true|false, "elements": ["<element id>", ...], "reason": "<=15 words"}}, ...]}} — one entry per document."""
+
+
+async def stage3_claims(elements: list[dict], docs: list[dict], idxs: list[int], keep: int = KEEP,
+                        n_in: int = STAGE3_IN, batch_size: int = STAGE3_BATCH,
+                        fetch_claims=None, call=None) -> tuple[list[int], dict]:
+    """Claims-level screen over the abstract survivors (leader, 2026-09-18).
+    The abstract screen keeps thousands; the 60-cut then falls on an ordering
+    that a 40-word abstract cannot inform. This reads the claims of the top
+    `n_in` survivors — an examiner's own basis for citing — and reorders by
+    (#elements the claims touch, cosine). Graph-sourced documents are kept.
+    """
+    import asyncio
+    if not idxs:
+        return [], {"stage3_in": 0, "stage3_calls": 0, "stage3_with_claims": 0, "stage3_out": 0}
+    head = idxs[:n_in]
+    if fetch_claims is None:
+        from patent_analyzer.recall.bigquery_patents import fetch_by_pub_nums
+
+        async def fetch_claims(pubs):
+            got = await fetch_by_pub_nums(pubs, with_claims=True)
+            return {k: (v.get("claims_text") or "") for k, v in got.items()}
+    pubs = [docs[i].get("pub_num") for i in head if docs[i].get("pub_num")]
+    if not pubs:                       # papers only: nothing to read claims from
+        return head[:keep], {"stage3_in": len(head), "stage3_calls": 0, "stage3_with_claims": 0, "stage3_out": min(len(head), keep)}
+    try:
+        claims = await fetch_claims(pubs)
+    except Exception as exc:
+        return head[:keep], {"stage3_in": len(head), "stage3_calls": 0, "stage3_with_claims": 0,
+                             "stage3_out": min(len(head), keep), "stage3_error": f"{type(exc).__name__}: {exc}"[:160]}
+    from patent_analyzer.recall.bigquery_patents import _canon_pub
+    have = [(i, docs[i], claims.get(_canon_pub(docs[i].get("pub_num") or ""), "")) for i in head]
+    have = [(i, d, c) for i, d, c in have if c]
+    if call is None:
+        from app import llm as _llm
+        _model = _llm.stage_model("screen")
+
+        async def call(system, user, response_schema=None):
+            return await _llm.call_llm(system, user, response_schema=response_schema, model=_model)
+    system = "You are a US patent examiner reading claims. Output JSON only."
+    batches = [have[x:x + batch_size] for x in range(0, len(have), batch_size)]
+    sem = asyncio.Semaphore(int(os.environ.get("PRUNE_CONCURRENCY", "4")))
+
+    async def _one(batch):
+        async with sem:
+            try:
+                return json.loads(await call(system, _claims_prompt(elements, batch), response_schema=CLAIMS_SCHEMA))
+            except Exception:
+                return {}
+    results = await asyncio.gather(*(_one(b) for b in batches))
+    verdict: dict[int, tuple[bool, list[str], str]] = {}
+    for data in results:
+        for v in (data.get("verdicts") or []):
+            try:
+                verdict[int(v["i"])] = (bool(v.get("worth_reading")), [str(x) for x in (v.get("elements") or [])],
+                                        str(v.get("reason") or "")[:160])
+            except (KeyError, TypeError, ValueError):
+                continue
+    for i, d, _c in have:
+        ok, els, why = verdict.get(i, (None, [], "no claims verdict"))
+        if ok is None:
+            continue
+        d["claims_worth_reading"] = ok
+        d["claims_elements"] = els
+        d["claims_reason"] = why
+    def _rank(i):
+        d = docs[i]
+        n_claims = len(d.get("claims_elements") or [])
+        graph = 1 if set(d.get("sources") or []) & GRAPH_SOURCES else 0
+        read = d.get("claims_worth_reading")
+        return (-(1 if read else 0), -n_claims, -graph, -len(d.get("prune_elements") or []), -float(d.get("prune_cos") or 0.0))
+    ordered = sorted(idxs, key=_rank)
+    return ordered[:keep], {"stage3_in": len(head), "stage3_calls": len(batches),
+                            "stage3_with_claims": len(have), "stage3_kept": sum(1 for i in head if docs[i].get("claims_worth_reading")),
+                            "stage3_out": min(len(ordered), keep)}
+
+
 async def prune(candidates: list[dict], elements: list[dict], docs: list[dict], **kw) -> tuple[list[dict], dict]:
     """Full funnel: pool docs → stage 1 → stage 2 → ≤KEEP docs (dicts get
     prune_* fields). Stats carry every stage's counts."""
     idxs, s1 = stage1_embed(elements, docs, topk=kw.get("topk", STAGE1_TOPK),
                             embed_docs=kw.get("embed_docs"), embed_queries=kw.get("embed_queries"),
                             summary=kw.get("summary", ""), cap=kw.get("cap", STAGE1_CAP))
+    keep = kw.get("keep", KEEP)
+    # stage 2 orders by (#elements, cosine) but keeps everything worth reading, so stage 3 can
+    # read further down the list than the 60-cut would have allowed
     kept, s2 = await stage2_llm(candidates, elements, docs, idxs, batch_size=kw.get("batch_size", STAGE2_BATCH),
-                                keep=kw.get("keep", KEEP), call=kw.get("call"))
-    return [docs[i] for i in kept], {"pool": len(docs), **s1, **s2}
+                                keep=kw.get("stage2_keep", max(keep, STAGE3_IN)), call=kw.get("call"))
+    s3 = {}
+    if kw.get("claims_screen", os.environ.get("PRUNE_CLAIMS", "1") != "0") and kept:
+        kept, s3 = await stage3_claims(elements, docs, kept, keep=keep, n_in=kw.get("stage3_in", STAGE3_IN),
+                                       fetch_claims=kw.get("fetch_claims"), call=kw.get("claims_call") or kw.get("call"))
+    else:
+        kept = kept[:keep]
+    return [docs[i] for i in kept], {"pool": len(docs), **s1, **s2, **s3}

@@ -54,7 +54,8 @@ def test_prune_end_to_end_reports_every_stage():
     async def fake_call(system, user, response_schema=None):
         return json.dumps({"verdicts": [{"i": i, "worth_reading": True, "elements": []} for i in range(4)]})
     out, st = asyncio.run(prune([{"id": "inv1"}], ELS, docs, embed_docs=_emb, embed_queries=_emb, call=fake_call, topk=4, keep=3))
-    assert len(out) == 3 and st["pool"] == 4 and st["stage1_out"] == 4 and st["stage2_out"] == 3 and st["unanswered"] == 0
+    # stage 2 now keeps every document worth reading (the claims screen makes the final cut)
+    assert len(out) == 3 and st["pool"] == 4 and st["stage1_out"] == 4 and st["stage2_out"] == 4 and st["unanswered"] == 0
 
 
 def test_stage1_summary_query_and_cap():
@@ -81,3 +82,26 @@ def test_llm_screen_cannot_drop_a_graph_sourced_doc():
         return json.dumps({"verdicts": [{"i": i, "worth_reading": i != 2, "elements": [], "reason": "r"} for i in range(4)]})
     kept, st = asyncio.run(stage2_llm([{"id": "inv1"}], ELS, docs, idxs, batch_size=4, keep=4, call=fake_call))
     assert 2 in kept and "graph source" in docs[2]["prune_reason"] and "When in doubt, keep it" in __import__("patent_analyzer.agentic.prune", fromlist=["x"])._batch_prompt([{"id": "inv1"}], ELS, [(0, docs[0])])
+
+
+def test_claims_screen_reorders_by_what_the_claims_touch():
+    from patent_analyzer.agentic.prune import stage3_claims
+    docs = [dict(d) for d in DOCS]
+    for i, d in enumerate(docs):
+        d["pub_num"] = f"US{1000 + i}B2"
+        d["prune_cos"] = 0.9 - 0.1 * i          # doc 0 is the closest by embedding
+        d["prune_elements"] = []
+
+    async def fake_claims(pubs):
+        return {p.replace("-", ""): f"1. A thing comprising {p}." for p in pubs}
+
+    async def fake_call(system, user, response_schema=None):
+        # only the third document's claims touch two elements
+        return json.dumps({"verdicts": [{"i": 0, "worth_reading": False, "elements": [], "reason": "different problem"},
+                                        {"i": 1, "worth_reading": True, "elements": ["inv1.e1"], "reason": "one"},
+                                        {"i": 2, "worth_reading": True, "elements": ["inv1.e1", "inv1.e2"], "reason": "two"},
+                                        {"i": 3, "worth_reading": True, "elements": [], "reason": "maybe"}]})
+    kept, st = asyncio.run(stage3_claims(ELS, docs, [0, 1, 2, 3], keep=3, fetch_claims=fake_claims, call=fake_call))
+    assert kept[0] == 2 and kept[1] == 1          # ordered by how many elements the claims touch
+    assert 0 not in kept                          # the one the claims rule out drops off the 3-cut
+    assert st["stage3_with_claims"] == 4 and st["stage3_calls"] == 1 and docs[0]["claims_reason"] == "different problem"
