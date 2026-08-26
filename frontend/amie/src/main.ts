@@ -20,7 +20,7 @@ function inputMode(): string {
   return (document.getElementById("inputMode") as HTMLSelectElement | null)?.value || "";
 }
 
-const PAUSE_LABEL: Record<string, string> = { idca: "Invention Detection", extract: "Decomposition", search: "Prior Art Search", evaluate: "Deep Evaluation" };
+const PAUSE_LABEL: Record<string, string> = { idca: "Invention Detection", extract: "Decomposition", search: "Prior Art Search", evaluate: "Deep Evaluation", draft: "Draft Claims" };
 const PAUSE_AFTER_PHASE: Record<string, string> = { idca: "phase1", extract: "phase2", search: "phase3b", evaluate: "phase4" };
 
 const PHASE_PROMPTS: Record<string, string[]> = { idca: ["idca.summarize", "idca.docjson"], extract: ["extract.candidates", "extract.elements"], search: ["search.facets", "search.react_step"], evaluate: ["evaluate.document_text", "evaluate.document_pdf"], draft: ["draft.claims", "draft.reword", "draft.definiteness"] };
@@ -77,6 +77,7 @@ root.innerHTML = `
       <label class="hitl-toggle"><input type="checkbox" class="pauseAfter" value="extract"><span>Decomposition</span></label>
       <label class="hitl-toggle"><input type="checkbox" class="pauseAfter" value="search"><span>Search</span></label>
       <label class="hitl-toggle"><input type="checkbox" class="pauseAfter" value="evaluate"><span>Evaluation</span></label>
+      <label class="hitl-toggle"><input type="checkbox" class="pauseAfter" value="draft"><span>Draft claims</span></label>
       <span class="hitl-hint">— review and edit that phase's output before the next one runs</span>
     </div>
     <button class="btn" id="startBtn" disabled>Analyze</button>
@@ -732,6 +733,38 @@ function esc(x: unknown): string {
   return String(x ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+// Draft claims panel: every limitation is editable and carries its basis (element id +
+// verbatim quote); 112(b) flags the node could not fix are shown as warnings, and the
+// adjudication that chose the drafting strategy is read-only context.
+function draftBody(dc: any, adj: any): string {
+  const claims: any[] = dc.claims || [];
+  if (!claims.length) return `<h4>No draft claims</h4><p class="hitl-hint">Strategy: ${esc(dc.strategy || "none")}.</p>`;
+  const av = dc.avoidance || {};
+  const flags: any[] = dc.open_flags || dc.definiteness_open || [];
+  const flagBy: Record<string, string[]> = {};
+  for (const f of flags) (flagBy[f.lid || ""] ||= []).push(`${f.kind || "112(b)"}: ${f.message || f.reason || ""}`);
+  const head = `<h4>Draft claims (${claims.length}) — strategy <code>${esc(dc.strategy || "")}</code>${adj && adj.label ? ` · adjudication <b>${esc(adj.label)}</b>` : ""}</h4>
+    <p class="hitl-hint">Attorney review. Every limitation shows the element and the verbatim disclosure text it rests on; edit the wording and it is what the report carries.
+    ${av.reason ? `Avoidance: ${esc(av.reason)}.` : ""}${flags.length ? ` <b>${flags.length} open 112(b) flag(s)</b> — shown in red.` : ""}</p>`;
+  const body = claims.map((c: any, ci: number) => {
+    const dep = c.depends_on != null ? ` <span class="hitl-hint">(depends on claim ${esc(c.depends_on)})</span>` : "";
+    const lims = (c.limitations || []).map((l: any, li: number) => {
+      const b = l.basis || {};
+      const fl = flagBy[l.lid || ""] || [];
+      return `<tr${fl.length ? ' class="hitl-flagged"' : ""}><td>${esc(l.lid || "")}</td>
+        <td><textarea class="hitl-lim" data-ci="${ci}" data-li="${li}" rows="3">${esc(l.text)}</textarea>
+          ${fl.length ? `<div class="hitl-flag">⚠ ${fl.map(esc).join("; ")}</div>` : ""}</td>
+        <td class="hitl-quote">${esc(b.element_id || l.element_id || "")}${b.evidence_quote ? `: “${esc((b.evidence_quote || "").slice(0, 160))}”` : ""}
+          ${l.distinguishing ? ' <b title="not covered by any cited reference">★</b>' : ""}</td></tr>`;
+    }).join("");
+    return `<div class="hitl-claim"><h4>Claim ${esc(c.no)} · ${esc(c.form || "")}${dep}
+        <label class="hitl-hint"><input type="checkbox" class="hitl-keep-claim" data-ci="${ci}" checked> keep</label></h4>
+      <textarea class="hitl-preamble" data-ci="${ci}" rows="2">${esc(c.preamble)}</textarea>
+      <table class="tbl"><thead><tr><th>#</th><th>Limitation (editable)</th><th>Basis in the disclosure</th></tr></thead><tbody>${lims}</tbody></table></div>`;
+  }).join("");
+  return head + body;
+}
+
 // GET /api/jobs/{id}/state → editable values of the paused phase; the panel is read-only
 // for now (edits + PATCH come next); Continue → POST /api/jobs/{id}/resume
 async function mountPhasePanel(phasesEl: HTMLElement, jobId: string) {
@@ -780,6 +813,8 @@ async function mountPhasePanel(phasesEl: HTMLElement, jobId: string) {
         const n = Object.values(cr).filter((x: any) => (x && (x.score ?? (x.match ? 2 : 0))) > 0).length;
         return `<tr><td>${i + 1}</td><td>${esc(d.pub_num)}</td><td>${esc((d.title || "").slice(0, 110))}</td><td>${esc(d.similarity_score ?? d.score ?? "")}</td><td>${n}/${Object.keys(cr).length}</td><td><input type="checkbox" class="hitl-keep-doc" data-i="${i}" checked></td></tr>`;
       }).join("") + `</tbody></table>`;
+  } else if (phase === "draft") {
+    body = draftBody(v.draft_claims || {}, v.adjudication || {});
   }
 
   const promptNames: string[] = PHASE_PROMPTS[phase] || [];
@@ -831,6 +866,22 @@ async function mountPhasePanel(phasesEl: HTMLElement, jobId: string) {
           .filter((_: any, ci: number) => !dropCand.has(ci));
       }
       if (changed) edits.extraction = ext;
+    } else if (phase === "draft" && v.draft_claims) {
+      const dc = JSON.parse(JSON.stringify(v.draft_claims));
+      const claims: any[] = dc.claims || [];
+      let changed = false;
+      div.querySelectorAll<HTMLTextAreaElement>("textarea.hitl-lim").forEach((ta) => {
+        const c = claims[+ta.dataset.ci!]; const l = c && (c.limitations || [])[+ta.dataset.li!];
+        if (l && ta.value.trim() !== l.text) { l.text = ta.value.trim(); changed = true; }
+      });
+      div.querySelectorAll<HTMLTextAreaElement>("textarea.hitl-preamble").forEach((ta) => {
+        const c = claims[+ta.dataset.ci!];
+        if (c && ta.value.trim() !== c.preamble) { c.preamble = ta.value.trim(); changed = true; }
+      });
+      const dropClaim = new Set<number>();
+      div.querySelectorAll<HTMLInputElement>("input.hitl-keep-claim").forEach((cb) => { if (!cb.checked) dropClaim.add(+cb.dataset.ci!); });
+      if (dropClaim.size) { changed = true; dc.claims = claims.filter((_: any, ci: number) => !dropClaim.has(ci)); }
+      if (changed) edits.draft_claims = dc;
     } else if (phase === "search" || phase === "evaluate") {
       const key = phase === "search" ? "ranked_candidates" : "scoring_report";
       const rows: any[] = v[key] || [];

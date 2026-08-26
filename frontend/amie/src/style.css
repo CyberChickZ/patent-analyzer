@@ -182,4 +182,9 @@ h1{font-size:1.5rem;text-align:center;margin-bottom:0.25rem;font-weight:700}
 .hitl-inline-form .tbl{width:100%;font-size:0.85rem;margin:6px 0 10px}
 .hitl-inline-form .tbl th,.hitl-inline-form .tbl td{padding:4px 6px;border-bottom:1px solid #fde68a;vertical-align:top}
 .hitl-el{width:100%;font:inherit;font-size:0.85rem}
+.hitl-claim{margin:10px 0;padding:8px;border:1px solid #e5e7eb;border-radius:6px}
+.hitl-claim textarea.hitl-preamble{width:100%;font-size:0.85rem}
+.hitl-claim textarea.hitl-lim{width:100%;font-size:0.85rem}
+.hitl-flagged td{background:#fef2f2}
+.hitl-flag{color:#b91c1c;font-size:0.78rem;margin-top:2px}
 .hitl-prompt-box{margin:8px 0}.hitl-prompt-text{width:100%;font-family:ui-monospace,monospace;font-size:0.78rem}
