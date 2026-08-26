@@ -41,12 +41,13 @@ STAGES = ("extract", "screen", "eval", "idca", "search", "draft")
 # gemini-3.1-flash-lite at 13x the speed, 23x cheaper and 0/45 429s vs 2.5-pro (which also
 # loses batches to thinking overrunning max_output_tokens); extract/eval stay on the global model
 # (3.5-flash scored lower on both). 2.5-pro/flash/flash-lite retire 2026-10-20 — re-gate before then.
-# 2026-09-18: idca / search on gemini-3.5-flash, extract back on the global 2.5-pro, eval on
-# 2.5-pro. 3.5-flash has no cost argument (priced $1.50/$9 per M vs 2.5-pro's $1.25/$10: dearer
-# on input) and J5 measured what it costs extraction: Pap2Pat cov@1 .475 vs .600, cov@3 .708 vs
-# .779, quote survival .837 vs 1.000, fabrication .165 (13/79) vs .000.
-STAGE_DEFAULTS = {"screen": "gemini-3.1-flash-lite", "idca": "gemini-3.5-flash",
-                  "search": "gemini-3.5-flash"}
+# 2026-09-18: every stage but screen is back on the global model. 3.5-flash has no cost argument
+# ($1.50/$9 per M against 2.5-pro's $1.25/$10 — dearer on input) and it costs quality everywhere
+# it was tried: extraction (J5) Pap2Pat cov@1 .475 vs .600, quote survival .837 vs 1.000,
+# fabrication .165 (13/79) vs .000; the search stage (h1m, H1-01) pool reach 0/5 against 4/5,
+# because it narrows each ReAct query in the wrong direction. gemini-3.x-flash exists only on the
+# Vertex global endpoint (us-west1 returns 404) — never set VERTEX_LOCATION to a region for them.
+STAGE_DEFAULTS = {"screen": "gemini-3.1-flash-lite"}
 
 
 def stage_model(stage: str) -> str:
