@@ -1416,8 +1416,9 @@ async def evaluate_single_document(
             "Pay attention to figures, tables, and diagrams — visual evidence counts.")
         output_schema = (
             '"checklist_results": {\n'
-            '    "<criterion>": {"score": 0|1|2, "analysis": "why this score", '
-            '"evidence_quotes": ["verbatim excerpt from prior art", "..."], '
+            '    "<criterion>": {"score": 0|1|2, '
+            + ("" if _lean_eval() else '"analysis": "why this score", ')
+            + '"evidence_quotes": ["verbatim excerpt from prior art", "..."], '
             '"match": true|false},\n'
             '    ...all items...\n'
             '  }')
@@ -1428,7 +1429,8 @@ async def evaluate_single_document(
             "figure description as evidence.")
         output_schema = (
             '"checklist_results": {\n'
-            '    "<item>": {"analysis": "evidence", "evidence_quote": "verbatim excerpt", '
+            '    "<item>": {' + ("" if _lean_eval() else '"analysis": "evidence", ')
+            + '"evidence_quote": "verbatim excerpt", '
             '"match": true|false},\n'
             '    ...all items...\n'
             '  }')
@@ -1440,7 +1442,7 @@ async def evaluate_single_document(
 
     try:
         resp = await call_llm_with_pdfs(
-            system, prompt, pdfs, thinking_budget=8192,
+            system, prompt, pdfs, thinking_budget=_eval_thinking(8192),
             image_parts=[img for _, img in fig_pages] or None,
             model=stage_model("eval"))
         m = re.search(r'\{.*\}', resp, re.DOTALL)
@@ -1525,6 +1527,18 @@ def _bri_enabled() -> bool:
     return os.environ.get("EVAL_BRI") == "1"
 
 
+def _lean_eval() -> bool:
+    """Harry, 2026-09-18: "输出 + 思考应该放在召回先" — the deep read spends its
+    budget on the recall stages instead. Lean mode drops the per-criterion
+    `analysis` prose (the verbatim quotes are the evidence a reviewer checks)
+    and the thinking budget. EVAL_LEAN=0 restores both."""
+    return os.environ.get("EVAL_LEAN", "1") != "0"
+
+
+def _eval_thinking(default: int) -> int:
+    return 0 if _lean_eval() else default
+
+
 async def evaluate_single_document_text(
     invention_summary: str,
     checklist: list,
@@ -1565,7 +1579,8 @@ async def evaluate_single_document_text(
             + "Do NOT infer beyond what the text states.")
         output_schema = (
             '"checklist_results": {\n'
-            '    "<criterion>": {"score": 0|1|2, "analysis": "...", '
+            '    "<criterion>": {"score": 0|1|2, '
+            + ("" if _lean_eval() else '"analysis": "...", ')
             + evidence_field +
             '"match": true|false},\n    ...all items...\n  }')
     else:
@@ -1575,7 +1590,8 @@ async def evaluate_single_document_text(
             + (" For match=true list 1-5 verbatim evidence_quotes." if full else ""))
         output_schema = (
             '"checklist_results": {\n'
-            '    "<item>": {"analysis": "...", ' + evidence_field + '"match": true|false},\n'
+            '    "<item>": {' + ("" if _lean_eval() else '"analysis": "...", ') + evidence_field
+            + '"match": true|false},\n'
             '    ...all items...\n  }')
     if _bri_enabled():
         scoring_instruction += prompts.get("evaluate.bri_instruction")[0]
@@ -1584,7 +1600,7 @@ async def evaluate_single_document_text(
                             prior_art_title=prior_art_title, prior_art_type=prior_art_type, doc_label=doc_label,
                             prior_art_text=prior_art_text, scoring_instruction=scoring_instruction, output_schema=output_schema)
     try:
-        resp = await call_llm(system, prompt, thinking_budget=4096, model=stage_model("eval"))
+        resp = await call_llm(system, prompt, thinking_budget=_eval_thinking(4096), model=stage_model("eval"))
         m = re.search(r'\{.*\}', resp, re.DOTALL)
         if m:
             result = json.loads(m.group())
@@ -2132,7 +2148,9 @@ async def facet_elements(elements: list[dict], summary: str) -> dict[str, dict]:
     system = "You write patent search facets. Output JSON only."
     prompt = prompts.render("search.facets", summary=summary[:4000], listing=listing)
     try:
-        resp = await call_llm(system, prompt, thinking_budget=2048)
+        # the facet call predicts the CPC main groups the whole search hangs on, once per job:
+        # it gets a full thinking budget (Harry: "输出 + 思考应该放在召回先")
+        resp = await call_llm(system, prompt, thinking_budget=8192)
         m = re.search(r'\{.*\}', resp, re.DOTALL)
         data = json.loads(m.group()) if m else {}
         out = {}

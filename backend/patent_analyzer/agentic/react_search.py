@@ -29,6 +29,7 @@ import os
 from .query_gen import _group, cpc_clause
 
 MAX_STEPS = int(os.environ.get("REACT_MAX_STEPS", "10"))
+REACT_THINKING = int(os.environ.get("REACT_THINKING", "8192"))
 TITLES_SHOWN = 25
 
 STEP_SCHEMA = {
@@ -97,7 +98,8 @@ async def run_react(elements: list[dict], broad_terms: list[str], cpc_groups: li
             break
         prompt = step_prompt(elements, broad_terms + learned, cpc_groups, steps, uncovered, learned, budget_left())
         try:
-            resp = await call(system, prompt, response_schema=STEP_SCHEMA, thinking_budget=1024, model=stage_model("search"))
+            # ten calls a job: thinking is cheap here and it is where the query is decided
+            resp = await call(system, prompt, response_schema=STEP_SCHEMA, thinking_budget=REACT_THINKING, model=stage_model("search"))
             d = json.loads(resp)
         except Exception as exc:
             steps.append({"n": n, "error": f"{type(exc).__name__}: {exc}"[:160], "query": "", "kind": "react", "total": None,
