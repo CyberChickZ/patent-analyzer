@@ -266,3 +266,58 @@ AUROC .595) and their Qwen-2.5-72B + LR ensemble (F1 .588 / AUROC .603);
 draft numbers are reported as numbers. `draft` pools every claim of the
 runs `draft_eval.py` wrote, reports the rule-flag rate before and after the
 node's reword pass, D's indefinite rate, and the same for the A2 draft.
+
+### First numbers (2026-09-18, gemini-2.5-pro, 5 Dis2Pat rows seed 42)
+
+Gate 1 (`--limit 5`, tau .7, macro over rows / pooled over elements):
+
+| column            | recall | prec | full | pooled R | pooled P |
+|-------------------|-------:|-----:|-----:|---------:|---------:|
+| draft claim 1     | .742 | .781 | .200 | .711 | .730 |
+| A2 pre-search draft | .759 | .679 | .200 | .737 | .667 |
+| elements direct   | .742 | .781 | .200 | .711 | .730 |
+| gold self         | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| draft dependents  | .736 | .575 | .200 | .657 | .575 |
+
+Reading: the drafted claim 1 recites the same share of the granted claim's
+elements as the extraction elements do (.742 — the draft is those elements,
+so this is the invariant working, not a result), at +10 pt of precision over
+the A2 free-text draft for -1.7 pt of recall: the A2 draft splits into more
+clauses than the granted claim has elements. Granularity 1.18 drafted
+limitations per gold element, 0 pool items dropped for an unlocatable quote,
+41 LLM calls for the 5 rows. `full` = .2 (one row of five recites every gold
+element) — with 5 rows that is one document, not a rate.
+
+Gate 2, calibration on 100 PEDANTIC test claims (45 indefinite / 55 definite):
+
+| detector      | P | R | F1 | acc | AUROC |
+|---------------|--:|--:|---:|----:|------:|
+| rules only    | .476 | .667 | .556 | .520 | .533 |
+| LLM examiner  | .466 | .756 | .576 | .500 | .568 |
+| rules OR LLM  | .462 | .933 | .618 | .480 | .557 |
+| paper LR baseline | | | .563 | | .595 |
+| paper 72B+LR ensemble | | | .588 | | .603 |
+
+**D is not used as a gate**: it passes the LR baseline on F1 (.618 vs .563)
+but not on AUROC (.557 vs .595), and its precision is barely above the .45
+base rate — it calls 73% (LLM) / 91% (union) of PEDANTIC claims indefinite
+where the truth is 45%. Per-category, the antecedent rule fires on 60 of 100
+claims where examiners cited antecedent basis in 9 (P .100 / R .667); the
+relative-term rule is the usable one (P .429 / R .500); the 112(f) rule fired
+0 times against 8 gold functional-claiming rejections — PEDANTIC's examiners
+read "control logic … identifying" as a nonce placeholder, which our word
+list does not cover.
+
+Gate 2 on our drafts (90 claims from the 5 gate-1 documents):
+
+- rule flag rate **.322 before the node's reword pass -> .044 after** (4
+  antecedent flags left, all in one document; they are the node's own
+  `open_flags`), so the reword loop clears 25 of 29 rule flags but not all —
+  the design's "0 after reword" is not met.
+- D (LLM examiner) calls 74/90 = .822 of the drafted claims indefinite,
+  against .73 on PEDANTIC's 50/50 set: read as ~1.1x the detector's own
+  positive rate, not as an 82% defect rate. The A2 pre-search draft scores
+  3/5 = .600 (n = 5 claims, one per document).
+- categories D raises on our claims: undefined_term 40, antecedent_basis 36,
+  contradicting_limitations 28, relative_term 21, omission 11 — the three the
+  rules cannot check are the majority, which is why they stay advisory.
