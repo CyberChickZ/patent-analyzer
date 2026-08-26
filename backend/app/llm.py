@@ -30,7 +30,7 @@ from google.genai.errors import APIError
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
 
 GC_PROJECT = os.getenv("GC_PROJECT", "aime-hello-world")
-MODEL = os.getenv("LLM_MODEL", "gemini-2.5-pro")
+MODEL = os.getenv("LLM_MODEL", "gemini-3.8-flash")
 MAX_TOKENS = 8192
 
 # Per-stage override: LLM_MODEL_<STAGE> (extract / screen / eval / idca / search / draft); unset → MODEL.
@@ -41,12 +41,15 @@ STAGES = ("extract", "screen", "eval", "idca", "search", "draft")
 # gemini-3.1-flash-lite at 13x the speed, 23x cheaper and 0/45 429s vs 2.5-pro (which also
 # loses batches to thinking overrunning max_output_tokens); extract/eval stay on the global model
 # (3.5-flash scored lower on both). 2.5-pro/flash/flash-lite retire 2026-10-20 — re-gate before then.
-# 2026-09-18: every stage but screen is back on the global model. 3.5-flash has no cost argument
-# ($1.50/$9 per M against 2.5-pro's $1.25/$10 — dearer on input) and it costs quality everywhere
-# it was tried: extraction (J5) Pap2Pat cov@1 .475 vs .600, quote survival .837 vs 1.000,
-# fabrication .165 (13/79) vs .000; the search stage (h1m, H1-01) pool reach 0/5 against 4/5,
-# because it narrows each ReAct query in the wrong direction. gemini-3.x-flash exists only on the
-# Vertex global endpoint (us-west1 returns 404) — never set VERTEX_LOCATION to a region for them.
+# 2026-09-18 (Harry): the global model is gemini-3.8-flash, screen stays 3.1-flash-lite. 3.8-flash
+# is $0.75/$3.75 per M against 2.5-pro's $1.25/$10 and the J5 extraction gate puts it ahead:
+# FiNE F1 .964 vs .897 (quote survival 1.000, fabrication 0/27, omission .069 vs .103), Pap2Pat
+# cov@3 .790 vs .779, misclassification .163 vs .304 (cov@1 .530 vs .600 is the one loss).
+# The gates for the other stages are running; a stage that loses beyond noise goes back.
+# 3.5-flash was tried and dropped: dearer than 2.5-pro on input ($1.50/$9), extraction
+# fabrication .165 (13/79), and on the search stage (h1m) H1-01 pool reach 0/5 against 4/5.
+# gemini-3.x-flash exists only on the Vertex global endpoint (us-west1 returns 404) — never set
+# VERTEX_LOCATION to a region for them.
 STAGE_DEFAULTS = {"screen": "gemini-3.1-flash-lite"}
 
 
