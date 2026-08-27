@@ -192,6 +192,13 @@ def shorten_checklist(item: str, max_len: int = 60) -> str:
     return item
 
 
+def _first_quote(ev: dict) -> str:
+    """Evidence line when the evaluator returned quotes but no prose (EVAL_LEAN)."""
+    qs = ev.get("evidence_quotes") or ([ev["evidence_quote"]] if ev.get("evidence_quote") else [])
+    q = next((str(x).strip() for x in qs if str(x).strip()), "")
+    return f'“{q[:300]}”' if q else ""
+
+
 def _clean_req_text(text: str) -> str:
     """Strip [w=X.XX] prefix from requirement/criterion text for display."""
     return re.sub(r'^\[w=[\d.]+\]\s*', '', text)
@@ -396,7 +403,8 @@ def generate_html(data: dict) -> str:
                 continue
             score_val = ev.get("score")
             is_match = ev.get("match", False)
-            analysis = esc(ev.get("analysis", ""))
+            # the lean deep read returns no analysis prose: the first verbatim quote is the evidence
+            analysis = esc(ev.get("analysis") or _first_quote(ev))
             full_req = _clean_req_text(resolve_req(req))
             short = esc(shorten_checklist(full_req))
             if score_val is not None:
@@ -1196,7 +1204,7 @@ def generate_markdown(data: dict) -> str:
                 if not isinstance(ev, dict):
                     continue
                 score_val = ev.get("score")
-                analysis = ev.get("analysis", "")
+                analysis = ev.get("analysis") or _first_quote(ev)
                 if score_val is not None:
                     label = {2: "PRESENT", 1: "PARTIAL", 0: "ABSENT"}.get(score_val, "?")
                 else:
