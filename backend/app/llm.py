@@ -45,12 +45,14 @@ STAGES = ("extract", "screen", "eval", "idca", "search", "draft")
 # is $0.75/$3.75 per M against 2.5-pro's $1.25/$10 and the J5 extraction gate puts it ahead:
 # FiNE F1 .964 vs .897 (quote survival 1.000, fabrication 0/27, omission .069 vs .103), Pap2Pat
 # cov@3 .790 vs .779, misclassification .163 vs .304 (cov@1 .530 vs .600 is the one loss).
-# The gates for the other stages are running; a stage that loses beyond noise goes back.
+# The search stage went back to 2.5-pro on its gate: H1-01 pool reach 4/5 on 2.5-pro against
+# 1/5 on 3.8-flash (h1n) and 0/5 on 3.5-flash (h1m) — the flash models narrow each ReAct query
+# (totals of 2.5k-38k against 100k+) and the graph channels then expand from the wrong seeds.
 # 3.5-flash was tried and dropped: dearer than 2.5-pro on input ($1.50/$9), extraction
 # fabrication .165 (13/79), and on the search stage (h1m) H1-01 pool reach 0/5 against 4/5.
 # gemini-3.x-flash exists only on the Vertex global endpoint (us-west1 returns 404) — never set
 # VERTEX_LOCATION to a region for them.
-STAGE_DEFAULTS = {"screen": "gemini-3.1-flash-lite"}
+STAGE_DEFAULTS = {"screen": "gemini-3.1-flash-lite", "search": "gemini-2.5-pro"}
 
 
 def stage_model(stage: str) -> str:
@@ -2157,8 +2159,8 @@ async def facet_elements(elements: list[dict], summary: str) -> dict[str, dict]:
     prompt = prompts.render("search.facets", summary=summary[:4000], listing=listing)
     try:
         # the facet call predicts the CPC main groups the whole search hangs on, once per job:
-        # it gets a full thinking budget (Harry: "输出 + 思考应该放在召回先")
-        resp = await call_llm(system, prompt, thinking_budget=8192)
+        # it gets the search stage's model and a full thinking budget (Harry: "输出 + 思考应该放在召回先")
+        resp = await call_llm(system, prompt, thinking_budget=8192, model=stage_model("search"))
         m = re.search(r'\{.*\}', resp, re.DOTALL)
         data = json.loads(m.group()) if m else {}
         out = {}
