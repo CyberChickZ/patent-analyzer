@@ -740,22 +740,27 @@ function draftBody(dc: any, adj: any): string {
   const claims: any[] = dc.claims || [];
   if (!claims.length) return `<h4>No draft claims</h4><p class="hitl-hint">Strategy: ${esc(dc.strategy || "none")}.</p>`;
   const av = dc.avoidance || {};
-  const flags: any[] = dc.open_flags || dc.definiteness_open || [];
+  // 112(b) checks the node could not fix itself (draft_claims.definiteness.flags, fixed=false)
+  const flags: any[] = ((dc.definiteness || {}).flags || []).filter((f: any) => !f.fixed);
   const flagBy: Record<string, string[]> = {};
-  for (const f of flags) (flagBy[f.lid || ""] ||= []).push(`${f.kind || "112(b)"}: ${f.message || f.reason || ""}`);
+  for (const f of flags) (flagBy[f.lid || ""] ||= []).push(`${f.category || f.kind || "112(b)"} (${f.rule || ""}) “${f.span || ""}”: ${f.note || ""}`);
   const head = `<h4>Draft claims (${claims.length}) — strategy <code>${esc(dc.strategy || "")}</code>${adj && adj.label ? ` · adjudication <b>${esc(adj.label)}</b>` : ""}</h4>
     <p class="hitl-hint">Attorney review. Every limitation shows the element and the verbatim disclosure text it rests on; edit the wording and it is what the report carries.
     ${av.reason ? `Avoidance: ${esc(av.reason)}.` : ""}${flags.length ? ` <b>${flags.length} open 112(b) flag(s)</b> — shown in red.` : ""}</p>`;
   const body = claims.map((c: any, ci: number) => {
     const dep = c.depends_on != null ? ` <span class="hitl-hint">(depends on claim ${esc(c.depends_on)})</span>` : "";
     const lims = (c.limitations || []).map((l: any, li: number) => {
-      const b = l.basis || {};
+      const basis: any[] = Array.isArray(l.basis) ? l.basis : l.basis ? [l.basis] : [];
       const fl = flagBy[l.lid || ""] || [];
+      const cov = l.coverage || {};
+      // a limitation no charted reference covers is what makes the claim allowable
+      const star = cov.verified && !(cov.covered_by || []).length ? ' <b title="no charted reference covers this limitation">★</b>' : "";
+      const basisHtml = basis.map((b: any) => `<div>${esc(b.element_id || "")}${b.evidence_quote ? `: “${esc((b.evidence_quote || "").slice(0, 160))}”` : ""}</div>`).join("")
+        || `<div>${esc(l.origin || "")}</div>`;
       return `<tr${fl.length ? ' class="hitl-flagged"' : ""}><td>${esc(l.lid || "")}</td>
         <td><textarea class="hitl-lim" data-ci="${ci}" data-li="${li}" rows="3">${esc(l.text)}</textarea>
           ${fl.length ? `<div class="hitl-flag">⚠ ${fl.map(esc).join("; ")}</div>` : ""}</td>
-        <td class="hitl-quote">${esc(b.element_id || l.element_id || "")}${b.evidence_quote ? `: “${esc((b.evidence_quote || "").slice(0, 160))}”` : ""}
-          ${l.distinguishing ? ' <b title="not covered by any cited reference">★</b>' : ""}</td></tr>`;
+        <td class="hitl-quote">${basisHtml}${star}</td></tr>`;
     }).join("");
     return `<div class="hitl-claim"><h4>Claim ${esc(c.no)} · ${esc(c.form || "")}${dep}
         <label class="hitl-hint"><input type="checkbox" class="hitl-keep-claim" data-ci="${ci}" checked> keep</label></h4>
@@ -814,7 +819,7 @@ async function mountPhasePanel(phasesEl: HTMLElement, jobId: string) {
         return `<tr><td>${i + 1}</td><td>${esc(d.pub_num)}</td><td>${esc((d.title || "").slice(0, 110))}</td><td>${esc(d.similarity_score ?? d.score ?? "")}</td><td>${n}/${Object.keys(cr).length}</td><td><input type="checkbox" class="hitl-keep-doc" data-i="${i}" checked></td></tr>`;
       }).join("") + `</tbody></table>`;
   } else if (phase === "draft") {
-    body = draftBody(v.draft_claims || {}, v.adjudication || {});
+    body = draftBody(v.draft_claims || {}, (st.context || {}).adjudication || {});
   }
 
   const promptNames: string[] = PHASE_PROMPTS[phase] || [];

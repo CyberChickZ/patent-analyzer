@@ -181,6 +181,18 @@ async def build_funnel(rec: dict, gold_entry: dict) -> dict:
                      "gold_in": sorted(pool_g), "gold_out": sorted(_fams([d["pub_num"] for d in s1], fam_of)),
                      "gold_lost": [{"pub": d["pub_num"], "cos": d["cos"], "best_element": d["best_element"]}
                                    for d in fd if d.get("pub_num") and _canon(d["pub_num"]) in fam_of and not d.get("stage1")]})
+        s3 = [d for d in fd if d.get("claims_worth_reading")]
+        if pr.get("stage3_calls"):
+            # what the old 60-cut would have kept: stage-2 order (elements touched, cosine)
+            old_cut = sorted([d for d in fd if d.get("worth_reading")],
+                             key=lambda d: (-len(d.get("elements") or []), -float(d.get("cos") or 0)))[:pr.get("stage3_out") or 60]
+            rows.append({"stage": "prune_stage3_claims", "in": pr.get("stage3_in"), "calls": pr.get("stage3_calls"),
+                         "with_claims": pr.get("stage3_with_claims"), "kept": pr.get("stage3_kept"), "out": pr.get("stage3_out"),
+                         "gold_out": sorted(_fams([d["pub_num"] for d in s3], fam_of)),
+                         "gold_old_cut": sorted(_fams([d["pub_num"] for d in old_cut], fam_of)),
+                         "gold_verdicts": [{"pub": d["pub_num"], "claims_worth_reading": d.get("claims_worth_reading"),
+                                            "claims_elements": d.get("claims_elements"), "claims_reason": d.get("claims_reason")}
+                                           for d in fd if d.get("pub_num") and _canon(d["pub_num"]) in fam_of and d.get("claims_read")]})
         rows.append({"stage": "prune_stage2_llm", "in": pr.get("stage2_in"), "calls": pr.get("stage2_calls"), "worth": pr.get("stage2_worth"),
                      "out": pr.get("stage2_out"), "gold_out": sorted(_fams([d["pub_num"] for d in s2], fam_of)),
                      "gold_verdicts": [{"pub": d["pub_num"], "worth_reading": d.get("worth_reading"), "elements": d.get("elements"), "reason": d.get("reason")}
@@ -226,6 +238,11 @@ def funnel_md(f: dict) -> str:
         elif r["stage"] == "prune_stage1_embed":
             lost = "; ".join(f"{d['pub']} cos={d['cos']:.2f} ({d['best_element']})" for d in r["gold_lost"]) or "none"
             L.append(f"| — | prune: embedding | top-100/element | | | | {r['in']} | → {r['out']} | gold {len(r['gold_in'])}→{len(r['gold_out'])} | | cut cos {r['cut_cos']:.3f}; lost: {lost} |")
+        elif r["stage"] == "prune_stage3_claims":
+            v = "; ".join(f'{g["pub"]}: {"keep" if g["claims_worth_reading"] else "DROP"} {g.get("claims_elements")} {g.get("claims_reason", "")}'
+                          for g in r["gold_verdicts"])[:400]
+            L.append(f'| — | prune: claims screen | {r["calls"]} calls · {r["with_claims"]} with claims | | | | {r["in"]} | → {r["kept"]} keep → {r["out"]} | '
+                     f'gold → {len(r["gold_out"])} (old 60-cut would keep {len(r["gold_old_cut"])}) | | {v} |')
         elif r["stage"] == "prune_stage2_llm":
             v = "; ".join(f"{d['pub']}: {'keep' if d['worth_reading'] else 'DROP'} [{','.join(d['elements'] or [])}] {d['reason']}" for d in r["gold_verdicts"]) or "none in shortlist"
             L.append(f"| — | prune: LLM screen | {r['calls']} calls | | | | {r['in']} | → {r['worth']} worth → {r['out']} | gold → {len(r['gold_out'])} | | {v} |")

@@ -461,6 +461,8 @@ async def search_node(state: GraphState) -> dict:
                              "cos": round(float(d.get("prune_cos", 0.0)), 4), "best_element": d.get("prune_best_element", ""),
                              "stage1": bool(d.get("prune_stage1")), "worth_reading": d.get("prune_worth_reading"),
                              "elements": d.get("prune_elements", []), "reason": d.get("prune_reason", ""),
+                             "claims_read": "claims_worth_reading" in d, "claims_worth_reading": d.get("claims_worth_reading"),
+                             "claims_elements": d.get("claims_elements", []), "claims_reason": d.get("claims_reason", ""),
                              "rank": rank_of.get(id(d))}
                             for d in all_docs] if prune_stats else [],
             "serpapi_quota": _serpapi_quota_status(),
