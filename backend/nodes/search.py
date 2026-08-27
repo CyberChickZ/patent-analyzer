@@ -367,9 +367,12 @@ async def search_node(state: GraphState) -> dict:
             _event("channel_crashed", f"prune: {type(exc).__name__}: {exc}")
             pruned_docs, prune_stats = [], {"error": str(exc)[:200]}
 
-    # Semantic rerank
+    # Semantic rerank. Everything the prune kept is deep-read and reported (leader, 2026-09-18:
+    # h1h lost 8 of the 16 gold families that survived the screen to the old top-30 cut); the
+    # embedding order is only a tie-break among documents the claims screen already ranked.
     from patent_analyzer.semantic_search import rerank_docs
-    ranked = rerank_docs(summary, pruned_docs or all_docs, limit=30)
+    rank_limit = int(os.environ.get("RERANK_LIMIT", "60")) if pruned_docs else 30
+    ranked = rerank_docs(summary, pruned_docs or all_docs, limit=rank_limit)
     rank_of = {id(d): i + 1 for i, d in enumerate(ranked)}
 
     # Ensure BigQuery patent candidates aren't lost after rerank
