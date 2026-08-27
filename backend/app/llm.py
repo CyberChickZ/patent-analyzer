@@ -2078,6 +2078,14 @@ QUERIES LEFT: {budget_left}
 HISTORY (each step: what was asked, the total on Google, and the top titles that came back):
 {history}
 
+What the query is FOR. Measured on 8 papers (H.md §H1.5): of the 30 gold families a search
+reached, the citation expansion first reached 19, the paper-to-patent bridges 8, Lens 2 and
+Google's similar-document neighbours 1 — while 60 template keyword queries first reached NONE.
+A query almost never returns the examiner's reference itself; it returns documents whose
+citations, family and neighbours contain it. So judge a query by whether its top titles are
+**the right neighbourhood to expand from** — real patents in the invention's art, with assignees
+and citation trails — not by whether one of them looks like an exact hit.
+
 Decide the next query. Rules of thumb:
 - total > 100,000 or titles all off-topic → the neighbourhood group is too wide or the specific
   items too generic: add a limiting item, swap a hypernym for a narrower term, or add the CPC group.
