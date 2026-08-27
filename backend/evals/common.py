@@ -14,6 +14,10 @@ def model_tag() -> str:
              if os.getenv(f"LLM_MODEL_{st.upper()}")]
     if os.getenv("LLM_THINKING_LEVEL"):
         parts.append(f"think-{os.getenv('LLM_THINKING_LEVEL').lower()}")
+    if os.getenv("EVAL_LEAN") == "1":
+        parts.append("lean")           # deep read without thinking and without the analysis prose
+    if os.getenv("EVAL_BRI") == "1":
+        parts.append("bri")
     return ("_" + "+".join(parts)) if parts else ""
 
 
