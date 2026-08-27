@@ -27,7 +27,11 @@ STAGE1_CAP = int(os.environ.get("PRUNE_STAGE1_CAP", "1200"))   # union cap â†’ â
 STAGE2_BATCH = int(os.environ.get("PRUNE_STAGE2_BATCH", "40"))
 KEEP = int(os.environ.get("PRUNE_KEEP", "60"))
 GRAPH_SOURCES = {"citation_graph", "google_similar", "lens_bridge"}
-STAGE3_IN = int(os.environ.get("PRUNE_STAGE3_IN", "1000"))     # abstract survivors that get their claims read
+# 300 publications cost 17.4 GiB of BigQuery (measured 2026-09-18: 9.31 + 8.07 on the bucketed
+# pubs/claims tables), so 400 keeps a job's claims fetch near 23 GiB / $0.14 and every query
+# under the 30 GiB ceiling; it still reads 6.7x more documents than the 60-cut would show.
+STAGE3_IN = int(os.environ.get("PRUNE_STAGE3_IN", "400"))      # abstract survivors that get their claims read
+STAGE3_FETCH_CHUNK = int(os.environ.get("PRUNE_STAGE3_CHUNK", "300"))
 STAGE3_BATCH = int(os.environ.get("PRUNE_STAGE3_BATCH", "8"))  # claims are long: fewer per call
 
 SCREEN_SCHEMA = {
@@ -202,8 +206,11 @@ async def stage3_claims(elements: list[dict], docs: list[dict], idxs: list[int],
         from patent_analyzer.recall.bigquery_patents import fetch_by_pub_nums
 
         async def fetch_claims(pubs):
-            got = await fetch_by_pub_nums(pubs, with_claims=True)
-            return {k: (v.get("claims_text") or "") for k, v in got.items()}
+            out: dict[str, str] = {}
+            for x in range(0, len(pubs), STAGE3_FETCH_CHUNK):
+                got = await fetch_by_pub_nums(pubs[x:x + STAGE3_FETCH_CHUNK], with_claims=True)
+                out.update({k: (v.get("claims_text") or "") for k, v in got.items()})
+            return out
     pubs = [docs[i].get("pub_num") for i in head if docs[i].get("pub_num")]
     if not pubs:                       # papers only: nothing to read claims from
         return head[:keep], {"stage3_in": len(head), "stage3_calls": 0, "stage3_with_claims": 0, "stage3_out": min(len(head), keep)}
