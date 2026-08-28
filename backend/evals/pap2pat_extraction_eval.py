@@ -104,29 +104,42 @@ def gold_claims(patent: dict) -> list[dict]:
     return out
 
 
-def paper_texts(pair_id: str, data: Path) -> tuple[str, str]:
-    """(IDCA text = openworld_eval.render_paper, marker text via adapters.paper)."""
+def paper_texts(pair_id: str, data: Path, input_mode: str = "academic_paper") -> tuple[str, str]:
+    """(IDCA text = openworld_eval.render_paper, marker text via adapters.paper).
+
+    input_mode='manuscript' is the submission-draft scenario: the marker text
+    is cut by the production adapter (patent_analyzer.adapters.manuscript
+    .strip_related_work — drops Related Work / Background / Prior Art at any
+    depth and clears the abstract), exactly what nodes/idca.py:72 does to the
+    Doc JSON in manuscript mode. The IDCA text stays whole, because IDCA is
+    what does that cut in production.
+    """
     from openworld_eval import render_paper
     from patent_analyzer.adapters.paper import doc_from_sections, render_doc
     paper = json.loads((data / pair_id / "paper.json").read_text())
     doc = doc_from_sections(paper.get("title", ""), paper.get("abstract", ""), paper.get("sections"))
+    if input_mode == "manuscript":
+        from patent_analyzer.adapters.manuscript import strip_related_work
+        doc = strip_related_work(doc)
     return render_paper(pair_id), render_doc(doc)
 
 
-async def run_pair(pair: dict, extractor: str, data: Path) -> dict:
+async def run_pair(pair: dict, extractor: str, data: Path, input_mode: str = "academic_paper",
+                   run_tag: str = "") -> dict:
     from nodes.idca import idca_node
     import llm_cache
 
     key = pair["pair_id"]
-    out_path = RUN_DIR / f"{key}_{extractor}{model_tag()}.json"
+    mode_tag = "" if input_mode == "academic_paper" else f"_{input_mode}"
+    out_path = RUN_DIR / f"{key}_{extractor}{mode_tag}{model_tag()}{('_' + run_tag) if run_tag else ''}.json"
     if out_path.exists():
         return json.loads(out_path.read_text())
-    idca_text, marker_text = paper_texts(key, data)
+    idca_text, marker_text = paper_texts(key, data, input_mode)
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
         f.write(idca_text)
         tmp = f.name
     before = llm_cache.stats["hits"] + llm_cache.stats["misses"]
-    p1 = await idca_node({"input_local_path": tmp})
+    p1 = await idca_node({"input_local_path": tmp, "input_mode": input_mode})
     rec = {"pair_id": key, "extractor": extractor, "status_determination": p1.get("status_determination"),
            "input_mode": p1.get("input_mode"), "summary": p1.get("summary", ""),
            "checklist": [], "extraction": None, "errors": None, "llm_calls": None}
@@ -186,6 +199,11 @@ def _fmt(x) -> str:
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=5, help="first k of the 50 seed-42 pairs")
+    ap.add_argument("--pairs", default="", help="comma-separated pair_ids (or the US pub prefix) instead of --limit")
+    ap.add_argument("--input-mode", default="academic_paper", choices=["academic_paper", "manuscript"],
+                    help="manuscript = submission draft: Related Work / Background dropped, abstract cleared")
+    ap.add_argument("--run-tag", default="", help="suffix on the run files; model_tag() only names a stage "
+                    "override, so a run under a new *global* model would otherwise replay an old model's record")
     ap.add_argument("--max-live-calls", type=int, default=40)
     ap.add_argument("--no-control", action="store_true", help="skip the SSR control column")
     ap.add_argument("--no-errors", action="store_true")
@@ -195,7 +213,12 @@ async def main():
     install_budget(args.max_live_calls)
     import llm_cache
     from openworld_eval import sample_pairs
-    pairs = sample_pairs(50, seed=42)[:args.limit]
+    pairs = sample_pairs(50, seed=42)
+    if args.pairs:
+        want = [x.strip() for x in args.pairs.split(",") if x.strip()]
+        pairs = [p for p in pairs if any(w in p["pair_id"] or w in p["patent_pub"] for w in want)]
+    else:
+        pairs = pairs[:args.limit]
 
     rows = []
     for pair in pairs:
@@ -207,14 +230,14 @@ async def main():
         row = {"pair_id": pair["pair_id"], "claims": claims, "new": None, "ssr": None}
         for extractor in (["new"] if args.no_control else ["new", "ssr"]):
             try:
-                row[extractor] = await run_pair(pair, extractor, data)
+                row[extractor] = await run_pair(pair, extractor, data, args.input_mode, args.run_tag)
             except BudgetExceeded as exc:
                 print(f"[{pair['pair_id']}/{extractor}] BUDGET: {exc}")
             except Exception as exc:
                 print(f"[{pair['pair_id']}/{extractor}] FAILED {type(exc).__name__}: {exc}")
         rows.append(row)
 
-    print(f"\n== Pap2Pat extraction  pairs={len(rows)}  seed=42  tau={TAU}")
+    print(f"\n== Pap2Pat extraction  pairs={len(rows)}  seed=42  tau={TAU}  input_mode={args.input_mode}")
     hdr = f"{'pair':<28}{'#claims':>8}{'#gold':>6}" + "".join(f"{'cov@' + str(n):>8}" for n in NS) + \
           f"{'full@3':>8}{'#cand':>6}{'surv':>7}{'calls':>6}{'| ssr cov':>10}{'full':>6}{'#items':>7}"
     print(hdr)
@@ -252,7 +275,7 @@ async def main():
         print(line)
         if not args.no_errors:
             gold = [e for c in claims for e in c["elements"]]
-            _, marker_text = paper_texts(row["pair_id"], data)
+            _, marker_text = paper_texts(row["pair_id"], data, args.input_mode)
             for k, rec, preds, rq in (("new", new, candidate_elements(new, None, supported_only=False) if new else [], True),
                                       ("ssr", ssr, checklist_elements(ssr) if ssr else [], False)):
                 if not preds:
