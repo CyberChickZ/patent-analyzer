@@ -377,6 +377,148 @@ def report_attribution(rows: list[dict]):
                   f"= {sum(1 for r in rs if r['hit']) / len(rs):.3f}")
 
 
+# ---------------------------------------------------------------- paper-side gold
+
+_QUOTED = re.compile(r'"([^"]{12,300})"')
+_ETAL = re.compile(r"\bet\s+al\.?,?\s*[:]?\s*", re.I)
+
+
+def npl_title(npl: str) -> str:
+    """A searchable title out of a raw NPL citation string.
+
+    Two spellings in amie_patents.citations: EPO search reports quote the title
+    ('GATTI J E ET AL: "Evaluation of the Burn Wound with Perfusion Fluorometry",
+    JOURNAL OF TRAUMA, ...') and US IDS-style rows sometimes leave it bare
+    ('Flacke et al., The role of soluble adenylyl cyclase in ..., 2010,
+    Onkologie, vol. 33'). Rows with neither (a bare 'Translation of the French
+    patent publication by EPO and Google.') return "".
+    """
+    t = (npl or "").strip()
+    m = _QUOTED.search(t)
+    if m:
+        return m.group(1).strip()
+    m = _ETAL.search(t)
+    if m:
+        rest = t[m.end():]
+        rest = re.split(r",\s*(?:19|20)\d{2}\b|\.\s+(?:19|20)\d{2}\b", rest)[0]
+        rest = rest.split(",")[0] if len(rest.split(",")[0]) > 30 else rest
+        if len(rest.strip()) > 20:
+            return rest.strip(" .,")
+    return ""
+
+
+async def sea_npl(keys: list[str]) -> dict[str, list[dict]]:
+    """Examiner-cited NON-patent literature per application family: the rows of
+    amie_patents.citations whose category contains 'SEA' and that carry npl_text.
+    This is the paper-side gold — examiner citations that are papers, not patents
+    (the patent-side gold in gold.json drops them by construction, openworld_eval
+    build_gold: `if not c["cited"] or c["npl_text"]: continue`)."""
+    from patent_analyzer.recall.bigquery_patents import fetch_citations, fetch_families
+
+    gold = load_gold()
+    fams = await fetch_families(sorted({gold[k]["family_id"] for k in keys if gold[k]["family_id"]}))
+    members = sorted({m["publication_number"] for ms in fams.values() for m in ms})
+    cits = await fetch_citations(members)
+    out = {}
+    for k in keys:
+        seen, rows = set(), []
+        for m in [x["publication_number"] for x in fams.get(gold[k]["family_id"], [])]:
+            for c in cits.get(m, {}).get("cits", []):
+                if "SEA" not in c["category"] or not c["npl_text"]:
+                    continue
+                txt = c["npl_text"].strip()
+                if txt in seen:
+                    continue
+                seen.add(txt)
+                rows.append({"npl_text": txt, "title": npl_title(txt), "cited_on": m})
+        out[k] = rows
+    return out
+
+
+async def resolve_npl(rows: list[dict]) -> None:
+    """Title -> a paper id, in place. Semantic Scholar /paper/search/match first
+    (its SerialLock keeps the 1 req/s the API terms ask for), OpenAlex
+    title.search as the fallback."""
+    from patent_analyzer.recall import openalex, semantic_scholar
+
+    for r in rows:
+        r["resolved"] = None
+        if not r["title"]:
+            continue
+        try:
+            c = await semantic_scholar.match_title(r["title"])
+        except Exception:
+            c = None
+        src = "s2"
+        if not c or not c.title:
+            try:
+                c = await openalex.search_paper_by_title(r["title"])
+            except Exception:
+                c = None
+            src = "openalex"
+        if c and c.title:
+            r["resolved"] = {"source": src, "title": c.title, "doi": (c.doi or "").lower(),
+                             "pub_num": c.pub_num, "year": c.year}
+
+
+def paper_pool_index(rec: dict) -> tuple[set[str], set[str]]:
+    """(DOIs, normalised titles) of every non-patent document in the pool.
+    Pool rows carry only pub_num (a DOI when the channel knew one); the titles
+    come from the parallel funnel_docs list."""
+    from patent_analyzer.recall.pool import _norm_title
+
+    dois = {(d.get("pub_num") or "").lower() for d in rec.get("pool", [])
+            if d.get("match_type") != "Patent" and (d.get("pub_num") or "").startswith("10.")}
+    titles = {_norm_title(d.get("title", "")) for d in rec.get("funnel_docs", [])
+              if d.get("match_type") != "Patent" and d.get("title")}
+    return dois - {""}, titles - {""}
+
+
+def report_npl(per_key: dict[str, list[dict]]):
+    from patent_analyzer.recall.pool import _norm_title
+
+    gold = load_gold()
+    print(f"\n== paper-side gold: examiner-cited non-patent literature  tag={TAG}")
+    print(f"{'case':<18}{'SEA NPL':>9}{'title cut':>11}{'resolved':>10}{'uniq':>6}{'in pool':>9}"
+          f"{'suspect':>9}{'pool papers':>13}")
+    tot = [0, 0, 0, 0, 0, 0, 0]
+    for key in sorted(per_key):
+        rows = per_key[key]
+        rec = load_rec(key)
+        dois, titles = paper_pool_index(rec)
+        n_pool_papers = sum(1 for d in rec.get("pool", []) if d.get("match_type") != "Patent")
+        cutoff = (gold.get(key) or {}).get("priority_date", "")
+        for r in rows:
+            res = r.get("resolved") or {}
+            r["in_pool"] = bool((res.get("doi") and res["doi"] in dois)
+                                or (res.get("title") and _norm_title(res["title"]) in titles)
+                                or (r["title"] and _norm_title(r["title"]) in titles))
+            # a match dated after the application's priority cannot be what the
+            # examiner cited — S2's fuzzy title match found a different paper
+            r["suspect"] = bool(res and cutoff and str(res.get("year") or "")[:4].isdigit()
+                                and str(res["year"])[:4] > cutoff[:4])
+        uniq = {(r.get("resolved") or {}).get("doi") or r["title"].lower() for r in rows if r.get("resolved")}
+        uniq_hit = {(r.get("resolved") or {}).get("doi") or r["title"].lower() for r in rows
+                    if r.get("resolved") and r["in_pool"]}
+        n_t = sum(1 for r in rows if r["title"])
+        n_r = sum(1 for r in rows if r.get("resolved"))
+        n_s = sum(1 for r in rows if r.get("suspect"))
+        print(f"{key:<18}{len(rows):>9}{n_t:>11}{n_r:>10}{len(uniq):>6}{len(uniq_hit):>9}{n_s:>9}{n_pool_papers:>13}")
+        for i, v in enumerate((len(rows), n_t, n_r, len(uniq), len(uniq_hit), n_s, n_pool_papers)):
+            tot[i] += v
+    print(f"{'total':<18}{tot[0]:>9}{tot[1]:>11}{tot[2]:>10}{tot[3]:>6}{tot[4]:>9}{tot[5]:>9}{tot[6]:>13}")
+    if tot[3]:
+        print(f"paper-side reach (distinct resolved NPL found in the pool) = "
+              f"{tot[4]}/{tot[3]} = {tot[4] / tot[3]:.3f}")
+    print("\n-- every examiner-cited NPL row")
+    for key in sorted(per_key):
+        for r in per_key[key]:
+            res = r.get("resolved") or {}
+            print(f"  {key} [{'POOL' if r.get('in_pool') else ('SUSP' if r.get('suspect') else '    ')}] "
+                  f"{(res.get('source') or '-'):<9}{(res.get('doi') or res.get('pub_num') or '-'):<40}"
+                  f"{(r['title'] or '(no title parsed)')[:80]}")
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", default="attribute", choices=["claims", "cos", "attribute", "npl"])
@@ -426,6 +568,16 @@ async def main():
         (OUT_DIR / f"attribution_{TAG}.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1))
         report_attribution(rows)
         print("\n" + llm_cache.summary())
+        return
+
+
+    if args.stage == "npl":
+        keys = h1h_keys()
+        per_key = await sea_npl(keys)
+        for key in keys:
+            await resolve_npl(per_key[key])
+        report_npl(per_key)
+        (OUT_DIR / f"npl_{TAG}.json").write_text(json.dumps(per_key, ensure_ascii=False, indent=1))
         return
 
 
