@@ -150,9 +150,59 @@ async def load_cases() -> list[dict]:
     return cases
 
 
+def gold_units(fam: dict) -> list[str]:
+    """What the citing examiner would have read in the reference: its title +
+    abstract, its claim 1 whole, and claim 1 cut into limitations."""
+    from nodes.claim_mode import _parse_claim_limitations, _split_preamble
+
+    units = []
+    head = f"{fam.get('title', '')}. {fam.get('abstract', '')}".strip(". ").strip()
+    if head:
+        units.append(head)
+    c1 = (fam.get("claim1") or "").strip()
+    if c1:
+        units.append(c1[:2000])
+        parsed = _parse_claim_limitations(c1)
+        units += [t.strip() for t in _split_preamble(parsed["preamble"]) + parsed["limitations"]
+                  if len(t.strip()) > 15]
+    return units[:24] or [fam.get("title", "") or fam["family_id"]]
+
+
+def cosine_signal(case: dict) -> dict:
+    """te005 cosines, same encoder and tau as the Pap2Pat coverage gate
+    (evals/extraction_eval.embed, SEMANTIC_SIMILARITY, tau=.7).
+
+    Two matrices, kept apart:
+      lim_cov[lid]  = best cosine of that independent-claim limitation against
+                      any element we extracted  -> did Phase 2 produce it?
+      fam[fid]      = best cosine of the reference's own text against any
+                      element  -> is the reference's subject matter in the paper?
+    """
+    from extraction_eval import embed
+
+    els = case["elements"]
+    if not els:
+        return {"lim_cov": {}, "fam": {}}
+    ev = embed([e["text"] for e in els])
+    out = {"lim_cov": {}, "fam": {}}
+    lims = case["limitations"]
+    if lims:
+        sim = embed([l["text"] for l in lims]) @ ev.T
+        for i, l in enumerate(lims):
+            j = int(np.argmax(sim[i]))
+            out["lim_cov"][l["lid"]] = {"cos": round(float(sim[i, j]), 4), "element": els[j]["id"]}
+    for fam in case["families"]:
+        units = gold_units(fam)
+        sim = embed(units) @ ev.T
+        i, j = np.unravel_index(int(np.argmax(sim)), sim.shape)
+        out["fam"][fam["family_id"]] = {"cos": round(float(sim[i, j]), 4), "element": els[j]["id"],
+                                        "unit": units[i][:120]}
+    return out
+
+
 async def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stage", default="attribute", choices=["claims", "attribute", "npl"])
+    ap.add_argument("--stage", default="attribute", choices=["claims", "cos", "attribute", "npl"])
     args = ap.parse_args()
     from common import load_env_yaml
     load_env_yaml()
@@ -168,6 +218,22 @@ async def main():
         print(f"{'total':<18}{sum(len(c['elements']) for c in cases):>6}"
               f"{sum(len(c['limitations']) for c in cases):>11}{tot:>9}"
               f"{sum(len(c['reached']) for c in cases):>8}")
+        return
+
+    if args.stage == "cos":
+        cases = await load_cases()
+        n_lim = n_lim_hit = n_fam = n_fam_hit = 0
+        for c in cases:
+            sig = cosine_signal(c)
+            lim_hit = sum(1 for v in sig["lim_cov"].values() if v["cos"] >= TAU)
+            fam_hit = sum(1 for v in sig["fam"].values() if v["cos"] >= TAU)
+            n_lim += len(sig["lim_cov"]); n_lim_hit += lim_hit
+            n_fam += len(sig["fam"]); n_fam_hit += fam_hit
+            print(f"{c['key']:<18} lim>=tau {lim_hit:>2}/{len(sig['lim_cov']):<3} "
+                  f"fam>=tau {fam_hit:>2}/{len(sig['fam']):<3} "
+                  f"fam cos {sorted(round(v['cos'], 3) for v in sig['fam'].values())}")
+        print(f"total: limitations covered {n_lim_hit}/{n_lim} = {n_lim_hit / max(n_lim, 1):.3f}  "
+              f"gold families with cos>={TAU} {n_fam_hit}/{n_fam} = {n_fam_hit / max(n_fam, 1):.3f}")
         return
 
 
