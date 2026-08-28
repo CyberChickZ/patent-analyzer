@@ -2089,9 +2089,10 @@ citations, family and neighbours contain it. So judge a query by whether its top
 and citation trails — not by whether one of them looks like an exact hit.
 
 Decide the next query. Rules of thumb:
-- total > 100,000 or titles all off-topic → the neighbourhood group is too wide or the specific
-  items too generic: add a limiting item, swap a hypernym for a narrower term, or add the CPC group.
-- total < 200 → too narrow: drop an item, or use a synonym / stemmed form; never repeat a query.
+- Aim for a field of 80,000-150,000 documents. Below ~50,000 the field is too small to contain
+  the reference you are looking for: drop a specific item or swap it for a broader form. Titles
+  all off-topic at a large total → the neighbourhood group is wrong, not too wide.
+- total < 200 → far too narrow: drop an item, or use a synonym / stemmed form; never repeat a query.
 - READ the returned titles: when they use patent vocabulary for what the paper calls something
   else (e.g. the paper says "kinetic proxy", patents say "teleconferencing robot",
   "swiveling monitor"), put those words in `learned_terms` and use them next.

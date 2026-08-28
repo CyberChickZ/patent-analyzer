@@ -72,3 +72,22 @@ def test_react_tries_every_predicted_group_before_reusing_one():
     steps = asyncio.run(run_react(ELS, ["video conferencing"], ["H04N7", "G01S5", "G05D1"], fake_search, lambda: budget["n"], call=fake_call))
     assert [s["cpc_group"] for s in steps] == ["H04N7", "G01S5", "G05D1"]
     assert [s["cpc_forced"] for s in steps] == [None, "G01S5", "G05D1"]
+
+
+def test_a_query_whose_field_is_too_small_is_widened_once(monkeypatch):
+    monkeypatch.setattr("patent_analyzer.agentic.react_search.REACT_MIN_TOTAL", 50000)
+    seen = []
+
+    async def fake_call(*a, **k):
+        return json.dumps({"observation": "o", "decision": "d", "covered_elements": [], "learned_terms": [],
+                           "next": {"target_elements": ["inv1.e1"], "specific": ["motorized turntable", "acrylic frame"],
+                                    "broad": ["video conferencing"], "cpc_group": ""}, "stop": False})
+    budget = {"n": 2}
+
+    async def fake_search(q):
+        seen.append(q)
+        budget["n"] -= 1
+        return [], (2699 if "acrylic" in q else 96516), "serpapi_patents"
+    steps = asyncio.run(run_react(ELS, ["video conferencing"], [], fake_search, lambda: budget["n"], call=fake_call, max_steps=1))
+    assert len(seen) == 2 and "acrylic frame" in seen[0] and "acrylic frame" not in seen[1]
+    assert steps[0]["total"] == 96516 and steps[0]["widened"]["dropped"] == "acrylic frame"

@@ -30,6 +30,10 @@ from .query_gen import _group, cpc_clause
 
 MAX_STEPS = int(os.environ.get("REACT_MAX_STEPS", "10"))
 REACT_THINKING = int(os.environ.get("REACT_THINKING", "8192"))
+# J6 guardrail: the flash models narrow a query until its field is too small to hold the
+# answer (h1n totals 9.6k-38k against 2.5-pro's 96k-126k, pool reach 1/5 vs 4/5). When a step
+# comes back under REACT_MIN_TOTAL, drop the last specific item and search once more.
+REACT_MIN_TOTAL = int(os.environ.get("REACT_MIN_TOTAL", "0"))
 TITLES_SHOWN = 25
 
 STEP_SCHEMA = {
@@ -136,11 +140,21 @@ async def run_react(elements: list[dict], broad_terms: list[str], cpc_groups: li
             if not query or any(s.get("query") == query for s in steps):
                 break
         hits, total, chan = await search(query)
+        widened = None
+        if (REACT_MIN_TOTAL and total is not None and total < REACT_MIN_TOTAL
+                and len(specific) > 1 and budget_left() >= 1):
+            wider = compose(specific[:-1], broad, cpc)
+            if wider and not any(st.get("query") == wider for st in steps):
+                w_hits, w_total, w_chan = await search(wider)
+                if (w_total or 0) > (total or 0):
+                    widened = {"from": query, "from_total": total, "dropped": specific[-1]}
+                    query, hits, total, chan, specific = wider, w_hits, w_total, w_chan, specific[:-1]
         pubs = [(c.pub_num or c.title[:80]) for c in hits]
         new = [p for p in pubs if p not in seen_pubs]
         seen_pubs.update(pubs)
         row = {"n": n, "kind": "react", "query": query, "target_elements": nx.get("target_elements") or [], "specific": specific,
-               "broad": broad, "cpc_group": cpc, "cpc_forced": forced, "observation": d.get("observation"), "decision": d.get("decision"),
+               "broad": broad, "cpc_group": cpc, "cpc_forced": forced, "widened": widened,
+               "observation": d.get("observation"), "decision": d.get("decision"),
                "channel": chan, "total": total, "hits": len(hits), "returned": len(hits), "new": len(new), "pubs": pubs, "new_pubs": new,
                "papers": sum(1 for c in hits if c.match_type != "Patent"),
                "facets_used": {"specific": specific, "broad": broad, **({"cpc": [cpc]} if cpc else {})},
