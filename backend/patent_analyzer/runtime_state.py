@@ -46,6 +46,12 @@ def month_key(now: datetime | None = None) -> str:
     return (now or datetime.now(timezone.utc)).strftime("%Y-%m")
 
 
+def week_key(now: datetime | None = None) -> str:
+    """ISO week, for quotas the provider counts per week (USPTO ODP)."""
+    y, w, _ = (now or datetime.now(timezone.utc)).isocalendar()
+    return f"{y}-W{w:02d}"
+
+
 class MonthlyQuota:
     """Per-(name, month) counter, e.g. SerpAPI calls per key."""
 
@@ -80,6 +86,17 @@ class MonthlyQuota:
         gap = self.cap - self.used()
         if gap > 0:
             kv().incr(_NS, self._key(), by=gap)
+
+
+class PeriodQuota(MonthlyQuota):
+    """MonthlyQuota with a caller-chosen period key (e.g. week_key for USPTO ODP)."""
+
+    def __init__(self, name: str, cap: int, period=week_key):
+        super().__init__(name, cap)
+        self.period = period
+
+    def _key(self) -> str:
+        return f"quota:{self.name}:{self.period()}"
 
 
 class MinuteGate:
