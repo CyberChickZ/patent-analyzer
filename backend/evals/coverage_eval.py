@@ -131,13 +131,24 @@ def quote_location(quote: str, patent: dict) -> tuple[str, int | None] | None:
     return best_ref
 
 
+def _eval_model() -> str:
+    from app.llm import stage_model
+    return stage_model("eval")
+
+
 async def run_one(app: str, checklist_kind: str, doc_mode: str) -> dict:
     from app.llm import evaluate_single_document_text
     from patent_analyzer.quote_verify import verify_checklist_results
 
     out_path = RUN_DIR / f"{app}_{checklist_kind}_{doc_mode}{model_tag()}.json"
     if out_path.exists():
-        return json.loads(out_path.read_text())
+        cached = json.loads(out_path.read_text())
+        # the file name only carries LLM_MODEL_<STAGE> overrides, so a run under a different
+        # global LLM_MODEL would silently replay the old model's answers (2026-09-18)
+        # files written before 2026-09-18 carry no model: they were all produced under the
+        # then-default gemini-2.5-pro
+        if cached.get("model", "gemini-2.5-pro") == _eval_model():
+            return cached
 
     data = load_app(app)
     checklist = build_checklist(data, checklist_kind)
@@ -153,7 +164,7 @@ async def run_one(app: str, checklist_kind: str, doc_mode: str) -> dict:
             item["quote_paragraph"] = quote_paragraph(item["evidence_quote"], doc)
     result = {"app": app, "checklist_kind": checklist_kind, "doc_mode": doc_mode,
               "checklist": checklist, "checklist_results": cr, "verify": stats,
-              "source": res.get("source")}
+              "source": res.get("source"), "model": _eval_model()}
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=1))
     return result
