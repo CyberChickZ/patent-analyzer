@@ -200,9 +200,187 @@ def cosine_signal(case: dict) -> dict:
     return out
 
 
+TARGET_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {"limitations": {"type": "ARRAY", "items": {"type": "STRING"}},
+                   "reason": {"type": "STRING"}},
+    "required": ["limitations"],
+}
+
+ATTR_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {"in_paper": {"type": "BOOLEAN"},
+                   "covered": {"type": "BOOLEAN"},
+                   "which_elements": {"type": "ARRAY", "items": {"type": "STRING"}},
+                   "miss_type": {"type": "STRING", "enum": list(MISS_TYPES)},
+                   "reason": {"type": "STRING"}},
+    "required": ["in_paper", "covered"],
+}
+
+
+def _ref_block(fam: dict) -> str:
+    return (f"CITED REFERENCE {fam['pubs'][0]}\n"
+            f"title: {fam.get('title', '')}\n"
+            f"abstract: {(fam.get('abstract') or '(none)')[:1500]}\n"
+            f"claim 1: {(fam.get('claim1') or '(none)')[:1500]}")
+
+
+async def llm_target(case: dict, fam: dict) -> dict:
+    """Which limitations of the application's own independent claims is this
+    reference cited against? The examiner cited it for something specific."""
+    from app import llm as _llm
+
+    lims = "\n".join(f"[{l['lid']}] {l['text'][:400]}" for l in case["limitations"])
+    system = ("You are a US patent examiner. A reference was cited in a search report against this "
+              "application. Say which of the application's independent-claim limitations the reference "
+              "is relevant to. Output JSON only.")
+    user = (f"APPLICATION INDEPENDENT-CLAIM LIMITATIONS\n{lims}\n\n{_ref_block(fam)}\n\n"
+            "Return the limitation ids (the [c1.l2] labels) this reference reads on or is closest to. "
+            "Pick 1-4; never return an empty list — if nothing fits well, return the single closest one. "
+            "reason <= 25 words.")
+    raw = await _llm.call_llm(system, user, response_schema=TARGET_SCHEMA)
+    data = json.loads(raw)
+    valid = {l["lid"] for l in case["limitations"]}
+    # the prompt shows the ids in brackets, so the model echoes "[c1.l2]" about a
+    # third of the time; pull the id out of whatever wrapper comes back
+    lids = []
+    for x in (data.get("limitations") or []):
+        for m in re.findall(r"c\d+\.l\d+", str(x)):
+            if m in valid and m not in lids:
+                lids.append(m)
+    return {"limitations": lids, "reason": str(data.get("reason") or "")[:200]}
+
+
+async def llm_attribute(case: dict, fam: dict, targeted: list[dict], paper: str) -> dict:
+    """Did Phase 2 produce an element covering what the reference is cited for?
+    If not, what kind of element is missing?"""
+    from app import llm as _llm
+
+    els = "\n".join(f"[{e['id']}] (candidate {e['candidate']}) {e['text'][:300]}" for e in case["elements"])
+    tgt = "\n".join(f"- {l['text'][:400]}" for l in targeted) or "(none located)"
+    system = ("You are auditing a prior-art search pipeline. Stage 2 reads a paper and writes candidate "
+              "inventions as claim-like elements; Stage 3 searches with them. Output JSON only.")
+    user = (
+        f"PAPER (the same text the pipeline was given)\n{paper}\n\n"
+        f"STAGE-2 ELEMENTS WE PRODUCED FROM THAT PAPER\n{els}\n\n"
+        f"WHAT THE CITED REFERENCE IS CITED AGAINST (limitations of the real filed claims)\n{tgt}\n\n"
+        f"{_ref_block(fam)}\n\n"
+        "Answer three things.\n"
+        "1. in_paper: does the paper itself disclose the subject matter those limitations cover "
+        "(even if worded as a concrete experiment rather than a claim)?\n"
+        "2. covered: is there a Stage-2 element above that a searcher could use to find this reference "
+        "— i.e. an element on the same subject matter as those limitations? List which_elements ids.\n"
+        "3. If covered is false, miss_type — why the element is missing:\n"
+        "   abstraction_gap: the paper/our elements state a concrete implementation, the limitation is "
+        "the generalised version (or the reverse); we stayed at the wrong level.\n"
+        "   missing_apparatus: we produced only method/process elements, the limitation is an "
+        "apparatus / system / kit / composition claim.\n"
+        "   missing_application: the limitation is a use / application / treatment claim we never wrote.\n"
+        "   missing_legal_generalization: a drafting-attorney addition — functional or means-plus-function "
+        "wording, ranges, alternatives, 'configured to' language covering more than the paper shows.\n"
+        "   not_in_paper: the subject matter is genuinely absent from the paper.\n"
+        "   other: anything else (say what in reason).\n"
+        "reason <= 25 words.")
+    raw = await _llm.call_llm(system, user, response_schema=ATTR_SCHEMA)
+    data = json.loads(raw)
+    valid = {e["id"] for e in case["elements"]}
+    mt = data.get("miss_type") if data.get("miss_type") in MISS_TYPES else "other"
+    return {"in_paper": bool(data.get("in_paper")), "covered": bool(data.get("covered")),
+            "which_elements": [x for x in (data.get("which_elements") or []) if x in valid],
+            "miss_type": None if data.get("covered") else mt,
+            "reason": str(data.get("reason") or "")[:200]}
+
+
+PAPER_CAP = int(os.environ.get("GOLD_NATURE_PAPER_CAP", "40000"))
+
+
+def paper_text(pair_id: str) -> str:
+    """The same rendering IDCA is fed (openworld_eval.render_paper), capped.
+
+    The abstract alone is not enough to answer in_paper: a first pass on
+    title+abstract called an internal battery 'not in the paper' when the
+    paper's own hardware section describes it (US20170089878A1 / US6662742B2).
+    """
+    from openworld_eval import render_paper
+    return render_paper(pair_id)[:PAPER_CAP]
+
+
+async def attribute_case(case: dict, sem: asyncio.Semaphore) -> list[dict]:
+    sig = cosine_signal(case)
+    paper = paper_text(case["pair_id"])
+    by_lid = {l["lid"]: l for l in case["limitations"]}
+
+    async def one(fam: dict) -> dict:
+        async with sem:
+            tg = await llm_target(case, fam)
+            targeted = [by_lid[x] for x in tg["limitations"]]
+            at = await llm_attribute(case, fam, targeted, paper)
+        hit = fam["family_id"] in case["reached"]
+        cos_lim = max((sig["lim_cov"].get(x, {}).get("cos", 0.0) for x in tg["limitations"]), default=0.0)
+        cls = "hit" if hit else ("S3-miss" if at["covered"] else "S2-miss")
+        return {"key": case["key"], "family_id": fam["family_id"], "pub": fam["pubs"][0],
+                "title": fam.get("title", "")[:90], "hit": hit, "class": cls,
+                "targeted": tg["limitations"], "target_reason": tg["reason"],
+                "in_paper": at["in_paper"], "llm_covered": at["covered"],
+                "which_elements": at["which_elements"], "miss_type": at["miss_type"],
+                "reason": at["reason"],
+                "cos_fam": sig["fam"].get(fam["family_id"], {}).get("cos", 0.0),
+                "cos_fam_element": sig["fam"].get(fam["family_id"], {}).get("element", ""),
+                "cos_lim": round(float(cos_lim), 4),
+                "cos_covered": cos_lim >= TAU}
+
+    return list(await asyncio.gather(*(one(f) for f in case["families"])))
+
+
+def report_attribution(rows: list[dict]):
+    order = ["hit", "S3-miss", "S2-miss"]
+    print(f"\n== L1-G gold attribution  tag={TAG}  papers={len({r['key'] for r in rows})}  "
+          f"gold families={len(rows)}  tau={TAU}")
+    print(f"{'case':<18}{'gold':>5}{'hit':>5}{'S3-miss':>9}{'S2-miss':>9}{'in_paper':>10}{'cos>=tau':>10}")
+    for key in sorted({r["key"] for r in rows}):
+        rs = [r for r in rows if r["key"] == key]
+        c = Counter(r["class"] for r in rs)
+        print(f"{key:<18}{len(rs):>5}{c['hit']:>5}{c['S3-miss']:>9}{c['S2-miss']:>9}"
+              f"{sum(1 for r in rs if r['in_paper']):>10}{sum(1 for r in rs if r['cos_fam'] >= TAU):>10}")
+    c = Counter(r["class"] for r in rows)
+    n = len(rows)
+    print(f"{'total':<18}{n:>5}{c['hit']:>5}{c['S3-miss']:>9}{c['S2-miss']:>9}"
+          f"{sum(1 for r in rows if r['in_paper']):>10}{sum(1 for r in rows if r['cos_fam'] >= TAU):>10}")
+    print(f"{'share':<18}{'':>5}" + "".join(f"{c[k] / n:>{w}.3f}" for k, w in zip(order, (5, 9, 9)))
+          + f"{sum(1 for r in rows if r['in_paper']) / n:>10.3f}"
+          + f"{sum(1 for r in rows if r['cos_fam'] >= TAU) / n:>10.3f}")
+
+    cov = sum(1 for r in rows if r["llm_covered"])
+    print(f"\n-- Phase 2 on its own (independent of whether search found it): an element covering "
+          f"what the reference is cited against exists for {cov}/{n} = {cov / n:.3f}")
+
+    miss = [r for r in rows if not r["llm_covered"]]
+    print(f"-- what is missing when it is missing ({len(miss)} families; "
+          f"{sum(1 for r in miss if r['class'] == 'S2-miss')} of them also never reached the pool)")
+    for t, k in Counter(r["miss_type"] for r in miss).most_common():
+        print(f"  {t or 'unknown':<30}{k:>3}")
+        for r in [x for x in miss if x["miss_type"] == t]:
+            print(f"      [{r['class']}] {r['key']} {r['pub']}: {r['title'][:50]} — {r['reason'][:110]}")
+
+    dis = [r for r in rows if r["cos_covered"] != r["llm_covered"]]
+    print(f"\n-- signal disagreement (cosine on the targeted limitations vs LLM): {len(dis)}/{n}")
+    for r in dis:
+        print(f"  {r['key']} {r['pub']:<16} cos_lim={r['cos_lim']:.3f} ({'cov' if r['cos_covered'] else 'not'}) "
+              f"llm={'cov' if r['llm_covered'] else 'not'} class={r['class']} — {r['reason'][:80]}")
+
+    ip = [r for r in rows if r["in_paper"]]
+    nip = [r for r in rows if not r["in_paper"]]
+    print(f"\n-- Harry's split (does the paper itself disclose what the reference is cited against)")
+    for label, rs in (("in paper", ip), ("only in the claims", nip)):
+        if rs:
+            print(f"  {label:<20} n={len(rs):<3} pool reach {sum(1 for r in rs if r['hit'])}/{len(rs)} "
+                  f"= {sum(1 for r in rs if r['hit']) / len(rs):.3f}")
+
+
 async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", default="attribute", choices=["claims", "cos", "attribute", "npl"])
+    ap.add_argument("--concurrency", type=int, default=4)
     args = ap.parse_args()
     from common import load_env_yaml
     load_env_yaml()
@@ -234,6 +412,20 @@ async def main():
                   f"fam cos {sorted(round(v['cos'], 3) for v in sig['fam'].values())}")
         print(f"total: limitations covered {n_lim_hit}/{n_lim} = {n_lim_hit / max(n_lim, 1):.3f}  "
               f"gold families with cos>={TAU} {n_fam_hit}/{n_fam} = {n_fam_hit / max(n_fam, 1):.3f}")
+        return
+
+
+    if args.stage == "attribute":
+        import llm_cache
+        llm_cache.install()
+        from pap2pat_extraction_eval import ensure_data
+        ensure_data()
+        cases = await load_cases()
+        sem = asyncio.Semaphore(args.concurrency)
+        rows = [r for rs in await asyncio.gather(*(attribute_case(c, sem) for c in cases)) for r in rs]
+        (OUT_DIR / f"attribution_{TAG}.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1))
+        report_attribution(rows)
+        print("\n" + llm_cache.summary())
         return
 
 
