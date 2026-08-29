@@ -6,13 +6,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential libffi-dev && \
     rm -rf /var/lib/apt/lists/*
 
-# Install Python deps directly (faster than pip install . with build isolation)
-RUN pip install --no-cache-dir \
-    google-genai google-cloud-storage "fastapi>=0.115" "uvicorn[standard]>=0.30" \
-    python-multipart pymupdf httpx sentence-transformers certifi numpy "a2a-sdk>=0.2" \
-    "tenacity>=8.0" "firebase-admin>=7.4.0" \
-    "langgraph>=0.2.60,<0.3" \
-    "google-cloud-bigquery>=3.20"
+# Install Python deps from the pinned set (faster than pip install . with build
+# isolation, and reproducible: requirements.txt records the exact versions the
+# test suite is green on — see the header of that file for the python/langgraph
+# version skew). Copied on its own so the layer caches independently of the code.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Pre-download embedding model so it's baked into the image
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
