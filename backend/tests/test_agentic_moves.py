@@ -29,7 +29,7 @@ def test_stop_conditions():
     assert M.done({"e1": 3, "e2": 3}, 5, 1) == f"every element covered by >={M.COVER_TARGET} GOOD"
     assert M.done({"e1": 3, "e2": 0}, 5, 1) is None
     assert M.done({"e1": 0}, 0, 2) == "a round added no GOOD"
-    assert M.done({"e1": 0}, 9, 0) is None                       # round 0 may add nothing yet
+    assert M.done({"e1": 0}, 0, 1) is None                       # round 0 finding nothing is why we walk
     assert M.done({"e1": 0}, 9, M.MAX_ROUNDS) == f"{M.MAX_ROUNDS} rounds"
 
 

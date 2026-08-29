@@ -289,13 +289,15 @@ def round_budget(results: list[MoveResult], cap: int = ROUND_CLAIMS_CAP) -> list
     return out
 
 
-def done(cover: dict[str, int], new_good: int, round_no: int) -> str | None:
+def done(cover: dict[str, int], new_good: int, rounds_done: int) -> str | None:
     """Why the loop stops, or None to keep going (leader 2026-09-18: every
-    element covered by >=3 GOOD, or a round that adds none, or 4 rounds)."""
-    if round_no >= MAX_ROUNDS:
+    element covered by >=3 GOOD, or a round that adds none, or 4 rounds).
+    `rounds_done` counts completed rounds, so it is 1 after round 0 — round 0
+    finding nothing is not a reason to stop, it is the reason to walk."""
+    if rounds_done >= MAX_ROUNDS:
         return f"{MAX_ROUNDS} rounds"
     if cover and all(n >= COVER_TARGET for n in cover.values()):
         return f"every element covered by >={COVER_TARGET} GOOD"
-    if round_no > 0 and new_good == 0:
+    if rounds_done > 1 and new_good == 0:
         return "a round added no GOOD"
     return None
