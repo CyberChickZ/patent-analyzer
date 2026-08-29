@@ -11,7 +11,8 @@ from patent_analyzer.recall import bigquery_patents as bq
 class _FakeJob:
     def __init__(self, rows, dry):
         self._rows, self.total_bytes_processed = rows, 0.5 * 2 ** 30 if dry else 0
-    def result(self):
+    def result(self, timeout=None):
+        # every BigQuery wait now passes a timeout (bigquery_patents._rows)
         return iter(self._rows)
 
 
@@ -91,3 +92,45 @@ def test_bq_form_reissue_design_plant():
     assert bq._bq_form("USD612345S") == "US-D612345-S"
     assert bq._bq_form("USPP12345P2") == "US-PP12345-P2"
     assert bq._bq_form("US10494607B2") == "US-10494607-B2"
+
+
+# ── query timeout ──
+#
+# job.result() with no timeout waits forever; a BigQuery job that never finishes
+# used to pin the recall channel open. _rows bounds the wait and cancels.
+
+class _HangingJob:
+    job_id = "job-hangs"
+
+    def __init__(self):
+        self.cancelled = False
+
+    def result(self, timeout=None):
+        import concurrent.futures
+        raise concurrent.futures.TimeoutError()
+
+    def cancel(self):
+        self.cancelled = True
+
+
+def test_rows_cancels_and_raises_on_timeout():
+    job = _HangingJob()
+    try:
+        bq._rows(job, timeout=1)
+    except bq.BQTimeout as e:
+        assert "job-hangs" in str(e) and "cancelled" in str(e)
+    else:
+        raise AssertionError("BQTimeout not raised")
+    assert job.cancelled, "the job must be cancelled — it is billed for what it scanned"
+
+
+def test_rows_returns_normally_and_passes_the_timeout():
+    seen = {}
+
+    class _Job:
+        def result(self, timeout=None):
+            seen["timeout"] = timeout
+            return iter([1, 2, 3])
+
+    assert bq._rows(_Job()) == [1, 2, 3]
+    assert seen["timeout"] == bq.BQ_TIMEOUT_S

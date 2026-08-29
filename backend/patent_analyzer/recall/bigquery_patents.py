@@ -12,8 +12,35 @@ GC_PROJECT = os.getenv("GC_PROJECT", "aime-hello-world")
 BQ_MAX_GIB = float(os.getenv("BQ_MAX_GIB_PER_QUERY", "20"))
 
 
+# Wall-clock bound on every query. `job.result()` with no timeout waits forever:
+# a slot-starved or stuck BigQuery job would otherwise pin the recall channel
+# (and, before the channel budget in nodes/search.py, the whole job) open.
+BQ_TIMEOUT_S = float(os.getenv("BQ_QUERY_TIMEOUT_S", "300"))
+
+
 class BQBudgetExceeded(RuntimeError):
     pass
+
+
+class BQTimeout(RuntimeError):
+    pass
+
+
+def _rows(job, timeout: float | None = None):
+    """Wait for a query job, bounded. On timeout the job is cancelled — it is
+    still billed for what it scanned, so leaving it running costs money as well
+    as time — and the caller sees BQTimeout, which every call site already
+    handles as "this channel produced nothing"."""
+    import concurrent.futures
+    try:
+        return list(job.result(timeout=timeout if timeout is not None else BQ_TIMEOUT_S))
+    except concurrent.futures.TimeoutError:
+        try:
+            job.cancel()
+        except Exception:
+            pass
+        raise BQTimeout(f"BigQuery job {getattr(job, 'job_id', '?')} exceeded "
+                        f"{timeout if timeout is not None else BQ_TIMEOUT_S:.0f}s; cancelled") from None
 
 
 def guarded_query(client, sql: str, params=None, max_gib: float | None = None):
@@ -34,7 +61,7 @@ def guarded_query(client, sql: str, params=None, max_gib: float | None = None):
         raise BQBudgetExceeded(f"query would scan {gib:.1f} GiB > cap {cap} GiB")
     job = client.query(sql, job_config=bigquery.QueryJobConfig(
         query_parameters=params, maximum_bytes_billed=int(cap * 2 ** 30) + 2 ** 20))
-    rows = list(job.result())
+    rows = _rows(job)
     print(f"[BQ] scanned {gib:.2f} GiB, {len(rows)} rows")
     return rows
 
@@ -50,7 +77,7 @@ def capped_query(client, sql: str, params=None, max_gib: float = 10.0):
     from google.cloud import bigquery
     job = client.query(sql, job_config=bigquery.QueryJobConfig(
         query_parameters=params or [], maximum_bytes_billed=int(max_gib * 2 ** 30)))
-    rows = list(job.result())
+    rows = _rows(job)
     print(f"[BQ] billed {job.total_bytes_billed / 2 ** 30:.2f} GiB, {len(rows)} rows")
     return rows
 
@@ -223,7 +250,7 @@ async def fetch_meta_light(pub_nums: list[str], max_gib: float = 15.0) -> dict[s
         b = client.query(
             "SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(p)), 4000) FROM UNNEST(@pubs) p) AS b",
             job_config=bigquery.QueryJobConfig(query_parameters=[pubs_param]))
-        buckets = list(b.result())[0].b
+        buckets = _rows(b, timeout=60)[0].b
         params = [pubs_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
         return guarded_query(client, f"""
             SELECT publication_number, family_id, priority_date, title
@@ -257,7 +284,7 @@ async def fetch_cited_by(pub_nums: list[str], max_gib: float = 8.0) -> dict[str,
         b = client.query(
             "SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(p)), 4000) FROM UNNEST(@pubs) p) AS b",
             job_config=bigquery.QueryJobConfig(query_parameters=[pubs_param]))
-        buckets = list(b.result())[0].b
+        buckets = _rows(b, timeout=60)[0].b
         params = [pubs_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
         return guarded_query(client, f"""
             SELECT publication_number, cited_by FROM `{GC_PROJECT}.amie_patents.cited_by`
@@ -289,7 +316,7 @@ async def fetch_similar(pub_nums: list[str], max_gib: float = 12.0) -> dict[str,
         b = client.query(
             "SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(p)), 4000) FROM UNNEST(@pubs) p) AS b",
             job_config=bigquery.QueryJobConfig(query_parameters=[pubs_param]))
-        buckets = list(b.result())[0].b
+        buckets = _rows(b, timeout=60)[0].b
         params = [pubs_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
         return guarded_query(client, f"""
             SELECT publication_number, similar FROM `{GC_PROJECT}.amie_patents.similar`
@@ -367,7 +394,7 @@ async def fetch_by_pub_nums(pub_nums: list[str], with_claims: bool = True) -> di
         b = client.query(
             "SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(p)), 4000) FROM UNNEST(@pubs) p) AS b",
             job_config=bigquery.QueryJobConfig(query_parameters=[pubs_param]))
-        buckets = list(b.result())[0].b
+        buckets = _rows(b, timeout=60)[0].b
         params = [pubs_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
         meta = guarded_query(client, f"""
             SELECT publication_number, family_id, country_code, priority_date, publication_date,
@@ -502,7 +529,7 @@ async def fetch_citations(pub_nums: list[str]) -> dict[str, dict]:
     def _run():
         b = client.query("SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(p)), 4000) FROM UNNEST(@pubs) p) AS b",
                          job_config=bigquery.QueryJobConfig(query_parameters=[pubs_param]))
-        buckets = list(b.result())[0].b
+        buckets = _rows(b, timeout=60)[0].b
         params = [pubs_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
         return guarded_query(client, f"""
             SELECT publication_number, family_id, priority_date, cits
@@ -535,7 +562,7 @@ async def fetch_families(family_ids: list[str]) -> dict[str, list[dict]]:
     def _run():
         b = client.query("SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(f)), 4000) FROM UNNEST(@fams) f) AS b",
                          job_config=bigquery.QueryJobConfig(query_parameters=[fam_param]))
-        buckets = list(b.result())[0].b
+        buckets = _rows(b, timeout=60)[0].b
         params = [fam_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
         return guarded_query(client, f"""
             SELECT family_id, members FROM `{GC_PROJECT}.amie_patents.families`
@@ -566,7 +593,7 @@ def _pcs_point_lookup(client, table: str, key_col: str, keys: list[str], cols: s
     key_param = bigquery.ArrayQueryParameter("keys", "STRING", keys)
     b = client.query("SELECT ARRAY(SELECT MOD(ABS(FARM_FINGERPRINT(k)), 4000) FROM UNNEST(@keys) k) AS b",
                      job_config=bigquery.QueryJobConfig(query_parameters=[key_param]))
-    buckets = list(b.result())[0].b
+    buckets = _rows(b, timeout=60)[0].b
     params = [key_param, bigquery.ArrayQueryParameter("buckets", "INT64", buckets)]
     return guarded_query(client, f"""
         SELECT {cols} FROM `{GC_PROJECT}.amie_patents.{table}`

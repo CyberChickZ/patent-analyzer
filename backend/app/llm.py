@@ -87,10 +87,19 @@ def get_client() -> genai.Client:
         # Vertex DSQ guidance: "we recommend using the global endpoint. Unlike a
         # regional endpoint ... the global endpoint dynamically routes your
         # requests to the region with the most available capacity" (VERTEX_LOCATION)
+        # HttpOptions.timeout is in MILLISECONDS (google-genai types.HttpOptions:
+        # "Timeout for the request in milliseconds"). Without it the underlying
+        # httpx client has no read timeout at all, so a stalled Vertex response
+        # hangs the phase forever — the one failure mode the tenacity retry
+        # below cannot see, because nothing ever raises. 900 s is deliberately
+        # generous: a deep evaluation call with HIGH thinking over a long PDF
+        # legitimately runs for minutes. httpx raises ReadTimeout/ConnectTimeout,
+        # whose names contain "Timeout", so _is_retryable already retries them.
         _client = genai.Client(
             vertexai=True,
             project=GC_PROJECT,
             location=os.getenv("VERTEX_LOCATION", "global"),
+            http_options=types.HttpOptions(timeout=int(float(os.getenv("LLM_TIMEOUT_S", "900")) * 1000)),
         )
     return _client
 

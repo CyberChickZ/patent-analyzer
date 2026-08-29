@@ -47,6 +47,7 @@ import asyncio
 import json
 import os
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -60,6 +61,9 @@ COOLDOWN_S = float(os.environ.get("ODP_COOLDOWN_S", "1.0"))
 WEEKLY_METADATA = int(os.environ.get("ODP_WEEKLY_METADATA", "5000000"))
 WEEKLY_WRAPPER = int(os.environ.get("ODP_WEEKLY_WRAPPER", "1200000"))
 CACHE_DAYS = float(os.environ.get("ODP_CACHE_DAYS", "30"))
+TIMEOUT_S = float(os.environ.get("ODP_TIMEOUT_S", "60"))
+# One attempt per entry; the value is the pause *before* it.
+RETRY_BACKOFF = [0, 2, 8]
 _NS = "odp"
 
 call_log: list[dict] = []
@@ -100,15 +104,34 @@ async def _get(path: str, params: dict | None = None, kind: str = "metadata",
 
     def _call():
         req = urllib.request.Request(url, headers={"X-API-KEY": k, "Accept": "*/*" if binary else "application/json"})
-        with urllib.request.urlopen(req, timeout=60) as r:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as r:
             return r.status, r.read()
-    try:
-        await _gate.wait()
-        async with SerialLock("uspto_odp", COOLDOWN_S):
-            status, body = await asyncio.to_thread(_call)
-    except Exception as exc:
-        err = f"{type(exc).__name__}: {exc}"[:200]
-        call_log.append({"path": path, "error": err, "seconds": round(time.monotonic() - t0, 2)})
+
+    # This was the one channel with no retry at all: a single dropped connection
+    # lost the call. 401/403 (bad key) and 404 are not retried — they will not
+    # get better — but a timeout, a 5xx or a 429 is.
+    status = body = None
+    err = None
+    for attempt, wait in enumerate(RETRY_BACKOFF):
+        try:
+            if wait:
+                await asyncio.sleep(wait)
+            await _gate.wait()
+            async with SerialLock("uspto_odp", COOLDOWN_S):
+                status, body = await asyncio.to_thread(_call)
+            err = None
+            break
+        except urllib.error.HTTPError as exc:
+            err = f"HTTPError: {exc.code} {exc.reason}"[:200]
+            if exc.code not in (429, 500, 502, 503, 504):
+                break
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"[:200]
+        if attempt == len(RETRY_BACKOFF) - 1:
+            break
+    if err is not None:
+        call_log.append({"path": path, "error": err, "attempts": attempt + 1,
+                         "seconds": round(time.monotonic() - t0, 2)})
         return None, err
     call_log.append({"path": path, "status": status, "bytes": len(body),
                      "seconds": round(time.monotonic() - t0, 2)})
