@@ -112,6 +112,63 @@ def loop_html(search_stats: dict | None) -> str:
     return "\n".join(out)
 
 
+# ── 2b. recall channel health ──
+#
+# A channel that timed out, crashed or hit a rate limit changes what the
+# determination below is based on: the search was narrower than it looks.
+# nodes/search.py records that per channel in search_stats["channel_health"];
+# this renders it, and stays silent when every channel was fine.
+
+_HEALTH_STYLE = {"timeout": ("#fee2e2", "#991b1b", "timed out"),
+                 "crashed": ("#fee2e2", "#991b1b", "crashed"),
+                 "errored": ("#fee2e2", "#991b1b", "errored"),
+                 "limited": ("#fef3c7", "#92400e", "rate-limited / quota")}
+_HEALTH_NOTE = ("These channels did not return everything they could have, so the prior art below is a "
+                "narrower sample than a clean run would produce. A determination of \"no blocking reference\" "
+                "is correspondingly weaker — re-run the phase once the limit clears before relying on it.")
+
+
+def _degraded(search_stats: dict | None) -> list[dict]:
+    return [h for h in ((search_stats or {}).get("channel_health") or [])
+            if h.get("status") in _HEALTH_STYLE]
+
+
+def channel_health_html(search_stats: dict | None) -> str:
+    bad = _degraded(search_stats)
+    if not bad:
+        return ""
+    ok = [h for h in ((search_stats or {}).get("channel_health") or []) if h.get("status") in ("ok", "empty")]
+    out = ['<div class="sec"><div class="sec-t">Search Coverage Warnings</div>',
+           f'<div class="sec-note">{_e(_HEALTH_NOTE)}</div>',
+           '<table class="tbl"><thead><tr><th>Channel</th><th>What happened</th><th>Results</th>'
+           '<th>Time</th><th>Detail</th></tr></thead><tbody>']
+    for h in bad:
+        bg, fg, label = _HEALTH_STYLE[h["status"]]
+        out.append(f'<tr><td><code>{_e(h.get("channel"))}</code></td>'
+                   f'<td><span style="background:{bg};color:{fg};padding:.1rem .4rem;border-radius:3px">{_e(label)}</span></td>'
+                   f'<td>{h.get("n", 0)}</td><td>{h.get("seconds", 0)}s</td>'
+                   f'<td>{_e(h.get("detail") or "")}</td></tr>')
+    out.append("</tbody></table>")
+    if ok:
+        out.append('<div class="sec-note">Channels that ran normally: '
+                   + ", ".join(f'<code>{_e(h["channel"])}</code> ({h.get("n", 0)})' for h in ok) + "</div>")
+    out.append("</div>")
+    return "\n".join(out)
+
+
+def channel_health_md(search_stats: dict | None) -> list[str]:
+    bad = _degraded(search_stats)
+    if not bad:
+        return []
+    lines = ["## Search Coverage Warnings", "", _HEALTH_NOTE, "",
+             "| Channel | What happened | Results | Time | Detail |", "|---|---|---|---|---|"]
+    for h in bad:
+        lines.append(f'| `{h.get("channel")}` | {_HEALTH_STYLE[h["status"]][2]} | {h.get("n", 0)} | '
+                     f'{h.get("seconds", 0)}s | {(h.get("detail") or "").replace("|", "/")} |')
+    lines.append("")
+    return lines
+
+
 def lens_attribution_html(search_stats: dict | None) -> str:
     """Lens trial terms: results sourced from Lens carry "Data Sourced from The Lens"
     with a link and the logo (Lens.org attribution requirement, trial to 2026-10-02)."""
@@ -661,7 +718,8 @@ def inject_html(report_html: str, extraction: dict | None, search_stats: dict | 
                 adjudication: dict | None = None, draft: dict | None = None) -> str:
     anchor = '<div class="sec-t">Invention Summary</div>'
     adj_block = determination_html(adjudication) if adjudication and "Prior-Art Determination" not in report_html else ""
-    block = "\n".join(x for x in (extraction_html(extraction), loop_html(search_stats),
+    block = "\n".join(x for x in (extraction_html(extraction), channel_health_html(search_stats),
+                                  loop_html(search_stats),
                                   quote_matrix_html(scoring_report, checklist), adj_block, draft_html(draft, extraction)) if x)
     if not block:
         return report_html
@@ -677,7 +735,8 @@ def inject_md(report_md: str, extraction: dict | None, search_stats: dict | None
               scoring_report: list[dict] | None, checklist: list[dict] | None,
               adjudication: dict | None = None, draft: dict | None = None) -> str:
     adj_lines = determination_md(adjudication) if adjudication and "## Prior-Art Determination" not in report_md else []
-    lines = (extraction_md(extraction) + loop_md(search_stats) + quote_matrix_md(scoring_report, checklist) + adj_lines
+    lines = (extraction_md(extraction) + channel_health_md(search_stats) + loop_md(search_stats)
+             + quote_matrix_md(scoring_report, checklist) + adj_lines
              + draft_md(draft, extraction))
     if not lines:
         return report_md

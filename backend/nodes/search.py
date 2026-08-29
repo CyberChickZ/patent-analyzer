@@ -14,6 +14,29 @@ from pathlib import Path
 
 from state import GraphState
 
+# Wall-clock budget per recall channel, in seconds. A channel that blows it is
+# dropped (empty result + a channel_timeout event + a "timeout" row in
+# search_stats["channel_health"]); the job goes on with the other channels.
+# Override one channel with SEARCH_TIMEOUT_<CHANNEL>, all of them with
+# SEARCH_CHANNEL_TIMEOUT_S.
+_CHANNEL_TIMEOUT_DEFAULT = 600.0
+_CHANNEL_TIMEOUT_OVERRIDES = {
+    "agentic_loop": 2400.0,      # many rounds × (LLM + boolean search + BQ expansion)
+    "bigquery_patents": 900.0,   # dry-run + SEARCH-indexed scan
+    "serpapi_patents": 900.0,    # 4 retries × 60 s + backoff [10,30,60,90] per query
+    "serpapi_scholar": 900.0,
+}
+
+# Total time allowed for the prior-art PDF downloads, all documents together.
+_PDF_DOWNLOAD_BUDGET_S = float(os.environ.get("PDF_DOWNLOAD_BUDGET_S", "300"))
+
+
+def _channel_timeout(name: str) -> float:
+    env = os.environ.get(f"SEARCH_TIMEOUT_{name.upper()}") or os.environ.get("SEARCH_CHANNEL_TIMEOUT_S")
+    if env:
+        return float(env)
+    return _CHANNEL_TIMEOUT_OVERRIDES.get(name, _CHANNEL_TIMEOUT_DEFAULT)
+
 
 async def search_node(state: GraphState) -> dict:
     """Phase 3 + 3b: multi-channel search, pool, dedup, rerank, download PDFs."""
@@ -222,11 +245,17 @@ async def search_node(state: GraphState) -> dict:
     # expansion) gets SerpAPI budget priority over the broad legacy channels
     loop_stats: dict = {}
     loop_cands: list = []
+    loop_timed_out = False
     try:
         from patent_analyzer.agentic.loop import run_loop
-        loop_cands, loop_stats = await run_loop(
+        loop_cands, loop_stats = await asyncio.wait_for(run_loop(
             state, lambda: serpapi_budget["left"], _serpapi_take,
-            lambda kind, msg, payload=None: _event(kind, msg, payload))
+            lambda kind, msg, payload=None: _event(kind, msg, payload)),
+            timeout=_channel_timeout("agentic_loop"))
+    except asyncio.TimeoutError:
+        loop_timed_out = True
+        _event("channel_timeout", f"agentic_loop: no result within {_channel_timeout('agentic_loop'):.0f}s "
+                                  "— continuing with the remaining channels")
     except Exception as exc:
         _event("channel_crashed", f"agentic_loop: {type(exc).__name__}: {exc}")
 
@@ -247,27 +276,50 @@ async def search_node(state: GraphState) -> dict:
     import time as _time
 
     async def _timed(name, fn):
+        """Every channel gets a wall-clock budget. Without one a single hung
+        socket (BigQuery `job.result()`, a stalled TLS handshake) holds the
+        whole `gather` — and therefore the job — open forever; the point of
+        eight channels is that losing one is survivable."""
         t0 = _time.monotonic()
         try:
-            return await fn(), _time.monotonic() - t0
+            return await asyncio.wait_for(fn(), timeout=_channel_timeout(name)), _time.monotonic() - t0
+        except asyncio.TimeoutError:
+            return asyncio.TimeoutError(f"no result within {_channel_timeout(name):.0f}s"), _time.monotonic() - t0
         except Exception as exc:
             return exc, _time.monotonic() - t0
 
     gathered = await asyncio.gather(*(_timed(n, f) for n, f in channel_specs))
 
+    # Per-channel health, carried in search_stats so the *report* can say which
+    # channels degraded (events are a side channel and never reach results.json).
+    channel_health: list[dict] = []
     channel_results: dict[str, list] = {}
     for (name, _), (result, secs) in zip(channel_specs, gathered):
         if isinstance(result, Exception):
-            _event("channel_crashed", f"{name}: {type(result).__name__}: {result}", {"channel": name, "seconds": round(secs, 1)})
+            kind = "channel_timeout" if isinstance(result, asyncio.TimeoutError) else "channel_crashed"
+            detail = f"{type(result).__name__}: {result}"
+            _event(kind, f"{name}: {detail}", {"channel": name, "seconds": round(secs, 1)})
             channel_results[name] = []
+            channel_health.append({"channel": name, "status": "timeout" if kind == "channel_timeout" else "crashed",
+                                   "n": 0, "seconds": round(secs, 1), "detail": detail[:200], "errors": []})
             continue
         cands, errs = result
         channel_results[name] = cands
         _event("channel_done", f"{name}: {len(cands)} raw candidates in {secs:.0f}s",
                {"channel": name, "n": len(cands), "seconds": round(secs, 1), "errors": errs[:5]})
-        for e in errs:
-            if any(k in str(e.get("error", "")) for k in ("blocked", "429", "budget", "Sorry")):
-                _event("channel_limited", f"{name}: {str(e.get('error', ''))[:120]}")
+        limited = [str(e.get("error", "")) for e in errs
+                   if any(k in str(e.get("error", "")) for k in ("blocked", "429", "budget", "quota", "Sorry"))]
+        for msg in limited:
+            _event("channel_limited", f"{name}: {msg[:120]}")
+        status = "limited" if limited else ("ok" if cands else ("errored" if errs else "empty"))
+        channel_health.append({"channel": name, "status": status, "n": len(cands), "seconds": round(secs, 1),
+                               "detail": (limited[0][:200] if limited else
+                                          (str(errs[0].get("error", ""))[:200] if errs and not cands else "")),
+                               "errors": [str(e.get("error", ""))[:160] for e in errs[:5]]})
+    if loop_timed_out:
+        for h in channel_health:
+            if h["channel"] == "agentic_loop":
+                h.update(status="timeout", detail=f"no result within {_channel_timeout('agentic_loop'):.0f}s")
 
     # Pool & dedupe
     pooled = recall_pool.pool_and_dedupe(channel_results)
@@ -280,6 +332,10 @@ async def search_node(state: GraphState) -> dict:
             "error": "All recall channels returned 0 candidates",
             "search_results": [],
             "ranked_candidates": [],
+            # still report *why* every channel came back empty
+            "search_stats": {"total_patents": 0, "total_papers": 0, "total_unique": 0,
+                             "active_channels": 0, "downloaded": 0, "channel_health": channel_health,
+                             "serpapi_quota": _serpapi_quota_status()},
             "events": events,
             "phase_results": {"phase3": {"status": "completed", "data": {"total": 0}}},
         }
@@ -417,19 +473,34 @@ async def search_node(state: GraphState) -> dict:
     job_dir.mkdir(parents=True, exist_ok=True)
     MAX_DOWNLOADS = 30
     download_count = 0
+    # download_pdf retries once with a 30 s socket timeout, so 30 documents can
+    # cost 30 min on their own. Downloads are an optimisation (evaluation falls
+    # back to the abstract), so they get a shared budget and stop when it runs out.
+    dl_t0 = _time.monotonic()
+    dl_skipped = 0
     for i, doc in enumerate(ranked[:MAX_DOWNLOADS]):
         pdf_url = recall_pool.resolve_pdf_url(doc)
         if not pdf_url:
             continue
+        if _time.monotonic() - dl_t0 > _PDF_DOWNLOAD_BUDGET_S:
+            dl_skipped += 1
+            continue
         try:
             fname = f"prior_art_{i:03d}.pdf"
-            local = download_pdf(pdf_url, job_dir, fname)
+            local = await asyncio.to_thread(download_pdf, pdf_url, job_dir, fname)
             if local:
                 doc["local_pdf"] = local
                 download_count += 1
         except Exception:
             pass
     _event("info", f"Downloaded {download_count}/{min(len(ranked), MAX_DOWNLOADS)} PDFs")
+    if dl_skipped:
+        _event("channel_limited", f"pdf_download: {_PDF_DOWNLOAD_BUDGET_S:.0f}s budget spent, "
+                                  f"{dl_skipped} PDFs not fetched (those documents are evaluated from their abstract)")
+        channel_health.append({"channel": "pdf_download", "status": "limited", "n": download_count,
+                               "seconds": round(_time.monotonic() - dl_t0, 1),
+                               "detail": f"{dl_skipped} downloads skipped after the "
+                                         f"{_PDF_DOWNLOAD_BUDGET_S:.0f}s budget", "errors": []})
 
     patent_count = sum(1 for d in all_docs if d.get("match_type") == "Patent")
     paper_count = sum(1 for d in all_docs if d.get("match_type") != "Patent")
@@ -466,6 +537,7 @@ async def search_node(state: GraphState) -> dict:
                              "rank": rank_of.get(id(d))}
                             for d in all_docs] if prune_stats else [],
             "serpapi_quota": _serpapi_quota_status(),
+            "channel_health": channel_health,
         },
         "events": events,
         "phase_results": {"phase3": {
