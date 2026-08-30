@@ -283,6 +283,49 @@ def summary_table(funnels: list[dict]) -> str:
     return "\n".join(L) + "\n"
 
 
+def moves_table(recs: list[tuple[dict, dict]]) -> str:
+    """M1 (LOOP_MODE=moves): per-move accounting and per-round reach, across cases.
+    Each row: what the move spent, what it brought back, how much of that the
+    claims judge called GOOD, and how many gold families it reached FIRST."""
+    from collections import Counter
+    spend: dict[str, Counter] = {}
+    first: dict[str, set] = {}
+    rounds: list[dict] = []
+    for rec, gold in recs:
+        fam_of = gold.get("_fam_of") or {}
+        seen_fams: set = set()
+        for row in rec.get("move_rows") or []:
+            if row.get("move") == "_round":
+                rounds.append({"key": rec.get("key"), **{k: row.get(k) for k in ("round", "read", "new_good")},
+                               "coverage": row.get("coverage"), "judge": row.get("judge")})
+                continue
+            c = spend.setdefault(row["move"], Counter())
+            c["rounds"] += 1
+            for k in ("brought", "calls"):
+                c[k] += int(row.get(k) or 0)
+            c["errors"] += 1 if row.get("error") else 0
+        for g in rec.get("good") or []:
+            fam = fam_of.get(_canon(g.get("pub_num") or ""))
+            src = (g.get("sources") or ["?"])[0]
+            spend.setdefault(src, Counter())["good"] += 1
+            if fam and fam not in seen_fams:
+                seen_fams.add(fam)
+                first.setdefault(src, set()).add((rec.get("key"), fam))
+    L = ["| move | rounds run | calls | brought back | GOOD | gold families first reached | errors |",
+         "|---|---:|---:|---:|---:|---:|---:|"]
+    for name, c in sorted(spend.items(), key=lambda kv: -len(first.get(kv[0], ()))):
+        L.append(f"| {name} | {c['rounds']} | {c['calls']} | {c['brought']} | {c['good']} | "
+                 f"**{len(first.get(name, ()))}** | {c['errors']} |")
+    L.append("")
+    L.append("| case | round | claims read | new GOOD | elements uncovered |")
+    L.append("|---|---:|---:|---:|---|")
+    for r in rounds:
+        cov = r.get("coverage") or {}
+        unc = [k for k, v in cov.items() if not v]
+        L.append(f"| {r['key']} | {r['round']} | {r['read']} | {r['new_good']} | {','.join(unc[:6]) or '—'} |")
+    return "\n".join(L) + "\n"
+
+
 def reach_table(funnels: list[dict]) -> str:
     """Per-case pool reach and where the prune left it (L1 8-paper table)."""
     L = ["| case | gold families | in pool | pool reach | after embedding | after screen | in top-30 |", "|---|---:|---:|---:|---:|---:|---:|"]
@@ -313,13 +356,15 @@ async def main():
     files = sorted(RUN_DIR.glob(f"*_search_{args.tag}.json"))
     if args.key:
         files = [f for f in files if f.name.startswith(args.key)]
-    funnels = []
+    funnels, recs, golds = [], [], []
     for f in files:
         rec = json.loads(f.read_text())
         g = gold.get(rec["key"])
         if not g or not g.get("gold_families"):
             continue
         fn = await build_funnel(rec, g)
+        recs.append(rec)
+        golds.append({**g, "_fam_of": await gold_family_map(g)})
         funnels.append(fn)
         (RUN_DIR / f"{rec['key']}_funnel_{args.tag}.json").write_text(json.dumps(fn, ensure_ascii=False, indent=1))
         (RUN_DIR / f"{rec['key']}_funnel_{args.tag}.md").write_text(funnel_md(fn))
@@ -327,6 +372,9 @@ async def main():
     if args.summary and funnels:
         print(summary_table(funnels))
         print(reach_table(funnels))
+        moved = [(r, g) for r, g in zip(recs, golds) if r.get("move_rows")]
+        if moved:
+            print(moves_table(moved))
 
 
 if __name__ == "__main__":
