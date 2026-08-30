@@ -122,6 +122,45 @@ def _pause_after(job: dict) -> list[str]:
     return [x for x in pa if x in PHASE_NODE]
 
 
+def _record_phase_failure(job: dict, graph, config: dict, exc: BaseException) -> None:
+    """Turn a raised node into a job the user can see and act on.
+
+    LangGraph leaves the thread positioned *at* the node that raised: after the
+    exception, `get_state(config).next == (failed_node,)` and the checkpoint is
+    the one taken before it ran, so re-invoking the same thread with input None
+    retries exactly that node (verified on langgraph 0.2.76). So the failure is
+    recorded with the phase name, the message, the traceback tail, and the
+    checkpoint id — which is what `POST /api/jobs/{id}/resume
+    {"action":"rerun_phase"}` needs to be usable on a failed job.
+    """
+    import traceback
+    tb = traceback.format_exc()
+    job_id = job.get("id", "?")
+    print(f"[LANGGRAPH] job {job_id} failed: {type(exc).__name__}: {exc}\n{tb}")
+    failed_node, values, checkpoint_id = "", {}, ""
+    try:
+        st = graph.get_state(config)
+        failed_node = (st.next or ("",))[0] or ""
+        values = st.values or {}
+        checkpoint_id = (st.config or {}).get("configurable", {}).get("checkpoint_id", "")
+    except Exception as e:                       # state unreadable: still fail loudly
+        print(f"[LANGGRAPH] job {job_id}: could not read graph state after failure: {e}")
+    phase = PHASE_OF_NODE.get(failed_node, "")
+    job["status"] = "error"
+    job["error"] = f"{type(exc).__name__}: {exc}"[:2000]
+    job["error_trace"] = tb[-4000:]
+    job["failed_node"] = failed_node
+    job["failed_phase"] = phase
+    job["paused_at"] = ""
+    job["hitl_pending"] = None
+    if values:
+        job["_hitl_saved_state"] = {k: values[k] for k in _SNAPSHOT_KEYS if k in values}
+    if phase and checkpoint_id:
+        job.setdefault("phase_checkpoints", {})[phase] = checkpoint_id
+    job["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
+    _save_job(job)
+
+
 async def _run_langgraph_pipeline(job_id: str):
     """Run (or resume, or replay) the pipeline graph for a job.
 
@@ -131,6 +170,8 @@ async def _run_langgraph_pipeline(job_id: str):
     Resume: job["_pending_response"] (HumanResponse) → Command(resume=...).
     Replay: job["_replay_from"] = phase → invoke from the checkpoint taken
     before that phase (LangGraph replay), e.g. after a prompt change.
+    Retry: job["_retry_failed"] → re-invoke the thread with input None, which
+    re-runs the node that raised (the thread is still parked on it).
     """
     from langgraph.types import Command
 
@@ -146,6 +187,7 @@ async def _run_langgraph_pipeline(job_id: str):
     config = {"configurable": {"thread_id": job_id, "prompt_overrides": job.get("prompt_overrides") or {}}}
     pending = job.pop("_pending_response", None)
     replay_from = job.pop("_replay_from", None)
+    retry_failed = job.pop("_retry_failed", None)
 
     def _has_thread() -> bool:
         try:
@@ -153,21 +195,34 @@ async def _run_langgraph_pipeline(job_id: str):
         except Exception:
             return False
 
-    if replay_from and _has_thread():
+    if retry_failed and _has_thread():
+        # The thread is still parked on the node that raised, so plain input
+        # None re-runs it; no checkpoint_id, because the current checkpoint
+        # already *is* the one taken before that node.
+        graph_input = None
+        mode = f"retry:{job.get('failed_node') or '?'}"
+        for k in ("error", "error_trace", "failed_node", "failed_phase"):
+            job.pop(k, None)
+    elif replay_from and _has_thread():
         cid = (job.get("phase_checkpoints") or {}).get(replay_from)
         if cid:
             config = {"configurable": {**config["configurable"], "checkpoint_id": cid}}
         graph_input = None
         mode = f"replay:{replay_from}"
+        for k in ("error", "error_trace", "failed_node", "failed_phase"):
+            job.pop(k, None)
     elif pending is not None and _has_thread():
         graph_input = Command(resume=pending)
         mode = "resume"
-    elif pending is not None or replay_from:
+    elif pending is not None or replay_from or retry_failed:
         # checkpoint gone (new instance): rebuild from the job snapshot and
-        # continue from the phase after the pause, applying the edits ourselves
+        # continue from the phase after the pause, applying the edits ourselves.
+        # A retry of a failed phase takes the same road — _record_phase_failure
+        # snapshots the state, so a crash that outlives the instance is still
+        # restartable at the phase that broke.
         from graph.gates import apply_response
         saved = dict(job.get("_hitl_saved_state") or {})
-        paused = job.get("paused_at") or "extract"
+        paused = job.get("paused_at") or job.get("failed_phase") or "extract"
         saved.update(apply_response(paused, saved, pending) if pending else {})
         input_path = saved.get("input_local_path") or job.get("input_path", "")
         if input_path and not Path(input_path).exists() and job.get("gcs_uri"):
@@ -178,11 +233,15 @@ async def _run_langgraph_pipeline(job_id: str):
                 _get_gcs().bucket(bucket_name).blob(object_key).download_to_filename(input_path)
             except Exception as e:
                 print(f"[HITL RESUME] Could not re-download input: {e}")
+        resuming_here = bool(replay_from or retry_failed)   # re-run this phase, not the one after it
         graph_input = {**saved, "job_id": job_id, "output_dir": job["output_dir"], "status": "running",
-                       "events": [], "pause_after": [p for p in pause_after if p != paused] if not replay_from else pause_after}
-        mode = "snapshot-rebuild"
-        print(f"[HITL] checkpoint missing for {job_id}, rebuilding from job snapshot (paused_at={paused})")
-        graph = build_graph(checkpointer=_checkpointer(), entry=_next_node(paused) if not replay_from else PHASE_NODE[replay_from])
+                       "events": [], "pause_after": [p for p in pause_after if p != paused] if not resuming_here else pause_after}
+        mode = "snapshot-rebuild:retry" if retry_failed else "snapshot-rebuild"
+        print(f"[HITL] checkpoint missing for {job_id}, rebuilding from job snapshot (at={paused})")
+        entry = PHASE_NODE.get(replay_from or paused, "ssr") if resuming_here else _next_node(paused)
+        graph = build_graph(checkpointer=_checkpointer(), entry=entry)
+        for k in ("error", "error_trace", "failed_node", "failed_phase"):
+            job.pop(k, None)
         config = {"configurable": {"thread_id": f"{job_id}_{uuid.uuid4().hex[:6]}", "prompt_overrides": job.get("prompt_overrides") or {}}}
     else:
         graph_input = {
@@ -210,48 +269,58 @@ async def _run_langgraph_pipeline(job_id: str):
     _save_job(job)
 
     interrupted = None
-    async for update in graph.astream(graph_input, config=config, stream_mode="updates"):
-        if not isinstance(update, dict):
-            continue
-        if "__interrupt__" in update:
-            interrupted = update["__interrupt__"]
-            continue
-        for node_name, patch in update.items():
-            if not isinstance(patch, dict):
+    try:
+        stream = graph.astream(graph_input, config=config, stream_mode="updates")
+        async for update in stream:
+            if not isinstance(update, dict):
                 continue
-            print(f"[ASTREAM] node={node_name} keys={list(patch.keys())[:10]} events={len(patch.get('events', []))}")
-            if node_name in PHASE_OF_NODE:
-                # checkpoint taken before this phase ran = replay point for "rerun this phase"
-                try:
-                    hist = list(graph.get_state_history(config))
-                    before = next((s for s in hist if s.next == (node_name,)), None)
-                    if before is not None:
-                        job.setdefault("phase_checkpoints", {})[PHASE_OF_NODE[node_name]] = before.config["configurable"]["checkpoint_id"]
-                except Exception:
-                    pass
-            if patch.get("phase"):
-                job["phase"] = patch["phase"]
-            if patch.get("status") and patch["status"] != "running":
-                job["status"] = patch["status"]
-            for evt in patch.get("events", []):
-                job.setdefault("events", []).append(evt)
-                if evt.get("phase"):
-                    job["phase"] = evt["phase"]
-            for pk, pd in patch.get("phase_results", {}).items():
-                job.setdefault("phases", {})[pk] = pd.get("data", {})
-                job["phase"] = pk
-            if patch.get("search_stats"):
-                job.setdefault("phases", {})["phase3"] = patch["search_stats"]
-            if patch.get("scoring_report"):
-                sr = patch["scoring_report"]
-                top = sr[0].get("similarity_score", 0) if sr else 0
-                job.setdefault("phases", {})["phase4"] = {"evaluated": len(sr), "top_score": round(top, 4)}
-            if patch.get("user_edits"):
-                job.setdefault("user_edits", []).extend(patch["user_edits"])
-            if patch.get("prompt_versions"):
-                job.setdefault("prompt_versions", {}).update(patch["prompt_versions"])
-            job["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
-            _save_job(job)
+            if "__interrupt__" in update:
+                interrupted = update["__interrupt__"]
+                continue
+            for node_name, patch in update.items():
+                if not isinstance(patch, dict):
+                    continue
+                print(f"[ASTREAM] node={node_name} keys={list(patch.keys())[:10]} events={len(patch.get('events', []))}")
+                if node_name in PHASE_OF_NODE:
+                    # checkpoint taken before this phase ran = replay point for "rerun this phase"
+                    try:
+                        hist = list(graph.get_state_history(config))
+                        before = next((s for s in hist if s.next == (node_name,)), None)
+                        if before is not None:
+                            job.setdefault("phase_checkpoints", {})[PHASE_OF_NODE[node_name]] = before.config["configurable"]["checkpoint_id"]
+                    except Exception:
+                        pass
+                if patch.get("phase"):
+                    job["phase"] = patch["phase"]
+                if patch.get("status") and patch["status"] != "running":
+                    job["status"] = patch["status"]
+                for evt in patch.get("events", []):
+                    job.setdefault("events", []).append(evt)
+                    if evt.get("phase"):
+                        job["phase"] = evt["phase"]
+                for pk, pd in patch.get("phase_results", {}).items():
+                    job.setdefault("phases", {})[pk] = pd.get("data", {})
+                    job["phase"] = pk
+                if patch.get("search_stats"):
+                    job.setdefault("phases", {})["phase3"] = patch["search_stats"]
+                if patch.get("scoring_report"):
+                    sr = patch["scoring_report"]
+                    top = sr[0].get("similarity_score", 0) if sr else 0
+                    job.setdefault("phases", {})["phase4"] = {"evaluated": len(sr), "top_score": round(top, 4)}
+                if patch.get("user_edits"):
+                    job.setdefault("user_edits", []).extend(patch["user_edits"])
+                if patch.get("prompt_versions"):
+                    job.setdefault("prompt_versions", {}).update(patch["prompt_versions"])
+                job["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
+                _save_job(job)
+    except Exception as exc:
+        # A node that raises used to propagate to _pipeline_worker, which wrote
+        # a one-line "Pipeline worker crash" onto whatever it found in the
+        # in-memory dict — often nothing, leaving the job "running" forever with
+        # no way back in. Record it here instead, while the graph state (which
+        # names the failed node and is resumable from it) is still in hand.
+        _record_phase_failure(job, graph, config, exc)
+        return
 
     if interrupted:
         hi = interrupted[0].value if hasattr(interrupted[0], "value") else interrupted[0]
@@ -300,11 +369,21 @@ async def _pipeline_worker():
             await _run_langgraph_pipeline(job_id)
         except Exception as exc:
             import traceback
-            print(f"[PIPELINE WORKER] job {job_id} crashed: {exc}\n{traceback.format_exc()}")
-            job = jobs.get(job_id)
-            if job and job.get("status") != "completed":
+            tb = traceback.format_exc()
+            print(f"[PIPELINE WORKER] job {job_id} crashed: {exc}\n{tb}")
+            # _get_job, not jobs.get: a crash before the pipeline put the job in
+            # the in-memory dict (job not loadable, checkpointer construction,
+            # build_graph) used to silently drop the error on the floor and
+            # leave the job "running" forever.
+            job = _get_job(job_id)
+            if job is None:
+                print(f"[PIPELINE WORKER] job {job_id} is not in memory, on disk or in GCS — "
+                      "the crash cannot be recorded against it")
+            elif job.get("status") not in ("completed", "waiting_for_hitl"):
                 job["status"] = "error"
-                job["error"] = f"Pipeline worker crash: {exc}"
+                job["error"] = f"Pipeline worker crash: {type(exc).__name__}: {exc}"[:2000]
+                job["error_trace"] = tb[-4000:]
+                job["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
                 _save_job(job)
         finally:
             _active_pipelines.discard(job_id)

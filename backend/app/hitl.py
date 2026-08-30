@@ -167,14 +167,18 @@ async def get_job_state(job_id: str):
     job = _get_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
-    phase = job.get("paused_at") or ""
+    # A failed job answers here too, with the phase that broke standing in for
+    # the paused phase, so the UI can show what happened and offer the rerun.
+    phase = job.get("paused_at") or job.get("failed_phase") or ""
     saved = job.get("_hitl_saved_state") or {}
     pending = job.get("_pending_edits") or {}
     values = {k: pending.get(k, saved.get(k)) for k in EDITABLE.get(phase, ()) if k in saved or k in pending}
     context = {k: saved.get(k) for k in SHOWN.get(phase, ()) if k in saved}
     if phase == "search":
         context["queries"] = [q for r in (saved.get("search_stats") or {}).get("loop_rounds", []) for q in r.get("queries", [])]
-    return {"job_id": job_id, "status": job.get("status"), "phase": job.get("phase"), "paused_at": phase,
+    return {"job_id": job_id, "status": job.get("status"), "phase": job.get("phase"),
+            "error": job.get("error") or "", "failed_phase": job.get("failed_phase") or "",
+            "failed_node": job.get("failed_node") or "", "paused_at": job.get("paused_at") or "",
             "pause_after": job.get("pause_after") or [], "editable": list(EDITABLE.get(phase, ())),
             "values": values, "context": context, "pending_edits": sorted(pending),
             "user_edits": job.get("user_edits") or [], "prompt_versions": job.get("prompt_versions") or {},
@@ -217,8 +221,32 @@ async def resume_job(job_id: str, req: ResumeRequest):
     job = _get_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
-    if job.get("status") != "waiting_for_hitl":
-        raise HTTPException(400, "Job is not paused")
+    status = job.get("status")
+    if status not in ("waiting_for_hitl", "error"):
+        raise HTTPException(400, f"Job is neither paused nor failed (status={status!r})")
+
+    # A failed job is restartable at the phase that broke: the graph thread is
+    # still parked on the node that raised (app.main._record_phase_failure), so
+    # "rerun_phase" retries exactly that node. Without this, a failure was a
+    # dead end — the only way forward was re-uploading the PDF as a new job.
+    if status == "error":
+        if req.action != "rerun_phase":
+            raise HTTPException(400, "a failed job can only be resumed with action=rerun_phase")
+        if req.prompt_overrides:
+            job.setdefault("prompt_overrides", {}).update(req.prompt_overrides)
+        failed = job.get("failed_phase") or ""
+        job["_retry_failed"] = True
+        job.pop("_pending_response", None)
+        job.setdefault("hitl_history", []).append(
+            {"phase": failed, "action": "rerun_phase", "after": "error",
+             "error": (job.get("error") or "")[:300],
+             "timestamp": datetime.now(timezone.utc).isoformat()})
+        job["status"] = "queued"
+        _save_job(job)
+        _enqueue_job(job_id)
+        return {"job_id": job_id, "status": "resumed", "action": "rerun_phase", "from_phase": failed,
+                "retried_node": job.get("failed_node") or ""}
+
     phase = job.get("paused_at") or ""
     if req.prompt_overrides:
         job.setdefault("prompt_overrides", {}).update(req.prompt_overrides)
