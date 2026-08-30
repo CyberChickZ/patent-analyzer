@@ -45,6 +45,11 @@ STAGES = ("extract", "screen", "eval", "idca", "search", "draft")
 # is $0.75/$3.75 per M against 2.5-pro's $1.25/$10 and the J5 extraction gate puts it ahead:
 # FiNE F1 .964 vs .897 (quote survival 1.000, fabrication 0/27, omission .069 vs .103), Pap2Pat
 # cov@3 .790 vs .779, misclassification .163 vs .304 (cov@1 .530 vs .600 is the one loss).
+# The extract stage went back too, on the downstream-reach column the J5 gate was missing: the
+# same four papers reach 11 of 19 gold families with 2.5-pro extraction (h1h) and 7 of 19 with
+# 3.8-flash (h1o), everything else held equal — three of the four went down. The extraction gate
+# measures whether an element reads like a gold claim limitation, not whether its words find
+# anything, and 3.8-flash scored higher there (FiNE F1 .964 vs .897).
 # The search stage went back to 2.5-pro on its gate: H1-01 pool reach 4/5 on 2.5-pro against
 # 1/5 on 3.8-flash (h1n) and 0/5 on 3.5-flash (h1m) — the flash models narrow each ReAct query
 # (totals of 2.5k-38k against 100k+) and the graph channels then expand from the wrong seeds.
@@ -52,7 +57,8 @@ STAGES = ("extract", "screen", "eval", "idca", "search", "draft")
 # fabrication .165 (13/79), and on the search stage (h1m) H1-01 pool reach 0/5 against 4/5.
 # gemini-3.x-flash exists only on the Vertex global endpoint (us-west1 returns 404) — never set
 # VERTEX_LOCATION to a region for them.
-STAGE_DEFAULTS = {"screen": "gemini-3.1-flash-lite", "search": "gemini-2.5-pro"}
+STAGE_DEFAULTS = {"screen": "gemini-3.1-flash-lite", "search": "gemini-2.5-pro",
+                  "extract": "gemini-2.5-pro"}
 
 
 def stage_model(stage: str) -> str:
