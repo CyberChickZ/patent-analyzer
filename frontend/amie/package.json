@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "serve": "BACKEND_URL=http://localhost:8000 BACKEND_ENV=dev node server.js",
+    "serve": "BACKEND_URL=${BACKEND_URL:-http://localhost:8000} BACKEND_ENV=${BACKEND_ENV:-dev} node server.js",
     "start": "node server.js"
   },
   "devDependencies": {

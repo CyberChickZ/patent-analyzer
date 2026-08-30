@@ -122,6 +122,13 @@ app.post("/a2a", async (req, res) => {
 
 // ─── API routes ───
 
+// Frontend runtime config. BACKEND_ENV=dev means the backend runs with
+// AUTH_DISABLED, so the UI skips the Firebase sign-in gate.
+app.get("/api/config", (req, res) => {
+  res.json({ dev: LOCAL_RUN, backend: LOCAL_RUN ? BACKEND_URL : undefined });
+});
+
+
 // Get signed upload URL (for large files > 25MB)
 app.get("/api/upload-url", async (req, res) => {
   try {
