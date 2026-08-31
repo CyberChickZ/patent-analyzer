@@ -5,6 +5,7 @@ for claim-level prior art matching. Free within GCP 1TB/month quota.
 """
 
 import os
+from patent_analyzer import metering
 from patent_analyzer.recall.pool import Candidate
 
 
@@ -62,6 +63,7 @@ def guarded_query(client, sql: str, params=None, max_gib: float | None = None):
     job = client.query(sql, job_config=bigquery.QueryJobConfig(
         query_parameters=params, maximum_bytes_billed=int(cap * 2 ** 30) + 2 ** 20))
     rows = _rows(job)
+    metering.count_bq(getattr(job, "total_bytes_billed", None) or gib * 2 ** 30)
     print(f"[BQ] scanned {gib:.2f} GiB, {len(rows)} rows")
     return rows
 
@@ -78,6 +80,7 @@ def capped_query(client, sql: str, params=None, max_gib: float = 10.0):
     job = client.query(sql, job_config=bigquery.QueryJobConfig(
         query_parameters=params or [], maximum_bytes_billed=int(max_gib * 2 ** 30)))
     rows = _rows(job)
+    metering.count_bq(job.total_bytes_billed)
     print(f"[BQ] billed {job.total_bytes_billed / 2 ** 30:.2f} GiB, {len(rows)} rows")
     return rows
 

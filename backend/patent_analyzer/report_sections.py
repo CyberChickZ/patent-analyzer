@@ -713,14 +713,99 @@ adjudication_html = determination_html
 adjudication_md = determination_md
 
 
+# ── 6. run cost / resource accounting ──
+#
+# What the run actually spent, per phase. The dollar figure is an estimate from
+# list prices (patent_analyzer.metering.PRICES), not a bill, and the section
+# says so rather than letting a reader treat it as one.
+
+_PHASE_TITLE = {"idca": "1 · Read & classify", "extract": "2 · Extract elements",
+                "search": "3 · Prior-art recall", "evaluate": "4 · Evaluate",
+                "draft": "4b · Draft claims", "report": "5 · Report"}
+
+
+def _fmt_secs(s) -> str:
+    s = float(s or 0)
+    return f"{s:.0f}s" if s < 90 else f"{s / 60:.1f}m"
+
+
+def _tok(n) -> str:
+    n = int(n or 0)
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def cost_html(cost: dict | None) -> str:
+    ph = (cost or {}).get("phases") or {}
+    if not ph:
+        return ""
+    t = cost.get("totals") or {}
+    out = ['<div class="sec"><div class="sec-t">Run Cost</div>',
+           f'<div class="sec-note">{_e(cost.get("note") or "")}</div>',
+           '<table class="tbl"><thead><tr><th>Phase</th><th>Time</th><th>LLM calls</th><th>In</th>'
+           '<th>Out+thought</th><th>External calls</th><th>Est. cost</th></tr></thead><tbody>']
+    for name, m in ph.items():
+        llm = m.get("llm") or {}
+        pin = sum(d.get("prompt_tokens", 0) for d in llm.values())
+        pout = sum(d.get("output_tokens", 0) + d.get("thought_tokens", 0) for d in llm.values())
+        out.append(f'<tr><td>{_e(_PHASE_TITLE.get(name, name))}</td><td>{_fmt_secs(m.get("seconds"))}</td>'
+                   f'<td>{m.get("llm_calls", 0)}</td><td>{_tok(pin)}</td><td>{_tok(pout)}</td>'
+                   f'<td>{m.get("external_calls", 0)}</td><td>${m.get("cost_usd", 0):.4f}</td></tr>')
+    tl = t.get("llm") or {}
+    tin = sum(d.get("prompt_tokens", 0) for d in tl.values())
+    tout = sum(d.get("output_tokens", 0) + d.get("thought_tokens", 0) for d in tl.values())
+    out.append(f'<tr style="font-weight:600;border-top:2px solid #cbd5e1"><td>Total</td>'
+               f'<td>{_fmt_secs(t.get("seconds"))}</td><td>{t.get("llm_calls", 0)}</td>'
+               f'<td>{_tok(tin)}</td><td>{_tok(tout)}</td><td>{t.get("external_calls", 0)}</td>'
+               f'<td>${t.get("cost_usd", 0):.4f}</td></tr>')
+    out.append("</tbody></table>")
+    if tl:
+        out.append('<div class="sec-note">By model: ' + ", ".join(
+            f'<code>{_e(m)}</code> {d.get("calls", 0)} calls, ${d.get("cost_usd", 0):.4f}'
+            + (f' ({d["errors_429"]}&times; 429)' if d.get("errors_429") else "")
+            for m, d in tl.items()) + "</div>")
+    ext = t.get("external") or {}
+    if ext:
+        out.append('<div class="sec-note">External: ' +
+                   ", ".join(f'<code>{_e(k)}</code> {v}' for k, v in sorted(ext.items())) + "</div>")
+    bqt = t.get("bigquery") or {}
+    if bqt.get("queries"):
+        out.append(f'<div class="sec-note">BigQuery: {bqt["queries"]} queries, '
+                   f'{bqt.get("gib_billed", 0)} GiB billed, ${bqt.get("cost_usd", 0):.4f} '
+                   f'(at ${cost.get("bigquery_usd_per_tib", 0)}/TiB)</div>')
+    out.append("</div>")
+    return "\n".join(out)
+
+
+def cost_md(cost: dict | None) -> list[str]:
+    ph = (cost or {}).get("phases") or {}
+    if not ph:
+        return []
+    t = cost.get("totals") or {}
+    lines = ["## Run Cost", "", cost.get("note") or "", "",
+             "| Phase | Time | LLM calls | In | Out+thought | External calls | Est. cost |",
+             "|---|---|---|---|---|---|---|"]
+    for name, m in ph.items():
+        llm = m.get("llm") or {}
+        pin = sum(d.get("prompt_tokens", 0) for d in llm.values())
+        pout = sum(d.get("output_tokens", 0) + d.get("thought_tokens", 0) for d in llm.values())
+        lines.append(f'| {_PHASE_TITLE.get(name, name)} | {_fmt_secs(m.get("seconds"))} | {m.get("llm_calls", 0)} | '
+                     f'{_tok(pin)} | {_tok(pout)} | {m.get("external_calls", 0)} | ${m.get("cost_usd", 0):.4f} |')
+    lines.append(f'| **Total** | {_fmt_secs(t.get("seconds"))} | {t.get("llm_calls", 0)} | | | '
+                 f'{t.get("external_calls", 0)} | **${t.get("cost_usd", 0):.4f}** |')
+    lines.append("")
+    return lines
+
+
 def inject_html(report_html: str, extraction: dict | None, search_stats: dict | None,
                 scoring_report: list[dict] | None, checklist: list[dict] | None,
-                adjudication: dict | None = None, draft: dict | None = None) -> str:
+                adjudication: dict | None = None, draft: dict | None = None,
+                cost: dict | None = None) -> str:
     anchor = '<div class="sec-t">Invention Summary</div>'
     adj_block = determination_html(adjudication) if adjudication and "Prior-Art Determination" not in report_html else ""
     block = "\n".join(x for x in (extraction_html(extraction), channel_health_html(search_stats),
                                   loop_html(search_stats),
-                                  quote_matrix_html(scoring_report, checklist), adj_block, draft_html(draft, extraction)) if x)
+                                  quote_matrix_html(scoring_report, checklist), adj_block,
+                                  draft_html(draft, extraction), cost_html(cost)) if x)
     if not block:
         return report_html
     i = report_html.find(anchor)
@@ -733,11 +818,12 @@ def inject_html(report_html: str, extraction: dict | None, search_stats: dict | 
 
 def inject_md(report_md: str, extraction: dict | None, search_stats: dict | None,
               scoring_report: list[dict] | None, checklist: list[dict] | None,
-              adjudication: dict | None = None, draft: dict | None = None) -> str:
+              adjudication: dict | None = None, draft: dict | None = None,
+              cost: dict | None = None) -> str:
     adj_lines = determination_md(adjudication) if adjudication and "## Prior-Art Determination" not in report_md else []
     lines = (extraction_md(extraction) + channel_health_md(search_stats) + loop_md(search_stats)
              + quote_matrix_md(scoring_report, checklist) + adj_lines
-             + draft_md(draft, extraction))
+             + draft_md(draft, extraction) + cost_md(cost))
     if not lines:
         return report_md
     block = "\n".join(lines)

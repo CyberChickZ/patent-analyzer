@@ -51,6 +51,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from .. import metering
 from ..cache import kv
 from ..runtime_state import MinuteGate, PeriodQuota, SerialLock, week_key
 from .pool import Candidate
@@ -118,6 +119,7 @@ async def _get(path: str, params: dict | None = None, kind: str = "metadata",
                 await asyncio.sleep(wait)
             await _gate.wait()
             async with SerialLock("uspto_odp", COOLDOWN_S):
+                metering.count("uspto_odp")
                 status, body = await asyncio.to_thread(_call)
             err = None
             break

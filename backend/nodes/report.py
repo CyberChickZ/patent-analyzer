@@ -78,6 +78,17 @@ async def report_node(state: GraphState) -> dict:
     adjudication = await _determination(state, checklist, scoring_report, _event)
     draft = state.get("draft_claims") or {}
 
+    # Close the last phase's books (there is no gate after report) and merge what
+    # the gates recorded in state with what this process measured — after a HITL
+    # resume on a restarted server, only one of the two has the early phases.
+    from patent_analyzer import metering
+    metering.mark("report")
+    phase_metrics = {**(state.get("phase_metrics") or {}), **metering.phases()}
+    cost = metering.report(phase_metrics)
+    _event("info", f"Run cost estimate: ${cost['totals']['cost_usd']:.4f} over "
+                   f"{cost['totals']['llm_calls']} LLM calls and "
+                   f"{cost['totals']['external_calls']} external calls")
+
     results = {
         "job_id": job_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -111,6 +122,7 @@ async def report_node(state: GraphState) -> dict:
         "eval_stats": state.get("eval_stats", {}),
         "user_edits": state.get("user_edits", []),           # reviewer changes at the phase gates
         "prompt_versions": {**_used_prompt_versions(), **(state.get("prompt_versions") or {})},
+        "cost": cost,                                        # per-phase time / tokens / $ (patent_analyzer.metering)
         "adjudication": adjudication,
         "draft_claims": draft,
         "evaluation": {
@@ -140,12 +152,12 @@ async def report_node(state: GraphState) -> dict:
     from patent_analyzer.report_sections import inject_html, inject_md
     # generate_html/markdown render the determination themselves (top of the report); inject_* add the other sections
     html = inject_html(generate_html(results), results["extraction"], results["search"]["summary"],
-                       scoring_report, checklist, draft=draft)
+                       scoring_report, checklist, draft=draft, cost=cost)
     (job_dir / "report.html").write_text(html, encoding="utf-8")
     _save_to_gcs(job_id, "report.html", html, "text/html")
 
     md = inject_md(generate_markdown(results), results["extraction"], results["search"]["summary"],
-                   scoring_report, checklist, draft=draft)
+                   scoring_report, checklist, draft=draft, cost=cost)
     (job_dir / "report.md").write_text(md, encoding="utf-8")
     _save_to_gcs(job_id, "report.md", md, "text/markdown")
 

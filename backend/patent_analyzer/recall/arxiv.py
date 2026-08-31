@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from .. import metering
 from .pool import Candidate
 
 API_URL = "https://export.arxiv.org/api/query"
@@ -102,6 +103,7 @@ async def search(query: str, limit: int = 30) -> tuple[list[Candidate], str | No
             await asyncio.sleep(wait)
         try:
             async with httpx.AsyncClient(follow_redirects=True) as client:
+                metering.count("arxiv")
                 resp = await client.get(
                     API_URL, params=params, timeout=TIMEOUT,
                     headers={"User-Agent": "patent-analyzer/0.3 (https://github.com/CyberChickZ/patent-analyzer)"},

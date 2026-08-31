@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from .. import metering
 from .pool import Candidate
 
 API_BASE = "https://api.openalex.org"
@@ -108,6 +109,7 @@ async def _get(client: httpx.AsyncClient, url: str, params: dict,
         if i > 0:
             await asyncio.sleep(backoffs[min(i - 1, len(backoffs) - 1)])
         try:
+            metering.count("openalex")
             resp = await client.get(url, params=params, timeout=TIMEOUT,
                                      headers={"User-Agent": "patent-analyzer/0.3"})
             if resp.status_code == 429:

@@ -25,6 +25,7 @@ import httpx
 
 from ..cache import kv
 from ..runtime_state import Breaker
+from .. import metering
 from .pool import Candidate
 
 _UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -60,6 +61,7 @@ async def _get(url: str, timeout: float = 30) -> httpx.Response | None:
             try:
                 async with httpx.AsyncClient(headers={"User-Agent": _UA}, timeout=timeout,
                                              follow_redirects=True) as client:
+                    metering.count("google_patents")
                     r = await client.get(url)
             except httpx.HTTPError:
                 r = None

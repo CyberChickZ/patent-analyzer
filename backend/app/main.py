@@ -262,6 +262,10 @@ async def _run_langgraph_pipeline(job_id: str):
 
     print(f"[LANGGRAPH] job {job_id} mode={mode} pause_after={pause_after}")
     from app import prompts as _prompts
+    from patent_analyzer import metering
+    # Same job_id on a resume keeps the phases already accounted for; a new job
+    # starts the counters clean.
+    metering.start_run(job_id)
     _prompts.set_overrides(job.get("prompt_overrides") or {})
     job["status"] = "running"
     job["paused_at"] = ""
@@ -311,6 +315,10 @@ async def _run_langgraph_pipeline(job_id: str):
                     job.setdefault("user_edits", []).extend(patch["user_edits"])
                 if patch.get("prompt_versions"):
                     job.setdefault("prompt_versions", {}).update(patch["prompt_versions"])
+                # keep the cost/timing accounting on the job record too, so it
+                # survives a pause and is readable from /status while running
+                job["phase_metrics"] = {**(job.get("phase_metrics") or {}), **metering.phases()}
+                job["cost"] = metering.report(job["phase_metrics"])
                 job["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
                 _save_job(job)
     except Exception as exc:

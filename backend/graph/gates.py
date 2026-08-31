@@ -210,11 +210,18 @@ def make_gate(phase: str):
     assert phase in PHASES
 
     async def gate(state: dict) -> dict:
+        # Close the phase's books *before* the interrupt, so the reviewer's
+        # thinking time is not billed to the phase. metering.mark is idempotent:
+        # the gate body re-executes in full on resume, and the second pass must
+        # not overwrite the real numbers with the ~0 it would measure.
+        from patent_analyzer import metering
+        metrics = {phase: metering.mark(phase)}
         if phase not in (state.get("pause_after") or []):
-            return {}
+            return {"phase_metrics": metrics}
         resp = interrupt(build_interrupt(phase, state))
         patch = apply_response(phase, state, resp)
         patch["paused_at"] = ""
+        patch["phase_metrics"] = metrics
         return patch
 
     gate.__name__ = f"gate_{phase}"

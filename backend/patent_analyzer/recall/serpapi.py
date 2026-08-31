@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import os
 
+from .. import metering
 from ..cache import kv
 from ..runtime_state import MonthlyQuota
 from ..searcher import serpapi_search as _sync_search
@@ -99,6 +100,7 @@ async def _search(engine: str, query: str, max_pages: int, num: int, match_type:
     extra = {k: v for k, v in (("before", before), ("scholar", "true" if scholar else "")) if v} or None
     hit = kv().get("search", ck, max_age_days=_CACHE_DAYS)
     if hit is not None:
+        metering.count("serpapi:cached")
         last_total[query] = int(hit.get("total", 0))
         return [Candidate(**c) for c in hit["cands"]], None
     keys = _keys()
@@ -110,6 +112,7 @@ async def _search(engine: str, query: str, max_pages: int, num: int, match_type:
         if not q.take(max_pages):
             last_err = f"serpapi key {_fp(key)} monthly quota exhausted"
             continue
+        metering.count(f"serpapi:{engine}")
         matches, err = await asyncio.to_thread(_sync_search, engine, query, key, None, max_pages, num, extra)
         if err and _exhausted(err):
             q.exhaust()

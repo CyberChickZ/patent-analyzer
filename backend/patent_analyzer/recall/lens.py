@@ -79,6 +79,7 @@ import httpx
 
 from ..cache import kv
 from ..runtime_state import MinuteGate
+from .. import metering
 from .pool import Candidate
 
 API_BASE = "https://api.lens.org"
@@ -150,6 +151,7 @@ async def _post(endpoint: str, body: dict) -> tuple[dict | None, str | None]:
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             while True:
+                metering.count(f"lens:{endpoint}")
                 r = await client.post(f"{API_BASE}/{endpoint}/search", json=body,
                                       headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"})
                 # the per-minute limit is a sliding window, not the calendar minute the

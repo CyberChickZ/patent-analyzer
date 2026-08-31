@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 
+from .. import metering
 from .pool import Candidate
 
 API_BASE = "https://api.semanticscholar.org/graph/v1"
@@ -89,6 +90,7 @@ async def _get(client: httpx.AsyncClient, url: str, params: dict | None = None,
     for i in range(attempts):
         try:
             async with _serial():
+                metering.count("semantic_scholar")
                 resp = await client.get(url, params=params, headers=_headers(), timeout=TIMEOUT)
             if resp.status_code == 429:
                 last_err = "HTTP 429 (Semantic Scholar rate limited)"
