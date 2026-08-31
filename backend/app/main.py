@@ -327,6 +327,8 @@ async def _run_langgraph_pipeline(job_id: str):
         # in-memory dict — often nothing, leaving the job "running" forever with
         # no way back in. Record it here instead, while the graph state (which
         # names the failed node and is resumable from it) is still in hand.
+        job["phase_metrics"] = {**(job.get("phase_metrics") or {}), **metering.phases()}
+        job["cost"] = metering.report(job["phase_metrics"])
         _record_phase_failure(job, graph, config, exc)
         return
 
@@ -339,6 +341,12 @@ async def _run_langgraph_pipeline(job_id: str):
             values = {}
         job["_hitl_saved_state"] = {k: values[k] for k in _SNAPSHOT_KEYS if k in values}
         job.setdefault("prompt_versions", {}).update(_prompts.used_versions())
+        # The gate marks the phase and then interrupts, so its patch never
+        # reaches the loop above: refresh the accounting from the module or the
+        # job shows $0 for everything it has already spent (seen live, job
+        # 2f92d815 paused at idca).
+        job["phase_metrics"] = {**(job.get("phase_metrics") or {}), **metering.phases()}
+        job["cost"] = metering.report(job["phase_metrics"])
         job["status"] = "waiting_for_hitl"
         job["paused_at"] = phase
         # HumanInterrupt plus the legacy fields the current frontend form reads
@@ -362,6 +370,8 @@ async def _run_langgraph_pipeline(job_id: str):
     if final_state.get("error"):
         job["error"] = final_state["error"]
     job.setdefault("prompt_versions", {}).update(_prompts.used_versions())
+    job["phase_metrics"] = {**(job.get("phase_metrics") or {}), **metering.phases()}
+    job["cost"] = metering.report(job["phase_metrics"])
     job.pop("_hitl_saved_state", None)
     _save_job(job)
 
