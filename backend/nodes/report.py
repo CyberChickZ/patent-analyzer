@@ -8,7 +8,13 @@ from pathlib import Path
 from state import GraphState
 
 
-def _save_to_gcs(job_id: str, blob_suffix: str, content: str, content_type: str):
+GCS_TIMEOUT_S = float(os.environ.get("GCS_TIMEOUT_S", "60"))
+
+
+def _save_to_gcs(job_id: str, blob_suffix: str, content: str, content_type: str) -> str:
+    """Best-effort upload, bounded. Returns "" on success or the error, so the
+    caller can say so — a report that only exists on this instance's disk used
+    to look identical to one safely in the bucket."""
     try:
         from google.cloud import storage
         bucket_name = os.environ.get("GCS_BUCKET", "aime-hello-world-amie-uswest1")
@@ -16,9 +22,10 @@ def _save_to_gcs(job_id: str, blob_suffix: str, content: str, content_type: str)
         client = storage.Client()
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(f"{prefix}{job_id}/{blob_suffix}")
-        blob.upload_from_string(content, content_type=content_type)
-    except Exception:
-        pass
+        blob.upload_from_string(content, content_type=content_type, timeout=GCS_TIMEOUT_S)
+        return ""
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"[:300]
 
 
 def _used_prompt_versions() -> dict:
@@ -139,7 +146,9 @@ async def report_node(state: GraphState) -> dict:
 
     results_str = json.dumps(results, indent=2, ensure_ascii=False, default=str)
     (job_dir / "results.json").write_text(results_str)
-    _save_to_gcs(job_id, "results.json", results_str, "application/json")
+    upload_errors = {}
+    if err := _save_to_gcs(job_id, "results.json", results_str, "application/json"):
+        upload_errors["results.json"] = err
     if state.get("doc_json"):
         # the Gemini transcription the text layer was rendered from (for coverage checks against the PDF)
         (job_dir / "doc_json.json").write_text(json.dumps(state["doc_json"], indent=1, ensure_ascii=False))
@@ -147,23 +156,32 @@ async def report_node(state: GraphState) -> dict:
         # reviewer changes alone, in the evals' element/doc vocabulary (future training / agreement data)
         edits_str = json.dumps(state["user_edits"], indent=2, ensure_ascii=False, default=str)
         (job_dir / "user_edits.json").write_text(edits_str)
-        _save_to_gcs(job_id, "user_edits.json", edits_str, "application/json")
+        if err := _save_to_gcs(job_id, "user_edits.json", edits_str, "application/json"):
+            upload_errors["user_edits.json"] = err
 
     from patent_analyzer.report_sections import inject_html, inject_md
     # generate_html/markdown render the determination themselves (top of the report); inject_* add the other sections
     html = inject_html(generate_html(results), results["extraction"], results["search"]["summary"],
                        scoring_report, checklist, draft=draft, cost=cost)
     (job_dir / "report.html").write_text(html, encoding="utf-8")
-    _save_to_gcs(job_id, "report.html", html, "text/html")
+    if err := _save_to_gcs(job_id, "report.html", html, "text/html"):
+        upload_errors["report.html"] = err
 
     md = inject_md(generate_markdown(results), results["extraction"], results["search"]["summary"],
                    scoring_report, checklist, draft=draft, cost=cost)
     (job_dir / "report.md").write_text(md, encoding="utf-8")
-    _save_to_gcs(job_id, "report.md", md, "text/markdown")
+    if err := _save_to_gcs(job_id, "report.md", md, "text/markdown"):
+        upload_errors["report.md"] = err
 
     gcs_bucket = os.environ.get("GCS_BUCKET", "aime-hello-world-amie-uswest1")
     gcs_prefix = os.environ.get("GCS_PREFIX", "patent-analyzer/jobs/")
-    _event("done", f"Report uploaded to gs://{gcs_bucket}/{gcs_prefix}{job_id}/")
+    if upload_errors:
+        _event("gcs_failed", f"{len(upload_errors)} artefact(s) could not be uploaded to "
+                             f"gs://{gcs_bucket}/{gcs_prefix}{job_id}/ — they exist only on this "
+                             f"instance's disk ({job_dir}): "
+                             + "; ".join(f"{k}: {v}" for k, v in upload_errors.items()))
+    else:
+        _event("done", f"Report uploaded to gs://{gcs_bucket}/{gcs_prefix}{job_id}/")
 
     # Email notification
     notify_email = state.get("notify_email", "")

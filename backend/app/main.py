@@ -426,12 +426,45 @@ def _next_node(phase: str) -> str:
     return order[min(order.index(node) + 1, len(order) - 1)]
 
 
+# GCS upload budget. Without one, a network hiccup blocks the pipeline inside
+# what is meant to be a best-effort side write; the library default is no
+# deadline at all on the retried path.
+GCS_TIMEOUT_S = float(os.getenv("GCS_TIMEOUT_S", "60"))
+
+# GCS failures are swallowed on purpose (local disk is the primary during a run),
+# but swallowing them *silently* meant a deploy with no bucket access looked
+# perfectly healthy until the report was missing. Log the first failure per
+# operation, then stay quiet, and record it so /healthz can say so.
+_gcs_failures: dict[str, dict] = {}
+
+
+def _gcs_failed(op: str, exc: BaseException) -> None:
+    first = op not in _gcs_failures
+    rec = _gcs_failures.setdefault(op, {"n": 0, "last": ""})
+    rec["n"] += 1
+    rec["last"] = f"{type(exc).__name__}: {exc}"[:300]
+    if first:
+        print(f"[GCS] {op} failed ({rec['last']}) — continuing on local disk. "
+              "Further failures of this operation are counted, not logged.")
+
+
 def _get_gcs():
     global _gcs_client
     if _gcs_client is None:
         from google.cloud import storage
         _gcs_client = storage.Client()
     return _gcs_client
+
+
+def _gcs_put(op: str, blob_path: str, data: str, content_type: str) -> bool:
+    """One best-effort upload, bounded and reported."""
+    try:
+        blob = _get_gcs().bucket(GCS_BUCKET).blob(blob_path)
+        blob.upload_from_string(data, content_type=content_type, timeout=GCS_TIMEOUT_S)
+        return True
+    except Exception as exc:
+        _gcs_failed(op, exc)
+        return False
 
 
 def _save_job(job: dict):
@@ -442,42 +475,23 @@ def _save_job(job: dict):
     state_path = job_dir / "state.json"
     state_data = json.dumps(job, ensure_ascii=False, default=str)
     state_path.write_text(state_data)
-    # GCS (persistent across instances/deploys)
-    try:
-        bucket = _get_gcs().bucket(GCS_BUCKET)
-        blob = bucket.blob(f"{GCS_PREFIX}{job['id']}/state.json")
-        blob.upload_from_string(state_data, content_type="application/json")
-    except Exception:
-        pass  # best-effort; local disk is the primary during pipeline run
+    # GCS (persistent across instances/deploys) — best-effort; local disk is the
+    # primary during a pipeline run, so a failure is logged, not raised.
+    _gcs_put("save_job", f"{GCS_PREFIX}{job['id']}/state.json", state_data, "application/json")
 
 
 def _save_report_to_gcs(job_id: str, report_html: str):
     """Upload report.html to GCS."""
-    try:
-        bucket = _get_gcs().bucket(GCS_BUCKET)
-        blob = bucket.blob(f"{GCS_PREFIX}{job_id}/report.html")
-        blob.upload_from_string(report_html, content_type="text/html")
-    except Exception:
-        pass
+    _gcs_put("save_report", f"{GCS_PREFIX}{job_id}/report.html", report_html, "text/html")
 
 
 def _save_results_to_gcs(job_id: str, results_json: str):
     """Upload results.json to GCS."""
-    try:
-        bucket = _get_gcs().bucket(GCS_BUCKET)
-        blob = bucket.blob(f"{GCS_PREFIX}{job_id}/results.json")
-        blob.upload_from_string(results_json, content_type="application/json")
-    except Exception:
-        pass
+    _gcs_put("save_results", f"{GCS_PREFIX}{job_id}/results.json", results_json, "application/json")
 
 
 def _save_md_to_gcs(job_id: str, md_text: str):
-    try:
-        bucket = _get_gcs().bucket(GCS_BUCKET)
-        blob = bucket.blob(f"{GCS_PREFIX}{job_id}/report.md")
-        blob.upload_from_string(md_text, content_type="text/markdown")
-    except Exception:
-        pass
+    _gcs_put("save_md", f"{GCS_PREFIX}{job_id}/report.md", md_text, "text/markdown")
 
 
 def _load_job(job_id: str) -> dict | None:
@@ -531,7 +545,11 @@ def _get_job(job_id: str) -> dict | None:
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok", "version": "0.3.0"}
+    # `gcs` is empty on a healthy deploy; a populated one means job state and
+    # reports are only on this instance's disk and will not survive it.
+    return {"status": "ok", "version": "0.3.0",
+            "gcs": {k: v["n"] for k, v in _gcs_failures.items()},
+            "gcs_last_error": {k: v["last"] for k, v in _gcs_failures.items()}}
 
 
 INPUT_MODES = ("academic_paper", "manuscript", "disclosure", "patent_draft")
