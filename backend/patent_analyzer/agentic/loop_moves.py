@@ -49,7 +49,9 @@ async def run_moves(state: dict, serpapi_left, serpapi_take, event) -> tuple[lis
     terms = _title_terms(elements)
 
     async def round0():
-        """S2 (predicted CPC enumerated) + S3 (ReAct) + the paper bridge."""
+        """S2 (predicted CPC enumerated) + S3 (ReAct) + the paper bridge. The wide loop runs in
+        seed-only mode: its expansion / similar / CPC round are moves here, run from GOOD."""
+        os.environ.setdefault("WIDE_SEED_ONLY", "1")
         from .loop import run_wide                       # reuse the neighbourhood + ReAct machinery
         results: list[M.MoveResult] = []
         s2, wide = await asyncio.gather(

@@ -273,6 +273,19 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
     if tq and len(log) < WIDE_MAX_QUERIES - CPC_QUERIES + 1:
         seeds += await _run([tq])
     seeds = list(dict.fromkeys(seeds))
+    if os.environ.get("WIDE_SEED_ONLY") == "1":
+        # M1 round 0 wants the queries and the paper neighbourhood only: the citation expansion,
+        # Google similar and the CPC round are moves of their own, run from GOOD documents rather
+        # than from every query hit, and repeating them here would spend the BigQuery budget twice
+        return list(pool.values()), {"rounds": [{"round": 1, "queries": log, "n_queries": len(log),
+                                                 "seeds": len(seeds), "pool_size": len(pool),
+                                                 "neighbourhood": neigh_info, "bridge": bridge_info,
+                                                 "lens": {k: v for k, v in lens_info.items() if k != "searches"},
+                                                 "seed_only": True}],
+                                     "mode": "wide", "elements": all_els,
+                                     "candidates": [{"id": c["id"], "level": c["level"],
+                                                     "n_elements": len(c["elements"])} for c in cands],
+                                     "coverage_by_element": {}}
     expanded, info = await expand(seeds, set(pool), max_cited=MAX_CITED_LIGHT, before=cutoff, light=True, forward=True) if seeds else ([], {})
     dropped = set(info.get("seeds_after_cutoff") or [])
     for k in list(pool):
