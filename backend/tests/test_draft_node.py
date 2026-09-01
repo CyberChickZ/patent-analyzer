@@ -56,7 +56,7 @@ def patched(monkeypatch):
                 "refinements": [{"element_id": "inv1.e1", "text": "wherein the pulses are emitted at 10 Hz", "evidence_quote": "ultra-wideband pulses at 10 Hz"},
                                 {"element_id": "inv1.e2", "text": "wherein the phase converges within 200 ms", "evidence_quote": "converges within 200 ms"}]}
 
-    async def fake_eval(summary, checklist, text, title, ptype, persona=None, doc_mode="abstract"):
+    async def fake_eval(summary, checklist, text, title, ptype, doc_mode="abstract"):
         calls["eval"] += 1
         cr = {}
         for c in checklist:
@@ -122,7 +122,7 @@ def test_102_draft_narrows_with_a_grounded_hint_and_every_limitation_has_basis(p
 
 
 def test_unresolved_when_every_pool_limitation_is_disclosed(patched, monkeypatch):
-    async def all_disclosed(summary, checklist, text, title, ptype, persona=None, doc_mode="abstract"):
+    async def all_disclosed(summary, checklist, text, title, ptype, doc_mode="abstract"):
         return {"checklist_results": {c["criterion"]: {"score": 2, "evidence_quotes": ["watchdog timer resets"]} for c in checklist}}
     monkeypatch.setattr(llm, "evaluate_single_document_text", all_disclosed)
     out = asyncio.run(draft_node(_state([_doc("US1", E)])))

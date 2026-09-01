@@ -85,7 +85,6 @@ class GraphState(TypedDict, total=False):
     publication_date: str
     summary: str              # invention summary (400-800 words)
     reasoning: str
-    personas: dict[str, str]  # domain-specific persona strings
 
     # ── Phase 2: SSR outputs ──
     innovation_axes: list[dict]

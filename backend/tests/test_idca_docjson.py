@@ -47,12 +47,8 @@ def _patch(monkeypatch, doc=DOC, detect=DETECT, calls=None):
             raise doc
         return doc
 
-    async def fake_personas(**kw):
-        return {"p": "persona"}
-
     monkeypatch.setattr(llm, "detect_and_summarize_invention", fake_detect)
     monkeypatch.setattr(llm, "build_doc_json", fake_docjson)
-    monkeypatch.setattr(llm, "craft_personas", fake_personas)
     return calls
 
 

@@ -17,7 +17,6 @@ class EvalState(TypedDict, total=False):
     summary: str
     checklist: list[dict]
     ranked_candidates: list[dict]
-    personas: dict[str, str]
     input_local_path: str
     source_title: str
 
@@ -42,7 +41,6 @@ class SingleDocInput(TypedDict):
     doc: dict
     source_pdf_path: str | None
     source_title: str
-    persona: str | None
 
 
 def _event(kind: str, message: str) -> dict:
@@ -56,7 +54,6 @@ def fan_out_docs(state: EvalState) -> list[Send]:
     candidates = state.get("ranked_candidates", [])
     checklist = state.get("checklist", [])
     summary = state.get("summary", "")
-    personas = state.get("personas", {})
     input_path = state.get("input_local_path", "")
     source_title = state.get("source_title", "")
 
@@ -74,7 +71,6 @@ def fan_out_docs(state: EvalState) -> list[Send]:
             doc=doc,
             source_pdf_path=_pdf,
             source_title=source_title,
-            persona=personas.get("evaluate"),
         )))
     return sends
 
@@ -96,7 +92,6 @@ async def eval_single_doc(input: SingleDocInput) -> dict:
             input["summary"], input["checklist"], pdf, title, match_type,
             source_pdf_path=input["source_pdf_path"],
             source_title=input["source_title"],
-            persona=input["persona"],
         )
         result["source"] = "pdf"
         full_text = _pdf_text(pdf)
@@ -114,7 +109,7 @@ async def eval_single_doc(input: SingleDocInput) -> dict:
         if len(text) >= 120:
             result = await evaluate_single_document_text(
                 input["summary"], input["checklist"], text, title, match_type,
-                persona=input["persona"], doc_mode=mode,
+                doc_mode=mode,
             )
             if mode == "full_text":
                 result["quote_verification"] = verify_checklist_results(result.get("checklist_results", {}), text)

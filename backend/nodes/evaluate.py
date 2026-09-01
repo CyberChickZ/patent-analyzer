@@ -22,7 +22,6 @@ async def evaluate_node(state: GraphState) -> dict:
     summary = state["summary"]
     checklist = state.get("checklist", [])
     ranked_candidates = state.get("ranked_candidates", [])
-    personas = state.get("personas", {})
     source_title = state.get("source_title", "")
     input_path = state.get("input_local_path")
     _pdf = input_path if input_path and Path(input_path).exists() and input_path.endswith(".pdf") else None
@@ -59,7 +58,6 @@ async def evaluate_node(state: GraphState) -> dict:
         max_concurrent=2,
         source_pdf_path=_pdf,
         source_title=source_title,
-        persona=personas.get("evaluate"),
     )
     _event("info", f"Evaluated {len(scoring_report)} documents")
 
@@ -97,7 +95,7 @@ async def evaluate_node(state: GraphState) -> dict:
     if len(scoring_report) >= 2:
         try:
             combination_analysis = await generate_combination_analysis(
-                summary, scoring_report[:5], persona=personas.get("summary"))
+                summary, scoring_report[:5])
         except Exception:
             pass
 
@@ -105,7 +103,7 @@ async def evaluate_node(state: GraphState) -> dict:
     overall_summary = ""
     try:
         overall_summary = await generate_overall_summary(
-            summary, scoring_report[:10], persona=personas.get("summary"))
+            summary, scoring_report[:10])
     except Exception as e:
         overall_summary = f"(Summary generation failed: {e})"
 

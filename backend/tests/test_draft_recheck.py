@@ -62,7 +62,7 @@ def patched(monkeypatch):
     async def fake_fetch(doc):
         return f"FULL TEXT of {doc['pub_num']}: pulses are emitted at 10 Hz by the transmitter " * 4, "google_patents_page"
 
-    async def fake_eval(summary, checklist, text, title, ptype, persona=None, doc_mode="abstract"):
+    async def fake_eval(summary, checklist, text, title, ptype, doc_mode="abstract"):
         seen["evaluated"].append((title, [c["id"] for c in checklist], doc_mode))
         cr = {}
         for c in checklist:
@@ -104,7 +104,7 @@ def test_recheck_dedupes_evaluates_new_docs_and_swaps_a_disclosed_independent_li
 
 
 def test_recheck_unresolved_when_no_dependent_survives(patched, monkeypatch):
-    async def all_hit(summary, checklist, text, title, ptype, persona=None, doc_mode="abstract"):
+    async def all_hit(summary, checklist, text, title, ptype, doc_mode="abstract"):
         return {"checklist_results": {c["criterion"]: {"score": 2, "evidence_quotes": ["pulses are emitted at 10 Hz"]} for c in checklist}}
     monkeypatch.setattr(llm, "evaluate_single_document_text", all_hit)
     draft = copy.deepcopy(DRAFT)

@@ -2,10 +2,8 @@
 LLM calls via Google GenAI (Vertex AI).
 
 Pipeline LLM calls:
-  Phase 1: detect_and_summarize_invention, craft_personas
-  Phase 2: scan_innovation_landscape, expand_technology_choices,
-           determine_patent_types, generate_checklist_for_type,
-           review_checklist, generate_search_queries
+  Phase 1: detect_and_summarize_invention
+  Phase 2: see graph/extraction_subgraph.py
   Phase 4: evaluate_single_document (×N), generate_overall_summary
   Harness: self_check, refine_search_query
 
@@ -455,132 +453,6 @@ def classify_category(summary: str) -> dict:
 # LLM CALLS: Where tokens SHOULD be spent
 # ═══════════════════════════════════════════════════════════════
 
-INITIAL_PERSONAS = {
-    "landscape": (
-        "You are a senior research scientist who thinks about technology as a landscape "
-        "of design choices, not a flat list of features. Given a paper, you identify the "
-        "AXES of innovation — the technical dimensions where the authors made deliberate "
-        "choices among known alternatives. You understand CPC taxonomy deeply and can map "
-        "innovation axes to specific CPC groups. You think in terms of 'what space of "
-        "solutions exists for this sub-problem, and which point in that space did the "
-        "authors pick?' You do NOT extract text — you reason about the field."
-    ),
-    "technology": (
-        "You are a deep domain specialist who knows the full landscape of technical "
-        "approaches within a specific research dimension. For any technique mentioned in "
-        "a paper, you can enumerate 4-8 known alternatives from the literature — including "
-        "ones the paper did NOT cite. You explain HOW approaches differ mechanistically, "
-        "not just that they differ. You distinguish between approaches that share a name "
-        "but differ in implementation, and approaches with different names that are "
-        "mathematically equivalent."
-    ),
-    "reviewer": (
-        "You are a senior patent examiner who reviews evaluation checklists for quality. "
-        "You check that each item is specific enough to be testable (not 'uses ML' but "
-        "'uses a two-stage detector with separate RPN'), that no important dimension is "
-        "missing, that items don't overlap, and that weights reflect actual novelty "
-        "contribution. You are ruthless about vagueness — any item where a reader might "
-        "say 'I'm not sure if this counts' needs to be rewritten with clearer scope."
-    ),
-    "decompose": (
-        "You are a senior patent prosecution specialist with deep experience "
-        "in claim drafting across multiple technology domains. Your expertise is in "
-        "reading a technical document and identifying every distinct technical element "
-        "that could form the basis of an independent or dependent claim. You think in "
-        "terms of structural components, method steps, functional relationships between "
-        "elements, and the specific technical choices the inventors made (as opposed to "
-        "obvious alternatives). You distinguish between the invention's novel contributions "
-        "and its use of known building blocks. You never invent elements that aren't "
-        "described in the source — if something is ambiguous, you flag it rather than assume."
-    ),
-    "checklist": (
-        "You are a patent claim analyst who converts invention decompositions into "
-        "testable prior art search criteria. Each item you produce must be atomic (tests "
-        "exactly one technical element), specific (uses the invention's actual terminology, "
-        "not generic descriptions), and evidence-checkable (a reader examining a prior art "
-        "document can determine match/no-match without subjective judgment). You understand "
-        "that overly broad items match everything and are useless, while overly narrow items "
-        "match nothing. You calibrate specificity to the level where a genuine prior art hit "
-        "would be meaningful."
-    ),
-    "plan": (
-        "You are a USPTO patent examiner with 15 years of experience conducting prior art "
-        "searches under 35 USC §102 and §103. You know how to decompose an invention into "
-        "searchable atoms, group those atoms into strategies that target different aspects of "
-        "the invention, and construct queries that balance precision and recall. You understand "
-        "that the best prior art often comes from adjacent fields — a computer vision technique "
-        "might have prior art in medical imaging, robotics, or satellite imagery. You design "
-        "search groups that cover both the core domain and plausible adjacent domains."
-    ),
-    "evaluate": (
-        "You are a US patent examiner conducting a detailed prior art comparison. You read "
-        "both the source invention and a candidate prior art document side-by-side, comparing "
-        "specific technical elements. You are rigorous: a checklist item matches only when the "
-        "prior art explicitly describes that element with clear evidence you can cite. You "
-        "never infer matches from vague similarity — 'both use neural networks' is not a match "
-        "for 'uses a specific dual-encoder architecture with cross-attention.' When a document "
-        "is the source paper itself, you identify it as a self-match."
-    ),
-    "summary": (
-        "You are explaining a patent novelty assessment to a university faculty inventor who "
-        "is an expert in their research field but is not a patent attorney. You use the "
-        "inventor's own technical vocabulary, not legal jargon. You are honest and specific: "
-        "you point at concrete technical elements, not abstract concepts. When overlap exists, "
-        "you say exactly which elements overlap and which don't. When something appears novel, "
-        "you explain what makes it distinct from the closest prior art. You give actionable "
-        "advice — not 'consult an attorney' but 'your novel angle appears to be Y, focus "
-        "claims on Y.'"
-    ),
-}
-
-
-async def craft_personas(
-    doc_type: str,
-    fields_map: list[str],
-    cpc_subclass: str,
-    cpc_context: str,
-    summary_excerpt: str,
-) -> dict[str, str]:
-    """ONE LLM call: read initial personas + document classification → output
-    domain-specific personas. Falls back to INITIAL_PERSONAS on failure."""
-    roles_block = "\n\n".join(
-        f"### {role}\n{text}" for role, text in INITIAL_PERSONAS.items()
-    )
-    keys_list = ", ".join(INITIAL_PERSONAS.keys())
-    n = len(INITIAL_PERSONAS)
-    resp = await call_llm(
-        "You rewrite expert personas to be domain-specific. Output JSON only.",
-        f"""Take these {n} generic expert personas and rewrite each to be specific
-to the document being analyzed. Keep the same expertise level and behavioral
-instructions. Add domain-specific knowledge, terminology, and awareness of
-the field's typical prior art landscape. Each rewrite should be roughly the
-same length as the original (±20%).
-
-INITIAL PERSONAS:
-{roles_block}
-
-DOCUMENT CONTEXT:
-- Document type: {doc_type}
-- Technical fields: {', '.join(fields_map)}
-- CPC subclass: {cpc_subclass}
-- CPC taxonomy: {cpc_context[:2000]}
-- Invention excerpt: {summary_excerpt[:500]}
-
-Output JSON with keys: {keys_list}.
-Each value is the rewritten persona string.""",
-        max_tokens=5000,
-    )
-    m = re.search(r'\{.*\}', resp, re.DOTALL)
-    if m:
-        try:
-            result = json.loads(m.group())
-            if all(k in result for k in INITIAL_PERSONAS):
-                return result
-        except json.JSONDecodeError:
-            pass
-    return dict(INITIAL_PERSONAS)
-
-
 def _feedback_block(feedback: dict | None) -> str:
     if not feedback:
         return ""
@@ -670,7 +542,7 @@ async def detect_and_summarize_invention(
 ) -> dict:
     """ONE LLM CALL: classify document → status_determination + fields_map +
     doc_type + CPC subclass + summary. This is the IDCA step — everything
-    downstream (persona, decompose, eval) depends on this output.
+    downstream (decompose, eval) depends on this output.
 
     Returns:
         {
@@ -861,332 +733,13 @@ async def build_doc_json(document_text: str, source_pdf_path: str | None = None)
 # ════════════════════════════════════════════════════════════
 
 
-async def scan_innovation_landscape(
-    summary: str,
-    fields_map: list[str],
-    cpc_subclass: str,
-    cpc_context: str,
-    source_pdf_path: str | None = None,
-    persona: str | None = None,
-) -> list[dict]:
-    """Identify innovation axes — technical dimensions where the paper
-    may have novel contributions. Uses LLM's field knowledge, not text extraction."""
-    system = (persona or INITIAL_PERSONAS["landscape"]) + " Output JSON only."
-    fields_str = ", ".join(fields_map) if fields_map else "general technology"
-    prompt = f"""Read this paper carefully. You are an expert in {fields_str} (CPC: {cpc_subclass}).
-
-CPC taxonomy context:
-{cpc_context[:2000]}
-
-Identify 3-7 INNOVATION AXES — technical dimensions where this paper makes
-deliberate design choices among known alternatives.
-
-An innovation axis is NOT a text extract. It is a technical dimension like:
-"gradient flow control strategy for domain adaptation" or
-"feature alignment granularity (image-level vs instance-level)".
-
-For each axis, specify the most relevant CPC group.
-
-INVENTION SUMMARY:
-{summary}
-
-Output JSON:
-{{"innovation_axes": [
-  {{"axis_name": "...", "axis_description": "1-sentence what this dimension is about",
-    "cpc_group": "e.g. G06N3/08", "relevance": "why this axis matters for THIS paper"}}
-]}}"""
-
-    if source_pdf_path and Path(source_pdf_path).exists():
-        raw = await call_llm_with_pdfs(system, prompt, [source_pdf_path], thinking_budget=4096)
-    else:
-        raw = await call_llm(system, prompt, thinking_budget=4096)
-    m = re.search(r'\{.*\}', raw, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group()).get("innovation_axes", [])
-        except json.JSONDecodeError:
-            pass
-    return []
-
-
-async def expand_technology_choices(
-    axis: dict,
-    summary: str,
-    source_pdf_path: str | None = None,
-    persona: str | None = None,
-) -> dict:
-    """For one innovation axis, enumerate known approaches from the
-    literature and identify which specific one this paper chose."""
-    system = (persona or INITIAL_PERSONAS["technology"]) + " Output JSON only."
-    axis_name = axis.get("axis_name", "unknown")
-    axis_desc = axis.get("axis_description", "")
-    prompt = f"""You are analyzing the innovation axis: "{axis_name}"
-({axis_desc})
-
-Read the attached paper and answer:
-
-1. KNOWN APPROACHES: List ALL approaches you know of in the literature for
-   this technical dimension (4-8 approaches). Include ones the paper did NOT
-   cite. For each, give a 1-sentence mechanistic description.
-
-2. PAPER'S CHOICE: Which specific approach does this paper use? Quote or
-   paraphrase the paper's description.
-
-3. DIFFERENTIATOR: What specifically makes the paper's choice distinct from
-   the most common alternative?
-
-INVENTION SUMMARY:
-{summary}
-
-Output JSON:
-{{"axis": "{axis_name}",
-  "known_approaches": [
-    {{"name": "approach name", "description": "1-sentence mechanism"}},
-    ...
-  ],
-  "paper_choice": "the specific approach this paper uses",
-  "differentiator": "what makes it distinct from the most common alternative"
-}}"""
-
-    if source_pdf_path and Path(source_pdf_path).exists():
-        raw = await call_llm_with_pdfs(system, prompt, [source_pdf_path], thinking_budget=4096)
-    else:
-        raw = await call_llm(system, prompt, thinking_budget=4096)
-    m = re.search(r'\{.*\}', raw, re.DOTALL)
-    if m:
-        try:
-            result = json.loads(m.group())
-            result["axis"] = axis_name
-            return result
-        except json.JSONDecodeError:
-            pass
-    return {"axis": axis_name, "known_approaches": [], "paper_choice": "", "differentiator": ""}
-
-
-async def determine_patent_types(
-    summary: str,
-    technology_choices: list[dict],
-    source_pdf_path: str | None = None,
-    persona: str | None = None,
-) -> list[str]:
-    """Determine which patent types (Process/Machine/Manufacture/
-    Composition/Design) apply to this invention."""
-    system = (persona or "You are a patent classification expert.") + " Output JSON only."
-    tc_summary = json.dumps(
-        [{"axis": tc.get("axis", ""), "paper_choice": tc.get("paper_choice", "")}
-         for tc in technology_choices], indent=2, ensure_ascii=False)
-    prompt = f"""Based on this invention, which US patent types (35 USC §101) apply?
-
-Types:
-- Process: a method, algorithm, or sequence of steps
-- Machine: a system, device, or apparatus
-- Manufacture: a manufactured article
-- Composition: a chemical or material composition
-- Design: ornamental design of a functional item
-
-INVENTION SUMMARY:
-{summary}
-
-TECHNOLOGY CHOICES:
-{tc_summary}
-
-Output JSON:
-{{"applicable_types": ["Process", ...],
-  "reasoning": {{"Process": "why applicable or not", ...}}}}"""
-
-    if source_pdf_path and Path(source_pdf_path).exists():
-        raw = await call_llm_with_pdfs(system, prompt, [source_pdf_path], thinking_budget=2048)
-    else:
-        raw = await call_llm(system, prompt, thinking_budget=2048)
-    m = re.search(r'\{.*\}', raw, re.DOTALL)
-    if m:
-        try:
-            result = json.loads(m.group())
-            types = result.get("applicable_types", [])
-            valid = {"Process", "Machine", "Manufacture", "Composition", "Design"}
-            return [t for t in types if t in valid] or ["Process"]
-        except json.JSONDecodeError:
-            pass
-    return ["Process"]
-
-
-async def generate_checklist_for_type(
-    patent_type: str,
-    summary: str,
-    technology_choices: list[dict],
-    source_pdf_path: str | None = None,
-    persona: str | None = None,
-) -> list[dict]:
-    """Generate specific, testable checklist items for one patent type.
-    Each item embeds known_approaches so the evaluator can distinguish
-    'same method' (Present) from 'same category, different method' (Partial)."""
-    system = (persona or INITIAL_PERSONAS["checklist"]) + " Output JSON only."
-    tc_text = json.dumps(technology_choices, indent=2, ensure_ascii=False)
-    prompt = f"""Generate prior art evaluation checklist items for a **{patent_type}** patent.
-
-CRITICAL RULES:
-- Each item must test ONE specific technical choice, not a category.
-  BAD:  "Uses gradient manipulation for domain adaptation"
-  GOOD: "Uses stop-gradient (detach) on the context branch to block gradient
-         flow, rather than Gradient Reversal Layer (GRL)"
-- Each item must include the known alternative approaches so the evaluator
-  can score Partial (different method, same category) vs Present (same method).
-- Generate 10-15 items covering ALL innovation axes below.
-- Weight each item by its contribution to overall novelty (weights sum to ~1.0
-  across all items for this type).
-
-INVENTION SUMMARY:
-{summary}
-
-TECHNOLOGY CHOICES (from innovation landscape analysis):
-{tc_text}
-
-Output JSON:
-{{"criteria": [
-  {{"id": "c1",
-    "criterion": "specific testable statement",
-    "weight": 0.08,
-    "patent_type": "{patent_type}",
-    "axis": "which innovation axis this tests",
-    "known_approaches": ["approach A", "approach B", "approach C"],
-    "scale": {{
-      "0": "what Absent means for this item",
-      "1": "what Partial means (which alternative approaches count)",
-      "2": "what Present means (the exact match)"
-    }}
-  }},
-  ...
-]}}"""
-
-    if source_pdf_path and Path(source_pdf_path).exists():
-        raw = await call_llm_with_pdfs(system, prompt, [source_pdf_path], thinking_budget=8192)
-    else:
-        raw = await call_llm(system, prompt, thinking_budget=8192)
-    m = re.search(r'\{.*\}', raw, re.DOTALL)
-    if m:
-        try:
-            result = json.loads(m.group())
-            criteria = result.get("criteria", [])
-            for c in criteria:
-                c["patent_type"] = patent_type
-            return criteria
-        except json.JSONDecodeError:
-            pass
-    return []
-
-
-async def review_checklist(
-    combined_checklist: list[dict],
-    summary: str,
-    technology_choices: list[dict],
-    source_pdf_path: str | None = None,
-    persona: str | None = None,
-) -> list[dict]:
-    """Expert review — merge duplicates, tighten vague items,
-    fill gaps, normalize weights."""
-    system = (persona or INITIAL_PERSONAS["reviewer"]) + " Output JSON only."
-    cl_text = json.dumps(combined_checklist, indent=2, ensure_ascii=False)
-    tc_text = json.dumps(
-        [{"axis": tc.get("axis", ""), "paper_choice": tc.get("paper_choice", ""),
-          "differentiator": tc.get("differentiator", "")}
-         for tc in technology_choices], indent=2, ensure_ascii=False)
-    prompt = f"""Review this combined checklist ({len(combined_checklist)} items).
-
-REVIEW CRITERIA:
-1. DUPLICATES: Merge near-duplicate items across patent types.
-2. VAGUENESS: Rewrite any item where a reader might say "I'm not sure if
-   this counts." Make the scope crystal clear.
-3. GAPS: Are any innovation axes missing coverage? Add items if needed.
-4. GRANULARITY: Split items that test two things at once. Merge items that
-   are too narrow to be individually meaningful.
-5. WEIGHTS: Normalize so total weight ≈ 1.0. No single item > 0.15.
-6. KNOWN APPROACHES: Ensure every item with score=1 (Partial) has clear
-   guidance on which alternative approaches count as partial matches.
-7. SEARCHABILITY — Each item must be specific enough to produce meaningful
-   search results in patent/paper databases, but NOT so narrow that no prior
-   art could ever match it. If an item describes a minor implementation detail
-   (e.g., a specific normalization constant, a specific loss scaling trick) that
-   would never appear as the primary contribution of any paper or patent,
-   MERGE it into the parent axis’s broader item. A good test: "Could someone
-   write a paper primarily about this specific technique?" If no, merge it.
-
-TECHNOLOGY CHOICES:
-{tc_text}
-
-CURRENT CHECKLIST:
-{cl_text}
-
-Output the FINAL checklist (same JSON format, renumber IDs c1, c2, ...):
-{{"criteria": [...]}}"""
-
-    if source_pdf_path and Path(source_pdf_path).exists():
-        raw = await call_llm_with_pdfs(system, prompt, [source_pdf_path], thinking_budget=8192)
-    else:
-        raw = await call_llm(system, prompt, thinking_budget=8192)
-    m = re.search(r'\{.*\}', raw, re.DOTALL)
-    if m:
-        try:
-            result = json.loads(m.group())
-            criteria = result.get("criteria", [])
-            if criteria:
-                return criteria
-        except json.JSONDecodeError:
-            pass
-    return combined_checklist
-
-
-async def generate_search_queries(
-    checklist: list[dict],
-    summary: str,
-    cpc_subclass: str,
-    persona: str | None = None,
-) -> dict:
-    """Generate search queries from checklist items. Each item gets
-    2-3 query formulations, grouped by innovation axis."""
-    system = (persona or INITIAL_PERSONAS["plan"]) + " Output JSON only."
-    cl_text = "\n".join(
-        f'{c.get("id","")}: {c.get("criterion","")}'
-        for c in checklist
-    )
-    prompt = f"""Turn this checklist into prior art search queries.
-
-RULES:
-- For EACH checklist item, generate 2-3 query formulations:
-  (a) using the paper's exact terminology
-  (b) using synonyms or alternative terminology
-  (c) targeting adjacent fields where similar techniques exist
-- GROUP items that share an innovation axis.
-- Each group needs anchor_terms (must-have keywords) and expansion_terms
-  (broaden the search).
-
-CPC subclass: {cpc_subclass}
-
-INVENTION SUMMARY:
-{summary}
-
-CHECKLIST:
-{cl_text}
-
-Output JSON:
-{{"groups": [
-  {{"group_id": "g1", "label": "group description",
-    "atoms": ["c1", "c2"],
-    "intent": "what this group targets",
-    "patent_query": "full Google Patents query string",
-    "paper_query": "full Google Scholar query string",
-    "anchor_terms": [["term1", "term2"], ["term3", "term4"]],
-    "expansion_terms": [["broader1"], ["adjacent_field_term"]]
-  }}
-]}}"""
-
-    raw = await call_llm(system, prompt, thinking_budget=4096)
-    m = re.search(r'\{.*\}', raw, re.DOTALL)
-    if m:
-        try:
-            return json.loads(m.group())
-        except json.JSONDecodeError:
-            pass
-    return {"groups": []}
+# The SSR-era Phase 2 helpers — scan_innovation_landscape,
+# expand_technology_choices, determine_patent_types, generate_checklist_for_type,
+# review_checklist, generate_search_queries — and the INITIAL_PERSONAS block that
+# supplied their system prompts were removed on 2026-09-18 with graph/ssr_subgraph.py
+# and the legacy app.main.run_pipeline, which were their only callers. Phase 2 is
+# graph/extraction_subgraph.py. compute_ssr_grounding below keeps its name because
+# nodes/evaluate.py still calls it.
 
 
 def compute_ssr_grounding(checklist: list) -> dict:
@@ -1388,7 +941,6 @@ async def evaluate_single_document(
     prior_art_type: str,
     source_pdf_path: str | None = None,
     source_title: str | None = None,
-    persona: str | None = None,
 ) -> dict:
     """Deep-eval one prior art doc against the invention's SSR criteria.
     Sends full native PDFs (source + prior art) plus figure screenshots to Gemini."""
@@ -1396,7 +948,7 @@ async def evaluate_single_document(
     use_ssr = _is_ssr(checklist)
     cl_text = _format_criteria_for_eval(checklist)
 
-    system = (persona + " Output JSON only.") if persona else (
+    system = (
         "You are a US patent examiner comparing a SOURCE invention "
         "against one PRIOR ART document. Output JSON only.")
 
@@ -1562,7 +1114,6 @@ async def evaluate_single_document_text(
     prior_art_text: str,
     prior_art_title: str,
     prior_art_type: str,
-    persona: str | None = None,
     doc_mode: str = "abstract",
 ) -> dict:
     """Text-only evaluation. Output shape matches evaluate_single_document.
@@ -1577,7 +1128,7 @@ async def evaluate_single_document_text(
 
     use_ssr = _is_ssr(checklist)
     cl_text = _format_criteria_for_eval(checklist)
-    system = (persona + " Output JSON only.") if persona else (
+    system = (
         "You are a US patent examiner. Output JSON only.")
     full = doc_mode == "full_text"
     doc_label = "full text with numbered paragraphs" if full else "abstract/snippet only"
@@ -1644,7 +1195,6 @@ async def evaluate_batch(
     source_pdf_path: str | None = None,
     source_title: str | None = None,
     on_doc_done: Callable[[], None] | None = None,
-    persona: str | None = None,
 ) -> list[dict]:
     """Evaluate a batch of candidates.
 
@@ -1664,7 +1214,6 @@ async def evaluate_batch(
                         doc.get("title", ""), doc.get("match_type", "Paper"),
                         source_pdf_path=source_pdf_path,
                         source_title=source_title,
-                        persona=persona,
                     )
                     res["source"] = "pdf"
                     return res
@@ -1673,7 +1222,6 @@ async def evaluate_batch(
                     return await evaluate_single_document_text(
                         invention_summary, checklist, text,
                         doc.get("title", ""), doc.get("match_type", "Paper"),
-                        persona=persona,
                     )
                 return {"title": doc.get("title", ""), "match_type": doc.get("match_type", ""),
                         "checklist_results": {}, "source": "no_content"}
@@ -1890,7 +1438,6 @@ follows from the SOURCE DOCUMENT. Output strict JSON:
 async def generate_combination_analysis(
     invention_summary: str,
     top_matches: list[dict],
-    persona: str | None = None,
 ) -> str | None:
     """Ask whether combining top references makes the invention obvious (§103 analysis)."""
     if len(top_matches) < 2:
@@ -1905,7 +1452,6 @@ async def generate_combination_analysis(
         return None
     refs_block = "\n\n".join(refs)
     system = (
-        persona or
         "You are a patent analyst assessing whether combining multiple prior art "
         "references would make an invention obvious to a person of ordinary skill. "
         "Be specific and concise."
@@ -1931,7 +1477,7 @@ Be concrete — name the specific technical elements, not abstract concepts.""",
     )
 
 
-async def generate_overall_summary(invention_summary: str, top_matches: list[dict], persona: str | None = None) -> str:
+async def generate_overall_summary(invention_summary: str, top_matches: list[dict]) -> str:
     """Generate plain-language novelty assessment for faculty inventors (not patent lawyers)."""
     if not top_matches:
         raise ValueError(
@@ -1961,7 +1507,7 @@ async def generate_overall_summary(invention_summary: str, top_matches: list[dic
         "'prior art teaches'). Don't be vague."
     )
     return await call_llm(
-        persona or _default_system,
+        _default_system,
         f"""════ TASK (template) ════
 Write a novelty assessment of this invention for the inventor. \
 The inventor is a faculty member who knows their research area but is not familiar with patent law.

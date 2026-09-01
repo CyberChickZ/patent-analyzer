@@ -1,7 +1,7 @@
 """Phase 1: IDCA — Invention Detection, Classification, and Assignment.
 
 Reads the uploaded PDF, extracts metadata (title, arxiv id, doi),
-calls LLM for invention detection + summary, crafts domain-specific personas.
+calls LLM for invention detection + summary.
 """
 
 import asyncio
@@ -82,13 +82,8 @@ async def _text_layer(input_path: str, plain_text: str, input_mode: str, _event)
 
 
 async def idca_node(state: GraphState) -> dict:
-    """Phase 1 node: detect invention, summarize, craft personas."""
-    from app.llm import (
-        INITIAL_PERSONAS,
-        craft_personas,
-        detect_and_summarize_invention,
-        set_llm_hook,
-    )
+    """Phase 1 node: detect invention, classify, summarize."""
+    from app.llm import detect_and_summarize_invention, set_llm_hook
 
     input_path = state["input_local_path"]
     events = []
@@ -177,22 +172,6 @@ async def idca_node(state: GraphState) -> dict:
 
     _event("info", f"status={status_det} · doc_type={doc_type} · cpc={cpc_subclass}")
 
-    # Craft domain-specific personas
-    personas = dict(INITIAL_PERSONAS)
-    if status_det != "Absent" and doc_type != "talks_about_invention_but_no_invention":
-        try:
-            cpc_ctx = _load_cpc_context(cpc_subclass)
-            personas = await craft_personas(
-                doc_type=doc_type,
-                fields_map=fields_map,
-                cpc_subclass=cpc_subclass,
-                cpc_context=cpc_ctx,
-                summary_excerpt=summary[:500],
-            )
-            _event("info", f"Crafted {len(personas)} domain-specific personas")
-        except Exception:
-            _event("persona_fallback", "Persona crafting failed, using defaults")
-
     patch: dict = {
         "phase": "phase1",
         "source_title": source_title,
@@ -211,7 +190,6 @@ async def idca_node(state: GraphState) -> dict:
         "publication_date": detection_result.get("publication_date", ""),
         "summary": summary,
         "reasoning": detection_result.get("reasoning", ""),
-        "personas": personas,
         "events": events,
         "phase_results": {"phase1": {
             "status": "completed",
