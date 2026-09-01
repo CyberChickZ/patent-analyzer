@@ -6,7 +6,7 @@
  *  rerun_phase. Only the presentation changed. */
 
 import { getPhaseState, patchPhaseState, resumeJob, getPrompt, putPrompt, type PhaseState } from "./api";
-import { esc, clip, pill, errorBox } from "./ui";
+import { esc, clip, pill, errorBox, plainTitle } from "./ui";
 import { PAUSE_LABEL, PHASE_PROMPTS } from "./phases";
 
 export type Collect = () => Record<string, unknown>;
@@ -94,7 +94,7 @@ function idcaBody(v: any, ctx: any): string {
   return `<div class="subhead">Detection</div>
   <div class="tbl-wrap"><div class="tw"><table class="tbl">
     <tbody>
-      <tr><th style="width:11rem">Title</th><td>${esc(ctx.source_title || "—")}</td></tr>
+      <tr><th style="width:11rem">Title</th><td>${esc(plainTitle(ctx.source_title) || "—")}</td></tr>
       <tr><th>Determination</th><td><select class="ed" data-key="status_determination" style="max-width:14rem">
         ${["Present", "Implied", "Absent"].map((o) => `<option ${o === v.status_determination ? "selected" : ""}>${o}</option>`).join("")}
       </select></td></tr>
@@ -128,14 +128,14 @@ function extractBody(v: any): string {
         <div class="concept">${esc(c.concept || "")}</div>
       </div>
       <div class="cand-body">
-        <div class="tbl-wrap"><div class="tw"><table class="tbl">
-          <thead><tr><th style="width:5rem">Element</th><th style="min-width:16rem">Text — editable</th><th style="min-width:14rem">Evidence in the document</th><th style="width:3.5rem">Keep</th></tr></thead>
+        <div class="tbl-wrap"><div class="tw"><table class="tbl fixed stack-sm">
+          <thead><tr><th style="width:12%">Element</th><th style="width:42%">Text — editable</th><th style="width:38%">Evidence in the document</th><th style="width:8%">Keep</th></tr></thead>
           <tbody>${(c.elements || []).map((e: any, ei: number) => `<tr>
-            <td class="mono tiny">${esc(e.id)}${e.kind ? `<div class="muted">${esc(e.kind)}</div>` : ""}</td>
-            <td><textarea class="el" data-ci="${ci}" data-ei="${ei}" rows="2">${esc(e.text)}</textarea></td>
-            <td>${e.evidence_quote ? `<div class="quote">${esc(clip(e.evidence_quote, 260))}</div>` : `<span class="small muted">—</span>`}
+            <td class="mono tiny" data-l="Element">${esc(e.id)}${e.kind ? `<div class="muted">${esc(e.kind)}</div>` : ""}</td>
+            <td data-l="Text — editable"><textarea class="el" data-ci="${ci}" data-ei="${ei}" rows="4">${esc(e.text)}</textarea></td>
+            <td data-l="Evidence">${e.evidence_quote ? `<div class="quote">${esc(clip(e.evidence_quote, 260))}</div>` : `<span class="small muted">—</span>`}
                 ${e.unsupported ? `<span class="pill pill-failed">unsupported</span>` : ""}</td>
-            <td><input type="checkbox" class="keep-el" data-ci="${ci}" data-ei="${ei}" checked></td></tr>`).join("")}
+            <td data-l="Keep"><input type="checkbox" class="keep-el" data-ci="${ci}" data-ei="${ei}" checked></td></tr>`).join("")}
           </tbody></table></div></div>
       </div>
     </div>`).join("") + (v.checklist?.length ? `<details class="box"><summary>Checklist (${v.checklist.length}) — what the evaluation scores against</summary><div class="box-body">${checklistTable(v.checklist)}</div></details>` : "");
@@ -258,10 +258,10 @@ function draftBody(dc: any, adj: any): string {
       const basisHtml = basis.map((b: any) => `<div class="tiny mono">${esc(b.element_id || "")}</div>${b.evidence_quote ? `<div class="quote">${esc(clip(b.evidence_quote, 200))}</div>` : ""}`).join("")
         || `<span class="small muted">${esc(l.origin || "—")}</span>`;
       return `<tr${fl.length ? ' class="flagged"' : ""}>
-        <td class="mono tiny">${esc(l.lid || "")}</td>
-        <td><textarea class="lim" data-ci="${ci}" data-li="${li}" rows="3">${esc(l.text)}</textarea>
+        <td class="mono tiny" data-l="Limitation">${esc(l.lid || "")}</td>
+        <td data-l="Text — editable"><textarea class="lim" data-ci="${ci}" data-li="${li}" rows="4">${esc(l.text)}</textarea>
           ${fl.length ? `<div class="flag">⚠ ${esc(fl.join("; "))}</div>` : ""}</td>
-        <td>${basisHtml}${star}</td></tr>`;
+        <td data-l="Basis">${basisHtml}${star}</td></tr>`;
     }).join("");
     return `<div class="cand">
       <div class="cand-head"><div class="row">
@@ -272,8 +272,8 @@ function draftBody(dc: any, adj: any): string {
       <div class="cand-body">
         <label class="field">Preamble</label>
         <textarea class="preamble" data-ci="${ci}" rows="2">${esc(c.preamble)}</textarea>
-        <div class="tbl-wrap" style="margin-top:.5rem"><div class="tw"><table class="tbl">
-          <thead><tr><th style="width:4.5rem">#</th><th style="min-width:18rem">Limitation — editable</th><th style="min-width:14rem">Basis in the disclosure</th></tr></thead>
+        <div class="tbl-wrap" style="margin-top:.5rem"><div class="tw"><table class="tbl fixed stack-sm">
+          <thead><tr><th style="width:11%">#</th><th style="width:49%">Limitation — editable</th><th style="width:40%">Basis in the disclosure</th></tr></thead>
           <tbody>${lims}</tbody></table></div></div>
       </div></div>`;
   }).join("");

@@ -14,7 +14,7 @@ export function clip(s: unknown, n: number): string {
 /** Backend statuses → the five pill states the UI speaks. */
 export const PILL: Record<string, string> = {
   queued: "queued",
-  pending: "queued",
+  pending: "pending",
   running: "running",
   waiting_for_hitl: "paused",
   paused: "paused",
@@ -34,7 +34,13 @@ export function tag(text: string): string {
 
 export function fmtTime(ts: string): string {
   const d = new Date(ts);
-  return isNaN(d.getTime()) ? "" : d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  // 24h so the column stays one line at every width
+  return isNaN(d.getTime()) ? "" : d.toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+/** Titles come straight off the document, markdown heading marks and all. */
+export function plainTitle(s: unknown): string {
+  return String(s ?? "").replace(/^\s*#+\s*/, "").replace(/\s*#+\s*$/, "").trim();
 }
 
 export function fmtDate(ts?: string): string {

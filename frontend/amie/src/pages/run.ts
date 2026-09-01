@@ -119,7 +119,8 @@ function paint(jobId: string): void {
       ? events.slice(-200).map((e, i) => evRow(e, events.length - Math.min(200, events.length) + i, true)).join("")
       : `<div class="small muted">No events yet.</div>`;
     wireEventClicks(live);
-    live.scrollTop = live.scrollHeight;
+    // follow the tail only while it is still producing
+    if (job.status === "running" || job.status === "queued") live.scrollTop = live.scrollHeight;
   }
 
   // review panel

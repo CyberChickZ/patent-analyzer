@@ -35,7 +35,12 @@
   --font-head: "Rubik", ui-sans-serif, system-ui, sans-serif;
   --font-body: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light dark;
 }
+
+/* native controls follow the chosen theme, not just the system one */
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -189,6 +194,8 @@ table.tbl thead th {
 }
 table.tbl tbody tr:last-child td { border-bottom: none; }
 table.tbl tbody tr:hover { background: var(--surface-2); }
+table.tbl tbody tr.on { background: var(--accent-soft); }
+table.tbl tbody tr.on td { border-bottom-color: var(--accent); }
 table.tbl.fixed { table-layout: fixed; }
 table.tbl td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
 table.tbl.rows-clickable tbody tr { cursor: pointer; }
@@ -245,7 +252,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
   border: 1px solid var(--accent); background: var(--accent); color: #fff;
 }
 .btn:hover:not(:disabled) { background: var(--accent-ink); border-color: var(--accent-ink); }
-.btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn:disabled { cursor: not-allowed; background: var(--neutral-soft); border-color: var(--border-strong); color: var(--text-3); }
 .btn-ghost { background: var(--surface); color: var(--text); border-color: var(--border-strong); }
 .btn-ghost:hover:not(:disabled) { background: var(--surface-2); color: var(--text); border-color: var(--text-3); }
 .btn-warn { background: var(--amber); border-color: var(--amber); color: #2B1A05; }
@@ -264,7 +271,7 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 .drop .big { font-family: var(--font-head); font-weight: 600; font-size: .92rem; }
 .drop input[type=file] { display: none; }
 
-.seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.seg { display: inline-flex; align-self: flex-start; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
 .seg button {
   font-family: var(--font-body); font-size: .78rem; font-weight: 500; cursor: pointer;
   padding: .28rem .7rem; border: none; background: var(--surface); color: var(--text-2);
@@ -368,12 +375,15 @@ tr.flagged { background: var(--danger-soft); }
 .cand > .cand-head .concept { font-family: var(--font-head); font-weight: 600; font-size: .88rem; margin-top: .1rem; }
 .cand > .cand-body { padding: .75rem; }
 
-.cell-score { text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; cursor: help; }
-.s2 { background: var(--danger-soft); color: var(--danger); }
-.s1 { background: var(--warn-soft); color: var(--warn); }
-.s0 { color: var(--text-3); }
-.matrix th.doc-col { font-size: .66rem; }
+.cell-score { text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; }
+.cell-score[data-cell] { cursor: pointer; }
+.cell-covered { background: var(--danger-soft); color: var(--danger); }
+.cell-scored { background: var(--warn-soft); color: var(--warn); }
+.cell-absent { color: var(--text-3); }
+.matrix th.doc-col { font-size: .68rem; text-align: center; }
 .matrix td.el-col { max-width: 26rem; }
+.doc-key { font-size: .74rem; }
+.doc-key td:first-child { font-weight: 600; white-space: nowrap; }
 
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: .15rem .7rem; font-size: .82rem; }
 .kv dt { color: var(--text-3); font-size: .74rem; padding-top: .1rem; }
@@ -424,6 +434,22 @@ tr.flagged { background: var(--danger-soft); }
 
 @media (prefers-reduced-motion: reduce) {
   .spinner, .pill-running::before { animation: none; }
+}
+
+/* A row-per-card table for narrow screens: the editable panels are unreadable
+   as a horizontally scrolled grid on a phone. */
+@media (max-width: 640px) {
+  table.tbl.stack-sm, table.tbl.stack-sm tbody, table.tbl.stack-sm tr, table.tbl.stack-sm td { display: block; width: auto; }
+  table.tbl.stack-sm thead { display: none; }
+  table.tbl.stack-sm tr { border-bottom: 1px solid var(--border-strong); padding: .35rem 0; }
+  table.tbl.stack-sm tr:last-child { border-bottom: none; }
+  table.tbl.stack-sm td { border-bottom: none; padding: .15rem .4rem; }
+  table.tbl.stack-sm td[data-l]::before {
+    content: attr(data-l); display: block;
+    font-size: .64rem; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--text-3); font-weight: 600; margin-bottom: .1rem;
+  }
+  table.tbl.stack-sm td:empty { display: none; }
 }
 
 /* ─── Narrow screens ─── */

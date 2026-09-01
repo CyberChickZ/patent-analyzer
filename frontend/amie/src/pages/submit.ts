@@ -82,7 +82,7 @@ export function renderSubmit(host: HTMLElement): void {
             <td class="right num">$${r.inPerM.toFixed(2)}</td>
             <td class="right num">$${r.outPerM.toFixed(2)}</td>
             <td class="small muted">${esc(r.note || "")}</td></tr>`).join("")}
-          ${OTHER_RATES.map((r) => `<tr><td class="mono">${esc(r.item)}</td><td class="right num" colspan="2">${esc(r.price)}</td><td></td></tr>`).join("")}
+          ${OTHER_RATES.map((r) => `<tr><td class="mono">${esc(r.item)}</td><td colspan="3">${esc(r.price)}</td></tr>`).join("")}
         </tbody>
       </table></div></div>
       <div class="small muted">$${JOB_COST.low.toFixed(2)}–${JOB_COST.high.toFixed(2)} is what full runs actually cost. Pausing is free; each <b>Rerun this phase</b> re-charges that phase.</div>

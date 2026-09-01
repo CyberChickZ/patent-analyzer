@@ -1,5 +1,5 @@
 import { getResults, getStatus, reportUrl, type JobEvent } from "../api";
-import { esc, clip, pill, num, empty, errorBox, openModal, md, on } from "../ui";
+import { esc, clip, pill, num, empty, errorBox, openModal, md, on, plainTitle } from "../ui";
 import { queriesTable } from "../hitl";
 import { RATES, jobCostRange } from "../pricing";
 import { rememberJob } from "../main";
@@ -7,6 +7,27 @@ import { rememberJob } from "../main";
 let R: any = null;            // results.json
 let EVENTS: JobEvent[] = [];
 let showAllDocs = false;
+
+/** Coverage as the adjudicator counts it — score >= 1 with a verified quote
+ *  (patent_analyzer/adjudicate.element_covered). Reading it back off
+ *  adjudication.per_doc_coverage keeps this page's matrix and its candidate
+ *  badges consistent with the §102/§103 verdict printed above them; falling
+ *  back to score >= 2 would say 1/5 where the verdict says 4/5. */
+let COVERED: Map<string, Set<string>> = new Map();
+
+function buildCoverage(): void {
+  COVERED = new Map();
+  for (const d of (R.adjudication || {}).per_doc_coverage || []) {
+    COVERED.set(String(d.pub_num || d.title || ""), new Set<string>(d.covered || []));
+  }
+}
+
+function isCovered(doc: any, criterion: string): boolean {
+  const key = String(doc.pub_num || doc.title || "");
+  const set = COVERED.get(key);
+  if (set) return set.has(criterion);
+  return (doc.checklist_results?.[criterion]?.score ?? 0) >= 2;   // no adjudication on this job
+}
 
 export function disposeResults(): void {
   R = null; EVENTS = []; showAllDocs = false;
@@ -43,6 +64,7 @@ export async function renderResults(host: HTMLElement, jobId: string): Promise<v
 }
 
 function paint(host: HTMLElement, jobId: string): void {
+  buildCoverage();
   const p1 = R.phase1 || {};
   const cands: any[] = (R.extraction || {}).candidate_inventions || [];
   const checklist: any[] = (R.phase2 || {}).checklist || [];
@@ -52,7 +74,7 @@ function paint(host: HTMLElement, jobId: string): void {
   host.innerHTML = `
   <div class="page-head">
     <div class="kicker">Step 3 · ${esc(R.job_id || jobId)}</div>
-    <h1>${esc(clip(R.source_title || R.source_filename || "Results", 140))}</h1>
+    <h1>${esc(clip(plainTitle(R.source_title) || R.source_filename || "Results", 140))}</h1>
     <div class="lede">
       ${pill("completed")} ${esc(p1.status_determination || "—")} ·
       ${esc(p1.input_mode || "—")} · CPC ${esc(p1.cpc_subclass || "—")} ·
@@ -79,6 +101,10 @@ function paint(host: HTMLElement, jobId: string): void {
     const quotes: string[] = cr.evidence_quotes || [];
     openModal(`${doc.pub_num || doc.title} — score ${cr.score ?? 0}`, `
       <div class="small muted" style="margin-bottom:.5rem">${esc(doc.title || "")}</div>
+      <div class="row">${isCovered(doc, crit)
+        ? `<span class="pill pill-failed pill-flat">counted as covered by the adjudicator</span>`
+        : `<span class="pill pill-tag">scored, but not counted as covered</span>`}
+        <span class="small muted">score ${cr.score ?? 0}</span></div>
       <div class="subhead">Element</div><div class="prose">${esc(crit)}</div>
       <div class="subhead">Analysis</div><div class="prose">${md(cr.analysis || "—")}</div>
       <div class="subhead">Verbatim quotes (${quotes.length})</div>
@@ -145,12 +171,12 @@ function candidatesSection(cands: any[], checklist: any[], sr: any[]): string {
           <div class="concept">${esc(c.concept || "")}</div>
         </div>
         <div class="cand-body">
-          <div class="tbl-wrap"><div class="tw"><table class="tbl">
-            <thead><tr><th style="width:5.5rem">Element</th><th style="min-width:16rem">Claim language</th><th style="min-width:15rem">Verbatim basis in the document</th></tr></thead>
+          <div class="tbl-wrap"><div class="tw"><table class="tbl fixed stack-sm">
+            <thead><tr><th style="width:12%">Element</th><th style="width:44%">Claim language</th><th style="width:44%">Verbatim basis in the document</th></tr></thead>
             <tbody>${els.map((e: any) => `<tr>
-              <td class="mono tiny">${esc(e.id)}${e.kind ? `<div class="muted">${esc(e.kind)}</div>` : ""}</td>
-              <td>${esc(e.text)}</td>
-              <td>${e.evidence_quote
+              <td class="mono tiny" data-l="Element">${esc(e.id)}${e.kind ? `<div class="muted">${esc(e.kind)}</div>` : ""}</td>
+              <td data-l="Claim language">${esc(e.text)}</td>
+              <td data-l="Verbatim basis">${e.evidence_quote
                 ? `<div class="quote">${esc(e.evidence_quote)}</div>${locLine(e.evidence_loc)}`
                 : `<span class="pill pill-failed">unsupported</span>`}</td></tr>`).join("")}
             </tbody></table></div></div>
@@ -174,8 +200,7 @@ function bestDocFor(own: any[], sr: any[]): { covered: number; total: number } |
   if (!own.length || !sr.length) return null;
   let best = 0;
   for (const d of sr) {
-    const cr = d.checklist_results || {};
-    const n = own.filter((c) => (cr[c.criterion]?.score ?? 0) >= 2).length;
+    const n = own.filter((c) => isCovered(d, c.criterion)).length;
     if (n > best) best = n;
   }
   return { covered: best, total: own.length };
@@ -244,7 +269,7 @@ function matrixSection(cands: any[], checklist: any[], sr: any[]): string {
     const scored = sr
       .map((d: any) => ({
         doc: d,
-        hits: g.rows.reduce((n: number, c: any) => n + ((d.checklist_results?.[c.criterion]?.score ?? 0) >= 2 ? 1 : 0), 0),
+        hits: g.rows.reduce((n: number, c: any) => n + (isCovered(d, c.criterion) ? 1 : 0), 0),
         any: g.rows.reduce((n: number, c: any) => n + ((d.checklist_results?.[c.criterion]?.score ?? 0) > 0 ? 1 : 0), 0),
       }))
       .filter((x) => x.any > 0)
@@ -260,24 +285,31 @@ function matrixSection(cands: any[], checklist: any[], sr: any[]): string {
         <div class="concept">${esc(clip(g.concept, 150))}</div>
         <div class="small muted">${g.rows.length} elements × ${docs.length} of ${scored.length} references that touch it</div></div>
       <div class="cand-body"><div class="tbl-wrap"><div class="tw"><table class="tbl matrix fixed">
-        <thead><tr><th class="el-col" style="width:40%">Element</th>
-          ${docs.map((d: any) => `<th class="doc-col right" title="${esc(d.title || "")}">${esc(clip(d.pub_num || d.title, 22))}</th>`).join("")}</tr></thead>
+        <thead><tr><th class="el-col" style="width:44%">Element</th>
+          ${docs.map((d: any, i: number) => `<th class="doc-col" title="${esc(d.pub_num || "")} — ${esc(d.title || "")}">D${i + 1}</th>`).join("")}</tr></thead>
         <tbody>${g.rows.map((c: any) => `<tr>
           <td class="el-col"><div class="mono tiny muted">${esc(c.id)}</div>${esc(clip(c.criterion, 220))}</td>
           ${docs.map((d: any) => {
             const cr = d.checklist_results?.[c.criterion];
             const sc = cr?.score ?? 0;
+            const cls = isCovered(d, c.criterion) ? "cell-covered" : sc > 0 ? "cell-scored" : "cell-absent";
             const key = `${esc(d.pub_num || d.title)}||${esc(c.criterion)}`;
-            return `<td class="cell-score s${sc}" ${cr ? `data-cell="${key}" title="click for the quote and the analysis"` : ""}>${sc === 2 ? "●" : sc === 1 ? "◐" : "○"}</td>`;
+            return `<td class="cell-score ${cls}" ${cr ? `data-cell="${key}" title="score ${sc} — click for the quote and the analysis"` : ""}>${sc || "·"}</td>`;
           }).join("")}</tr>`).join("")}</tbody>
-      </table></div></div></div>
+      </table></div></div>
+      <div class="tw" style="margin-top:.4rem"><table class="tbl doc-key">
+        <tbody>${docs.map((d: any, i: number) => `<tr><td>D${i + 1}</td>
+          <td class="mono tiny">${esc(d.pub_num || "—")}</td>
+          <td>${esc(clip(d.title, 150))}</td>
+          <td class="right num">${d.similarity_score ?? ""}</td></tr>`).join("")}</tbody></table></div>
+      </div>
     </div>`;
   }).join("");
 
   return `<section class="section">
     <header><h2>Evidence matrix</h2>
-      <span class="hint">● covered · ◐ partial · ○ absent — click a cell for the verbatim quote</span>
-      ${sr.length > MAX_DOCS ? `<button class="icon-btn" id="toggle-docs">${showAllDocs ? "Show top references only" : `Show all ${sr.length} references`}</button>` : ""}
+      <span class="hint">the cell is the evaluator's score (2 full · 1 partial · · none); shaded means the adjudicator counted it as covered — score ≥ 1 with a verified quote. Click a cell for the quote.</span>
+      ${sr.length > MAX_DOCS ? `<button class="icon-btn" id="toggle-docs">${showAllDocs ? "Show the top references only" : "Show every reference that touches a candidate"}</button>` : ""}
     </header>
     ${blocks}
   </section>`;
