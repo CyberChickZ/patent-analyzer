@@ -45,7 +45,7 @@ TAU = 0.7
 TAG = os.environ.get("GOLD_NATURE_TAG", "h1h")
 
 MISS_TYPES = ("abstraction_gap", "missing_apparatus", "missing_application",
-              "missing_legal_generalization", "not_in_paper", "other")
+              "missing_legal_generalization", "missing_component", "not_in_paper", "other")
 
 def h1h_keys() -> list[str]:
     return sorted(p.name.split("_search_")[0] for p in RUN_DIR.glob(f"*_search_{TAG}.json"))
@@ -276,6 +276,8 @@ async def llm_attribute(case: dict, fam: dict, targeted: list[dict], paper: str)
         "   missing_apparatus: we produced only method/process elements, the limitation is an "
         "apparatus / system / kit / composition claim.\n"
         "   missing_application: the limitation is a use / application / treatment claim we never wrote.\n"
+        "   missing_component: the paper does describe the component or step, at the right level, and our "
+        "element set simply left it out (nothing was generalised or specialised wrongly).\n"
         "   missing_legal_generalization: a drafting-attorney addition — functional or means-plus-function "
         "wording, ranges, alternatives, 'configured to' language covering more than the paper shows.\n"
         "   not_in_paper: the subject matter is genuinely absent from the paper.\n"
