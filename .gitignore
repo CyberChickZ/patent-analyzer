@@ -80,3 +80,6 @@ logs/
 # === Graph Papers ===
 backend/amie/graph/downloaded_papers/*
 backend/amie/graph/papers/*
+# === Secrets ===
+.env.yaml
+**/.env.yaml
