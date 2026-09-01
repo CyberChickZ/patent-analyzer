@@ -151,3 +151,31 @@ def test_state_endpoint_reports_the_failure(monkeypatch):
     # reviewer can look at what the phase had produced before it died
     assert r["values"]["ranked_candidates"] == [{"pub_num": "US1"}]
     assert r["context"]["search_stats"] == {"total_unique": 12}
+
+
+# ── heartbeat ──
+#
+# A phase is one graph node, so last_heartbeat only ticked on node boundaries:
+# a 20-minute search node was 20 minutes of silence, and /status on any other
+# instance (Cloud Run scales out, _active_pipelines is per-instance) would call
+# a healthy job a zombie at the 900 s threshold.
+
+def test_heartbeat_ticks_faster_than_the_zombie_threshold():
+    import app.main as m
+    assert m.HEARTBEAT_S < 900, "the heartbeat must beat well inside the staleness window"
+    assert m.HEARTBEAT_S * 3 < 900
+
+
+def test_pipeline_runs_a_side_channel_heartbeat():
+    """The heartbeat is a task started next to the graph stream, not something
+    driven by node updates — the whole point is that it ticks mid-node."""
+    import inspect
+
+    import app.main as m
+    src = inspect.getsource(m._run_langgraph_pipeline)
+    assert "async def _heartbeat():" in src
+    assert "asyncio.create_task(_heartbeat())" in src
+    # and it must be stopped on every exit, including the failure path
+    assert "finally:" in src and "hb.cancel()" in src
+    body = src[src.index("async def _heartbeat():"):]
+    assert "job[\"last_heartbeat\"]" in body and "_save_job(job)" in body

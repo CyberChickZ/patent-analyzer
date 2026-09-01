@@ -90,6 +90,11 @@ def _enqueue_job(job_id: str):
 
 USE_LANGGRAPH = True  # Always use LangGraph pipeline
 
+# How often the running pipeline refreshes job["last_heartbeat"], independently
+# of node boundaries. Must stay well under the 900 s staleness threshold that
+# /status and _reap_zombie_jobs use to declare a job dead.
+HEARTBEAT_S = float(os.getenv("HEARTBEAT_S", "60"))
+
 
 _checkpointer_singleton = None
 PHASE_NODE = {"idca": "idca", "extract": "ssr", "search": "search", "evaluate": "evaluate", "draft": "draft"}
@@ -272,6 +277,19 @@ async def _run_langgraph_pipeline(job_id: str):
     job["hitl_pending"] = None
     _save_job(job)
 
+    # A phase is one node, and last_heartbeat only ticked on a node *update* —
+    # so a 20-minute search node was 20 minutes of silence. Any instance other
+    # than this one (Cloud Run scales out; _active_pipelines is per-instance)
+    # then sees a >15 min stale heartbeat on /status and declares a perfectly
+    # healthy job a zombie. Tick it from the side while the graph runs.
+    async def _heartbeat():
+        while True:
+            await asyncio.sleep(HEARTBEAT_S)
+            job["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
+            _save_job(job)
+
+    hb = asyncio.create_task(_heartbeat())
+
     interrupted = None
     try:
         stream = graph.astream(graph_input, config=config, stream_mode="updates")
@@ -331,6 +349,8 @@ async def _run_langgraph_pipeline(job_id: str):
         job["cost"] = metering.report(job["phase_metrics"])
         _record_phase_failure(job, graph, config, exc)
         return
+    finally:
+        hb.cancel()
 
     if interrupted:
         hi = interrupted[0].value if hasattr(interrupted[0], "value") else interrupted[0]
