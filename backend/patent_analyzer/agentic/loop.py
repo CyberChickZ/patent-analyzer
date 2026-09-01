@@ -25,7 +25,7 @@ from .neighbourhood import paper_neighbourhood
 from .query_gen import boolean_query, next_mode
 from .validator import validate
 from .react_search import run_react
-from .wide import broad_terms, cpc_queries, terms_query, title_terms, wide_queries
+from .wide import broad_terms, cpc_queries, title_terms
 
 MAX_ROUNDS = int(os.environ.get("LOOP_MAX_ROUNDS", "3"))
 MAX_ELEMENTS = int(os.environ.get("LOOP_MAX_ELEMENTS", "12"))
@@ -61,7 +61,6 @@ GP_WAIT_S = int(os.environ.get("LOOP_GP_WAIT_S", "0"))   # evals: wait out a Goo
 async def _wait_for_gp(budget: Budget) -> None:
     """With no SerpAPI credit left, an eval run may sit out Google's soft
     block (15 min breaker) rather than log the query as `none`."""
-    import asyncio
     waited = 0
     while GP_WAIT_S and gp.is_blocked() and budget.gp_calls < GP_CALLS_PER_JOB and budget.serp_left() <= 0 and waited < GP_WAIT_S:
         await asyncio.sleep(30)
@@ -103,7 +102,6 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
     before = f"priority:{cutoff}" if cutoff else None
     budget = Budget(serpapi_left, serpapi_take)
     # two of the budget are held back for the CPC queries issued after expansion
-    queries = wide_queries(cands, max_total=max(1, WIDE_MAX_QUERIES - CPC_QUERIES))
     pool: dict[str, Candidate] = {}
     log = []
     seeds: list[str] = []
@@ -145,43 +143,41 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
         except Exception as exc:
             return [], {"error": f"{type(exc).__name__}: {exc}"[:200]}
 
-    if os.environ.get("LOOP_REACT", "1") == "1":
-        # ReAct loop (Harry: "做 query 本身就是用 agent 能力去更好地搜索"): the neighbourhood runs
-        # first so its title terms are in the broad group; then the model drives ≤10 queries
-        papers, neigh_info = await _neigh()
-        nterms0 = title_terms([c.title for c in papers]) if papers else []
-        core = cands[0]
-        pred_groups = [str(c).split("/")[0] for c in (core.get("cpc_pred") or []) if len(str(c).split("/")[0]) >= 5]
-        neigh_groups = ((core.get("elements") or [{}])[0].get("cpc_groups") if core.get("elements") else None) or []
-        groups = list(dict.fromkeys(pred_groups + [g for g in neigh_groups]))[:8]
-        bterms = broad_terms(core, nterms0)
+    # ReAct loop (Harry: "做 query 本身就是用 agent 能力去更好地搜索"): the neighbourhood runs
+    # first so its title terms are in the broad group; then the model drives ≤10 queries.
+    # The template query path (LOOP_REACT=0, wide_queries + terms_query) was removed
+    # 2026-09-18; _run below still serves the CPC round.
+    papers, neigh_info = await _neigh()
+    nterms0 = title_terms([c.title for c in papers]) if papers else []
+    core = cands[0]
+    pred_groups = [str(c).split("/")[0] for c in (core.get("cpc_pred") or []) if len(str(c).split("/")[0]) >= 5]
+    neigh_groups = ((core.get("elements") or [{}])[0].get("cpc_groups") if core.get("elements") else None) or []
+    groups = list(dict.fromkeys(pred_groups + [g for g in neigh_groups]))[:8]
+    bterms = broad_terms(core, nterms0)
 
-        async def _react_search(query: str):
-            hits, total, chan = await _search(query, before, budget, num=100, scholar=True)
-            return hits, total, chan
+    async def _react_search(query: str):
+        hits, total, chan = await _search(query, before, budget, num=100, scholar=True)
+        return hits, total, chan
 
-        steps = await run_react(core.get("elements") or [], bterms, groups, _react_search,
-                                lambda: min(budget.serp_left(), max(0, WIDE_MAX_QUERIES - CPC_QUERIES - len(log))) if not budget.gp_ok() else WIDE_MAX_QUERIES - CPC_QUERIES - len(log),
-                                event=event)
-        q_seeds = []
-        for st in steps:
-            hits = st.pop("_hits", [])
-            new_keys = []
-            for c in hits:
-                c.raw.setdefault("loop", {})["candidate"] = core.get("id")
-                key = (c.pub_num or c.title).upper()
-                if key not in pool:
-                    pool[key] = c
-                    new_keys.append(c.pub_num or c.title[:80])
-                if c.pub_num and c.match_type == "Patent":
-                    q_seeds.append(c.pub_num)
-            st["new_pubs"] = new_keys
-            st["candidate"] = core.get("id")
-            log.append({k: v for k, v in st.items() if k != "top"} | {"top_titles": [t["title"][:80] for t in st.get("top", [])[:10]]})
-        seeds += q_seeds
-    else:
-        (q_seeds, (papers, neigh_info)) = await asyncio.gather(_run(queries), _neigh())
-        seeds += q_seeds
+    steps = await run_react(core.get("elements") or [], bterms, groups, _react_search,
+                            lambda: min(budget.serp_left(), max(0, WIDE_MAX_QUERIES - CPC_QUERIES - len(log))) if not budget.gp_ok() else WIDE_MAX_QUERIES - CPC_QUERIES - len(log),
+                            event=event)
+    q_seeds = []
+    for st in steps:
+        hits = st.pop("_hits", [])
+        new_keys = []
+        for c in hits:
+            c.raw.setdefault("loop", {})["candidate"] = core.get("id")
+            key = (c.pub_num or c.title).upper()
+            if key not in pool:
+                pool[key] = c
+                new_keys.append(c.pub_num or c.title[:80])
+            if c.pub_num and c.match_type == "Patent":
+                q_seeds.append(c.pub_num)
+        st["new_pubs"] = new_keys
+        st["candidate"] = core.get("id")
+        log.append({k: v for k, v in st.items() if k != "top"} | {"top_titles": [t["title"][:80] for t in st.get("top", [])[:10]]})
+    seeds += q_seeds
     for c in papers:
         pool.setdefault((c.pub_num or c.title).upper(), c)
     # bridge: patents that cite the neighbourhood papers (Reliance on Science, amie_patents.pcs_oa)
@@ -267,11 +263,6 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
         except Exception as exc:
             lens_info["error"] = f"{type(exc).__name__}: {exc}"[:200]
     lens_pubs = list(dict.fromkeys(lens_pubs))
-    # one query in the neighbourhood's own words (frequent title bigrams) — template mode only
-    nterms = title_terms([c.title for c in papers]) if papers else []
-    tq = terms_query(cands[0].get("id") or "inv1", nterms) if cands and os.environ.get("LOOP_REACT", "1") != "1" else None
-    if tq and len(log) < WIDE_MAX_QUERIES - CPC_QUERIES + 1:
-        seeds += await _run([tq])
     seeds = list(dict.fromkeys(seeds))
     if os.environ.get("WIDE_SEED_ONLY") == "1":
         # M1 round 0 wants the queries and the paper neighbourhood only: the citation expansion,

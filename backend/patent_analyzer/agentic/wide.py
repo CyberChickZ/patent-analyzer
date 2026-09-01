@@ -179,9 +179,3 @@ def title_terms(titles: list[str], top: int = 8) -> list[str]:
         if c >= 2 and all(w not in g for g in out):
             out.append(w)
     return out[:top]
-
-
-def terms_query(cand_id: str, terms: list[str]) -> dict | None:
-    if not terms:
-        return None
-    return {"candidate": cand_id, "kind": "neigh_terms", "query": _group(terms), "facets_used": {"neigh_terms": terms}, "elements": []}

@@ -163,9 +163,14 @@ def test_expand_light_uses_narrow_lookup_beyond_the_head(monkeypatch):
     assert {c.pub_num: bool(c.abstract) for c in out} == {"C0": True, "C1": True, "C2": False, "C3": False, "C4": False, "C9": False}
 
 
-def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
+def test_wide_mode_expands_light_from_the_query_hits(monkeypatch):
+    """Everything that happens *after* the queries — citation expansion with the
+    cutoff, the paper neighbourhood, the Reliance-on-Science bridge, Google's
+    similar neighbours and the CPC round. run_react is faked so the assertions
+    are about that machinery, not about how the queries were written.
+    (Was the template-mode test; the template query path was removed 2026-09-18.)"""
     monkeypatch.setattr(L, "LOOP_MODE", "wide")
-    monkeypatch.setenv("LOOP_REACT", "0")          # template mode; the ReAct loop has its own test
+    monkeypatch.setenv("LOOP_REACT", "1")
     state = {"summary": "s", "date_cutoff": "20110202", "extraction": {"candidate_inventions": [
         {"id": "inv1", "level": "core", "cpc_pred": ["A61K31/00"], "elements": [
             {"id": "inv1.e0", "text": "A method of inhibiting prostate cancer cell proliferation", "facets": {"thing": ["cancer treatment", "cell proliferation"]}},
@@ -206,6 +211,17 @@ def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
     async def fake_bridge(oa_ids):
         return {"W1": [{"patent_pub": "US5000A", "reftype": "exm"}]}
     monkeypatch.setattr("patent_analyzer.recall.bigquery_patents.fetch_citing_patents", fake_bridge, raising=False)
+
+    async def fake_react(elements, broad, groups, search, budget_left, event=None, call=None, max_steps=10):
+        steps = []
+        for i, q in enumerate(("(soluble adenylyl cyclase) (inhibition)", "(cancer treatment) (cell proliferation)"), 1):
+            hits, total, chan = await search(q)
+            steps.append({"n": i, "kind": "react", "query": q, "channel": chan, "total": total,
+                          "hits": len(hits), "returned": len(hits), "new": len(hits),
+                          "pubs": [c.pub_num for c in hits], "new_pubs": [], "elements": ["inv1.e1"],
+                          "facets_used": {}, "top": [], "_hits": hits})
+        return steps
+    monkeypatch.setattr(L, "run_react", fake_react)
     events = []
     cands, stats = asyncio.run(L.run_loop(state, lambda: 0, lambda: False, lambda k, m, p=None: events.append(k)))
     assert "US8" in {c.pub_num for c in cands} and stats["rounds"][0]["similar_added"] == 1 and stats["rounds"][0]["similar_pubs"] == ["US8"]
@@ -214,16 +230,10 @@ def test_wide_mode_queries_every_candidate_and_expands_light(monkeypatch):
     assert "US5000A" in seen["seeds"] and "a neighbourhood paper" in {c.title for c in cands}
     assert [c[1] for c in calls] == [100] * len(calls) and all(c[2] == "priority:20110202" for c in calls)
     kinds = [q["kind"] for q in stats["rounds"][0]["queries"]]
-    assert kinds[:2] == ["element:inv1.e1", "candidate+cpc"] and "cpc+thing" in kinds   # v6: one element → candidate query dedupes into the element query; CPC round after expansion
-    eq = stats["rounds"][0]["queries"][0]
-    assert eq["facets_used"]["specific"] == ["soluble adenylyl cyclase", "inhibition"]   # 'sac' fails validation (not capitalised in the source)
-    assert all("prostate cancer" not in q["query"] for q in stats["rounds"][0]["queries"] if q["kind"].startswith("element"))
+    assert kinds[:2] == ["react", "react"] and "cpc+thing" in kinds      # CPC round still runs after expansion
     assert seen["light"] and seen["max_cited"] == L.MAX_CITED_LIGHT and seen["before"] == "20110202"
     pubs = {c.pub_num for c in cands}
     assert "US7" in pubs and "US2099" not in pubs and stats["mode"] == "wide"
-    q0 = stats["rounds"][0]["queries"][0]
-    assert q0["n"] == 1 and len(q0["pubs"]) == 2 and q0["new"] == 2 and q0["kind"] == "element:inv1.e1"
-    assert stats["rounds"][0]["queries"][1]["new"] == 1   # US2099 repeats, one fresh hit
     assert "US7" in stats["rounds"][0]["expanded_pubs"] and stats["rounds"][0]["cpc_top"] == ["A61K31", "A61K38"]
     assert [c["id"] for c in stats["candidates"]] == ["inv1", "inv2"] and events == ["round_done"]
 

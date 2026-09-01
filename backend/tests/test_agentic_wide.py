@@ -50,11 +50,8 @@ def test_cpc_queries_use_top_groups_with_core_things():
 
 
 def test_title_terms_prefers_repeated_bigrams():
-    from patent_analyzer.agentic.wide import terms_query, title_terms
+    from patent_analyzer.agentic.wide import title_terms
     titles = ["Embodied social proxy: mediating interpersonal connection", "MeBot: a robotic platform for socially embodied telepresence",
               "Telepresence robot design for remote collaboration", "Social telepresence robot with a swiveling display", "the of and"]
     terms = title_terms(titles, top=4)
     assert terms[0] == "telepresence robot" and "embodied" in " ".join(terms)
-    q = terms_query("inv1", terms)
-    assert q["kind"] == "neigh_terms" and q["query"].startswith("((telepresence robot)")
-    assert terms_query("inv1", []) is None
