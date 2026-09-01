@@ -151,12 +151,6 @@ async def run_pair(pair: dict, extractor: str, data: Path, input_mode: str = "ac
                 "input_mode": p1.get("input_mode", "academic_paper"), "cpc_subclass": p1.get("cpc_subclass", "")})
             rec.update(checklist=p2.get("checklist", []), extraction=p2.get("extraction"),
                        errors=p2.get("errors"), llm_calls=p2.get("llm_calls"), retry_count=p2.get("retry_count", 0))
-        else:
-            from graph.ssr_subgraph import build_ssr_subgraph
-            p2 = await build_ssr_subgraph().ainvoke({
-                "summary": p1["summary"], "fields_map": p1.get("fields_map", []),
-                "cpc_subclass": p1.get("cpc_subclass", ""), "personas": p1.get("personas", {})})
-            rec.update(checklist=p2.get("checklist", []), retry_count=p2.get("retry_count", 0))
     rec["llm_calls_total"] = llm_cache.stats["hits"] + llm_cache.stats["misses"] - before
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(rec, ensure_ascii=False, indent=1))

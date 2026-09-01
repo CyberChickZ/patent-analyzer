@@ -190,9 +190,8 @@ def print_sanity(gold: dict):
 
 
 async def run_pipeline_one(key: str, g: dict) -> dict:
-    """IDCA -> Phase 2 (extraction subgraph, or SSR with EXTRACTOR=ssr) -> search_node; cached per query."""
+    """IDCA -> Phase 2 (extraction subgraph) -> search_node; cached per query."""
     from graph.extraction_subgraph import build_extraction_subgraph
-    from graph.ssr_subgraph import build_ssr_subgraph
     from nodes.idca import idca_node
     from nodes.search import search_node
 
@@ -207,14 +206,9 @@ async def run_pipeline_one(key: str, g: dict) -> dict:
     rec = {"key": key, "status_determination": p1.get("status_determination"), "input_mode": p1.get("input_mode"),
            "summary": p1.get("summary", ""), "delegation": {}, "ranked": [], "pool": [], "events": []}
     if p1.get("status_determination") == "Present":
-        if os.environ.get("EXTRACTOR", "extraction") == "ssr":
-            p2 = await build_ssr_subgraph().ainvoke({
-                "summary": p1["summary"], "fields_map": p1.get("fields_map", []),
-                "cpc_subclass": p1.get("cpc_subclass", ""), "personas": p1.get("personas", {})})
-        else:
-            p2 = await build_extraction_subgraph().ainvoke({
-                "summary": p1["summary"], "document_text": p1.get("document_text", ""), "input_local_path": tmp,
-                "input_mode": p1.get("input_mode", "academic_paper"), "cpc_subclass": p1.get("cpc_subclass", "")})
+        p2 = await build_extraction_subgraph().ainvoke({
+            "summary": p1["summary"], "document_text": p1.get("document_text", ""), "input_local_path": tmp,
+            "input_mode": p1.get("input_mode", "academic_paper"), "cpc_subclass": p1.get("cpc_subclass", "")})
         rec["delegation"] = p2.get("delegation", {})
         rec["extraction"] = p2.get("extraction")
         p3 = await search_node({

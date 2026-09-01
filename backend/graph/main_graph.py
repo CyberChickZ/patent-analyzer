@@ -13,7 +13,6 @@ from langgraph.graph import END, StateGraph
 from graph.eval_subgraph import build_eval_subgraph
 from graph.extraction_subgraph import build_extraction_subgraph
 from graph.gates import make_gate
-from graph.ssr_subgraph import build_ssr_subgraph  # legacy; kept for EXTRACTOR=ssr
 from nodes.draft import draft_node
 from nodes.idca import idca_node
 from nodes.report import report_node
@@ -41,12 +40,14 @@ def route_after_search(state: GraphState) -> str:
 
 def build_graph(checkpointer=None, phase2=None, nodes: dict | None = None, entry: str = "idca"):
     """Compile the pipeline. `nodes` lets tests swap phase nodes for fakes;
-    `phase2` overrides the Phase 2 subgraph builder (default: extraction,
-    EXTRACTOR=ssr → legacy SSR); `entry` starts mid-pipeline from a saved
-    state (fallback resume when the checkpoint is gone)."""
-    import os
+    `phase2` overrides the Phase 2 subgraph builder (default: extraction);
+    `entry` starts mid-pipeline from a saved state (fallback resume when the
+    checkpoint is gone).
+
+    The node is still called "ssr" — renaming it would invalidate every saved
+    checkpoint, which is what `entry` and the rerun_phase replay read."""
     if phase2 is None:
-        phase2 = build_ssr_subgraph if os.environ.get("EXTRACTOR", "extraction") == "ssr" else build_extraction_subgraph
+        phase2 = build_extraction_subgraph
     n = {"idca": idca_node, "ssr": phase2(), "search": search_node, "evaluate": build_eval_subgraph(),
          "draft": draft_node, "report": report_node, **(nodes or {})}
     g = StateGraph(GraphState)

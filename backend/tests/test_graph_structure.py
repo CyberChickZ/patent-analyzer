@@ -66,8 +66,9 @@ if __name__ == "__main__":
     print("All graph structure tests passed!")
 
 
-def test_extraction_subgraph_compiles_inside_main_graph(monkeypatch):
-    monkeypatch.delenv("EXTRACTOR", raising=False)
+def test_extraction_subgraph_compiles_inside_main_graph():
+    # Phase 2 is always the extraction subgraph; the EXTRACTOR=ssr escape hatch
+    # and graph/ssr_subgraph.py were removed on 2026-09-18.
     assert build_graph() is not None
     assert set(build_graph().get_graph().nodes) >= {"idca", "gate_idca", "ssr", "gate_extract", "search", "gate_search",
                                                      "evaluate", "gate_evaluate", "draft", "gate_draft", "report"}

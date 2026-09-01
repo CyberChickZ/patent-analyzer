@@ -9,11 +9,12 @@ is the reference column.
 
 Usage:
     python3 evals/extraction_fulldoc_eval.py --limit 20 --mode desc_only
-    python3 evals/extraction_fulldoc_eval.py --limit 5 --extractor new   # IDCA -> extraction_subgraph
 
---extractor new swaps the SSR subgraph for graph.extraction_subgraph and reports,
-next to F1, the omission / fabrication / misclassification columns
-(evals/extraction_errors.py) and the quote survival of the core candidate.
+Phase 2 is IDCA -> graph.extraction_subgraph. Next to F1 it reports the
+omission / fabrication / misclassification columns (evals/extraction_errors.py)
+and the quote survival of the core candidate. (The legacy SSR extractor and its
+--extractor flag were removed on 2026-09-18; cached runs from before that carry
+"extractor": "ssr" and are no longer comparable.)
 """
 
 import argparse
@@ -45,10 +46,9 @@ def _live_calls() -> int:
     return llm_cache.stats["misses"]
 
 
-async def run_stage1(app: str, with_claims: bool, extractor: str = "ssr", max_live_calls: int | None = None) -> dict:
-    """IDCA + SSR (or IDCA + extraction subgraph) on a rendered FiNE application;
-    cached per (app, mode, extractor)."""
-    from graph.ssr_subgraph import build_ssr_subgraph
+async def run_stage1(app: str, with_claims: bool, extractor: str = "new", max_live_calls: int | None = None) -> dict:
+    """IDCA + the extraction subgraph on a rendered FiNE application; cached per
+    (app, mode, extractor)."""
     from nodes.idca import idca_node
 
     mode = "with_claims" if with_claims else "desc_only"
@@ -75,7 +75,7 @@ async def run_stage1(app: str, with_claims: bool, extractor: str = "ssr", max_li
         "summary": p1.get("summary", ""), "checklist": [], "delegation": {},
         "retry_count": 0, "extraction": None, "errors": None, "llm_calls": None,
     }
-    if p1.get("status_determination") == "Present" and extractor == "new":
+    if p1.get("status_determination") == "Present":
         from graph.extraction_subgraph import build_extraction_subgraph
         p2 = await build_extraction_subgraph().ainvoke({
             "summary": p1["summary"], "document_text": text, "input_local_path": tmp,
@@ -86,15 +86,6 @@ async def run_stage1(app: str, with_claims: bool, extractor: str = "ssr", max_li
         result["errors"] = p2.get("errors")
         result["retry_count"] = p2.get("retry_count", 0)
         result["llm_calls"] = p2.get("llm_calls")
-    elif p1.get("status_determination") == "Present":
-        sg = build_ssr_subgraph()
-        p2 = await sg.ainvoke({
-            "summary": p1["summary"], "fields_map": p1.get("fields_map", []),
-            "cpc_subclass": p1.get("cpc_subclass", ""), "personas": p1.get("personas", {}),
-        })
-        result["checklist"] = p2.get("checklist", [])
-        result["delegation"] = p2.get("delegation", {})
-        result["retry_count"] = p2.get("retry_count", 0)
     result["llm_calls_total"] = llm_cache.stats["hits"] + llm_cache.stats["misses"] - calls_before
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=1))
@@ -140,7 +131,8 @@ async def main():
     ap.add_argument("--limit", type=int, default=20)
     ap.add_argument("--mode", default="desc_only", choices=["desc_only", "with_claims", "both"])
     ap.add_argument("--concurrency", type=int, default=2)
-    ap.add_argument("--extractor", default="ssr", choices=["ssr", "new"])
+    ap.add_argument("--extractor", default="new", choices=["new"],
+                    help="kept so old command lines still parse; the SSR extractor is gone")
     ap.add_argument("--max-live-calls", type=int, default=60, help="stop launching new samples past this many live Gemini calls")
     ap.add_argument("--no-errors", action="store_true", help="skip the omission/fabrication/misclassification columns")
     args = ap.parse_args()
