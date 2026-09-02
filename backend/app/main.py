@@ -468,6 +468,14 @@ def _gcs_failed(op: str, exc: BaseException) -> None:
               "Further failures of this operation are counted, not logged.")
 
 
+# Lazily-built storage.Client. The module-level binding matters: `global
+# _gcs_client` without it makes _get_gcs raise NameError, which the best-effort
+# try/except around every upload then swallowed. Deleted by db92443 and unnoticed
+# for exactly that reason until /healthz started reporting GCS failures
+# (b0488ae) — job state had not reached the bucket since.
+_gcs_client = None
+
+
 def _get_gcs():
     global _gcs_client
     if _gcs_client is None:

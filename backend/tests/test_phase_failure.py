@@ -179,3 +179,28 @@ def test_pipeline_runs_a_side_channel_heartbeat():
     assert "finally:" in src and "hb.cancel()" in src
     body = src[src.index("async def _heartbeat():"):]
     assert "job[\"last_heartbeat\"]" in body and "_save_job(job)" in body
+
+
+# ── GCS client binding ──
+
+def test_gcs_client_module_global_exists():
+    """`global _gcs_client` inside _get_gcs needs a module-level binding. Without
+    it every upload raised NameError into a bare except, so no job state reached
+    the bucket between db92443 and 2026-09-18 and nothing said a word."""
+    import app.main as m
+    assert hasattr(m, "_gcs_client"), "_get_gcs would raise NameError on first call"
+
+
+def test_gcs_failures_are_recorded_not_swallowed(monkeypatch):
+    import app.main as m
+    m._gcs_failures.clear()
+
+    def boom():
+        raise RuntimeError("no credentials")
+    monkeypatch.setattr(m, "_get_gcs", boom)
+
+    assert m._gcs_put("save_job", "p/state.json", "{}", "application/json") is False
+    assert m._gcs_put("save_job", "p/state.json", "{}", "application/json") is False
+    assert m._gcs_failures["save_job"]["n"] == 2
+    assert "no credentials" in m._gcs_failures["save_job"]["last"]
+    m._gcs_failures.clear()
