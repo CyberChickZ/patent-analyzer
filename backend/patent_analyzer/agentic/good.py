@@ -12,6 +12,13 @@ The same probe kept 743 of 1,696 (44%), which is too generous to rank with.
 So a document only counts as touching an element when the model can name the
 CLAIM NUMBER that touches it (leader, 2026-09-18): pointing at a location is
 harder to fake than a yes.
+
+That alone was still too generous — m1a's first paper judged 17% of round 0
+and 22% of round 1 GOOD, so every one of 15 elements was "covered by >=3
+GOOD" after a single round and the loop stopped with reach 0/5. Hence STRONG:
+a document counts towards coverage only when it touches at least two elements,
+each with a claim number. A one-element GOOD is still a seed candidate for the
+next round — it is just not evidence that an element is covered.
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ BATCH = int(os.environ.get("GOOD_BATCH", "8"))
 CLAIMS_CHARS = int(os.environ.get("GOOD_CLAIMS_CHARS", "4000"))
 CONCURRENCY = int(os.environ.get("GOOD_CONCURRENCY", "4"))
 INDEPENDENT_ONLY = os.environ.get("GOOD_INDEPENDENT_ONLY", "0") == "1"
+STRONG_TOUCHES = int(os.environ.get("M1_STRONG_TOUCHES", "2"))
 
 SCHEMA = {
     "type": "OBJECT",
@@ -131,18 +139,43 @@ async def judge(elements: list[dict], docs: list[dict], claims: dict[str, str], 
     return {"judged": len(have), "calls": len(batches), "good": n_good, "with_claims": len(have)}
 
 
+def is_strong(d: dict) -> bool:
+    """Touches >= STRONG_TOUCHES elements, each with a claim number."""
+    return len(d.get("good_touches") or {}) >= STRONG_TOUCHES
+
+
 def rank_good(docs: list[dict]) -> list[dict]:
     """GOOD documents, most elements touched first (the seed order for the
-    next round and the delivery order)."""
+    next round and the delivery order). Strong ones lead, so a seed cap takes
+    them before the one-element hits."""
     good = [d for d in docs if d.get("good")]
-    return sorted(good, key=lambda d: (-len(d.get("good_touches") or {}), -float(d.get("prune_cos") or 0.0)))
+    return sorted(good, key=lambda d: (not is_strong(d), -len(d.get("good_touches") or {}),
+                                       -float(d.get("prune_cos") or 0.0)))
 
 
-def coverage(docs: list[dict], elements: list[dict]) -> dict[str, int]:
-    """How many GOOD documents cover each element — the round's stop signal."""
+def rank_for(docs: list[dict], element_ids, cap: int = 0) -> list[dict]:
+    """GOOD documents that touch one of `element_ids` first — how an uncovered
+    element pulls the next round's seeds towards itself."""
+    want = set(element_ids or ())
+    ranked = rank_good(docs)
+    out = ([d for d in ranked if want & set(d.get("good_touches") or {})]
+           + [d for d in ranked if not (want & set(d.get("good_touches") or {}))])
+    return out[:cap] if cap else out
+
+
+def coverage(docs: list[dict], elements: list[dict], strong_only: bool = True) -> dict[str, int]:
+    """How many GOOD documents cover each element. Only STRONG ones count by
+    default — see the module docstring for why a one-element hit does not."""
     out = {e["id"]: 0 for e in elements}
     for d in docs:
+        if strong_only and not is_strong(d):
+            continue
         for eid in (d.get("good_touches") or {}):
             if eid in out:
                 out[eid] += 1
     return out
+
+
+def uncovered(cover: dict[str, int], target: int = 1) -> list[str]:
+    """Element ids with fewer than `target` strong GOOD behind them."""
+    return [eid for eid, n in cover.items() if n < target]

@@ -33,7 +33,9 @@ def test_an_element_counts_only_with_a_claim_number():
     assert docs[1]["good"] is False and docs[1]["good_touches"] == {}
     assert stats == {"judged": 2, "calls": 1, "good": 1, "with_claims": 2}
     assert [d["pub_num"] for d in rank_good(docs)] == ["US1111111B2"]
-    assert coverage(docs, ELS) == {"inv1.e1": 1, "inv1.e2": 0}
+    # one element touched is GOOD but not STRONG, so it does not count towards coverage
+    assert coverage(docs, ELS) == {"inv1.e1": 0, "inv1.e2": 0}
+    assert coverage(docs, ELS, strong_only=False) == {"inv1.e1": 1, "inv1.e2": 0}
 
 
 def test_documents_without_claims_are_not_judged():
