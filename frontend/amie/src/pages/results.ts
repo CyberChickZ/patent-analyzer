@@ -55,9 +55,11 @@ export async function renderResults(host: HTMLElement, jobId: string): Promise<v
   } catch (e: any) {
     const msg = String(e?.message || e);
     host.innerHTML = `<div class="page-head"><div class="kicker">Step 3</div><h1>Results <span class="mono small muted">${esc(jobId)}</span></h1></div>`
-      + (msg.startsWith("404")
-        ? empty("No results yet", `This job has not finished. <a href="#/run/${esc(jobId)}">Watch it run →</a>`)
-        : errorBox(`Could not load results — ${msg}`));
+      + (!msg.startsWith("404")
+        ? errorBox(`Could not load results — ${msg}`)
+        : /job not found/i.test(msg)
+          ? empty("No such job", `Nothing on the server has the id <code>${esc(jobId)}</code>. <a href="#/submit">Pick one from the job list →</a>`)
+          : empty("No results yet", `This job has not produced a results.json. <a href="#/run/${esc(jobId)}">Watch it run →</a>`));
     return;
   }
   paint(host, jobId);
