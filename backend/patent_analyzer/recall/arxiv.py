@@ -2,18 +2,37 @@
 
 Free, no key required. arXiv API returns Atom XML; we parse it without
 external dependencies (xml.etree).
+
+Transport note (measured 2026-09-18, after the channel_health table in the
+report showed this channel returning 0 with "HTTP 406" on every job): the
+export API answers httpx with 406 Not Acceptable and an empty body, and keeps
+doing so for every header combination tried — default httpx headers, an
+explicit `Accept: application/atom+xml`, `Accept: */*`, a curl User-Agent,
+`Accept-Encoding: identity`, `Connection: close` — and over HTTP/2 as well
+(which returned 429). curl gets 200 and urllib gets 200, three times each, in
+the same minute from the same IP. So the block is below the header layer and
+the fix is not a header: this module now issues the request with
+urllib.request on a thread, which is the same pattern the SerpAPI and USPTO ODP
+channels already use.
 """
 
 from __future__ import annotations
 
+import asyncio
 import re
+import ssl
+import urllib.error
+import urllib.parse
+import urllib.request
 import xml.etree.ElementTree as ET
-from typing import Any
 
-import httpx
+import certifi
 
 from .. import metering
 from .pool import Candidate
+
+_SSL_CTX = ssl.create_default_context(cafile=certifi.where())
+_UA = "patent-analyzer/0.4 (https://github.com/CyberChickZ/patent-analyzer)"
 
 API_URL = "https://export.arxiv.org/api/query"
 NS = {
@@ -75,6 +94,14 @@ def _entry_to_candidate(entry: ET.Element) -> Candidate:
     )
 
 
+def _fetch(params: dict) -> tuple[int, bytes]:
+    """Blocking GET, run on a thread. urllib, not httpx — see the module docstring."""
+    url = f"{API_URL}?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers={"User-Agent": _UA})
+    with urllib.request.urlopen(req, timeout=TIMEOUT, context=_SSL_CTX) as r:
+        return r.status, r.read()
+
+
 async def search(query: str, limit: int = 30) -> tuple[list[Candidate], str | None]:
     """Search arXiv with a free-text query.
 
@@ -84,7 +111,6 @@ async def search(query: str, limit: int = 30) -> tuple[list[Candidate], str | No
     Retries on 429 / 5xx with exponential backoff because Cloud Run egress
     IPs share NAT pools that can be temporarily rate-limited.
     """
-    import asyncio
     if not query:
         return [], "empty query"
     # arXiv chokes on long natural-language queries — keep it short
@@ -102,31 +128,33 @@ async def search(query: str, limit: int = 30) -> tuple[list[Candidate], str | No
         if wait:
             await asyncio.sleep(wait)
         try:
-            async with httpx.AsyncClient(follow_redirects=True) as client:
-                metering.count("arxiv")
-                resp = await client.get(
-                    API_URL, params=params, timeout=TIMEOUT,
-                    headers={"User-Agent": "patent-analyzer/0.3 (https://github.com/CyberChickZ/patent-analyzer)"},
-                )
-            if resp.status_code == 429:
+            metering.count("arxiv")
+            status, body = await asyncio.to_thread(_fetch, params)
+            if status == 429:
                 last_err = "HTTP 429 (arXiv rate limited)"
                 continue
-            if 500 <= resp.status_code < 600:
-                last_err = f"HTTP {resp.status_code} (arXiv server error)"
+            if 500 <= status < 600:
+                last_err = f"HTTP {status} (arXiv server error)"
                 continue
-            if resp.status_code >= 400:
-                return [], f"HTTP {resp.status_code}"
-            if not resp.text.strip():
+            if status >= 400:
+                return [], f"HTTP {status}"
+            text = body.decode("utf-8", "replace")
+            if not text.strip():
                 return [], "empty response from arXiv"
             try:
-                root = ET.fromstring(resp.text)
+                root = ET.fromstring(text)
             except ET.ParseError as e:
                 return [], f"XML parse error: {e}"
             entries = root.findall("atom:entry", NS)
             cands = [_entry_to_candidate(e) for e in entries]
             return [c for c in cands if c.title], None
-        except httpx.TimeoutException:
+        except TimeoutError:
             last_err = "timeout"
+        except urllib.error.HTTPError as e:
+            if e.code == 429 or 500 <= e.code < 600:
+                last_err = f"HTTP {e.code}"
+                continue
+            return [], f"HTTP {e.code}"
         except Exception as e:
             last_err = f"{type(e).__name__}: {e}"
     return [], last_err or "unknown error after retries"

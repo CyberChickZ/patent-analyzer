@@ -458,7 +458,17 @@ async def search_abstracts(
     words = words[:10]
     if not words:
         return [], "no search terms"
-    search_expr = " OR ".join(words)
+    # A bare hyphen is a token the SEARCH() query parser rejects outright:
+    # `ultra-wideband OR kuramoto` -> "400 Search query parser error: error at
+    # position 8: token recognition error at: '-'", which killed the whole
+    # channel for any invention whose terms contain a hyphenated word (measured
+    # live 2026-09-18, and the same dry run succeeds once the term is quoted).
+    # Backticks are SEARCH()'s own quoting, and they keep the phrase intact
+    # instead of splitting it into two loose tokens.
+    def _q(w: str) -> str:
+        return f"`{w}`" if "-" in w else w
+
+    search_expr = " OR ".join(_q(w) for w in words)
     score = " + ".join(f"IF(REGEXP_CONTAINS(t, r'\\b{re.escape(w)}'), 1, 0)" for w in words)
     filters = ["SEARCH((title, abstract), @q)"]
     params = [bigquery.ScalarQueryParameter("q", "STRING", search_expr),
