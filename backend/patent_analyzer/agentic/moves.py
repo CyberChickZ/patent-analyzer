@@ -40,11 +40,16 @@ CAPS = {
     "S1_input_authors": int(os.environ.get("M1_S1", "50")),
     "S2_predicted_cpc": int(os.environ.get("M1_S2", "300")),
     "S3_react": int(os.environ.get("M1_S3", "300")),
+    "W1_citations": int(os.environ.get("M1_W1", "400")),
+    "W4_similar": int(os.environ.get("M1_W4", "200")),
 }
 ROUND_CLAIMS_CAP = int(os.environ.get("M1_ROUND_CLAIMS", "600"))
 SEEDS_PER_ROUND = int(os.environ.get("M1_SEEDS", "50"))
+WIDE_SEEDS = int(os.environ.get("M1_WIDE_SEEDS", "300"))  # round 1 expands from these, GOOD or not
 MAX_ROUNDS = int(os.environ.get("M1_ROUNDS", "4"))
-COVER_TARGET = int(os.environ.get("M1_COVER", "3"))       # each element covered by >=3 GOOD
+MIN_ROUNDS = int(os.environ.get("M1_MIN_ROUNDS", "3"))
+COVER_TARGET = int(os.environ.get("M1_COVER", "3"))       # each element covered by >=3 strong GOOD
+DRY_ROUNDS = int(os.environ.get("M1_DRY_ROUNDS", "2"))    # consecutive rounds with no new strong GOOD
 
 
 @dataclass
@@ -145,28 +150,42 @@ async def p4_similar(seeds: list[str], known: set[str], cap: int = 0, round_no: 
 
 
 async def p5_cpc_enum(groups: list[str], title_terms: list[str], before: str | None, known: set[str],
-                      cap: int = 0, round_no: int = 0, name: str = "P5_cpc_enum") -> MoveResult:
+                      cap: int = 0, round_no: int = 0, name: str = "P5_cpc_enum",
+                      offsets: dict[str, int] | None = None) -> MoveResult:
     """Enumerate a CPC main group through USPTO ODP. Google answers any query
     with its top 100; ODP pages the whole group, which is how H1-02's
-    US20100010703A1 is reachable at all (H.md §H7.5)."""
+    US20100010703A1 is reachable at all (H.md §H7.5).
+
+    `offsets` is the caller's per-(group, terms) cursor, updated in place: a
+    main group holds thousands of records and one round's cap reads a few
+    hundred, so without it every later round re-reads the same first pages and
+    the `known` filter drops all of them (m1a round 1: 4 calls, 0 brought
+    back). The key includes the terms because changing them changes the
+    result set, so a new set of terms starts at 0."""
     from ..recall import uspto_odp as odp
     r = MoveResult(name=name, round=round_no)
     cap = cap or CAPS.get(name, 200)
     if not groups or not title_terms:
         return r
     t0 = time.monotonic()
+    sig = ",".join(sorted(title_terms))
     per_group = max(1, cap // max(1, len(groups)))
     for g in groups:
+        key = f"{g}|{sig}"
+        start = int((offsets or {}).get(key, 0))
         try:
-            got, total, err = await odp.enumerate_group(title_terms, g, before=before, max_records=per_group)
+            got, total, err = await odp.enumerate_group(title_terms, g, before=before,
+                                                        max_records=per_group, start=start)
         except Exception as exc:
             r.error = f"{type(exc).__name__}: {exc}"[:200]
             break
         r.calls += max(1, (len(got) + 99) // 100)
+        if offsets is not None:
+            offsets[key] = start + len(got) if got else start
         if err:
             r.error = err
             continue
-        r.note += f"{g}:{total} "
+        r.note += f"{g}:{total}@{start} "
         r.candidates.extend(c for c in got if c.pub_num not in known)
         if len(r.candidates) >= cap:
             break
@@ -289,15 +308,24 @@ def round_budget(results: list[MoveResult], cap: int = ROUND_CLAIMS_CAP) -> list
     return out
 
 
-def done(cover: dict[str, int], new_good: int, rounds_done: int) -> str | None:
-    """Why the loop stops, or None to keep going (leader 2026-09-18: every
-    element covered by >=3 GOOD, or a round that adds none, or 4 rounds).
-    `rounds_done` counts completed rounds, so it is 1 after round 0 — round 0
-    finding nothing is not a reason to stop, it is the reason to walk."""
+def done(cover: dict[str, int], new_strong: int, rounds_done: int, dry_streak: int) -> str | None:
+    """Why the loop stops, or None to keep going.
+
+    m1a's first paper stopped after round 1 on "every element covered by >=3
+    GOOD" with reach 0/5: coverage was counting one-element GOOD, and at a 17%
+    GOOD rate that condition is met by noise. So coverage no longer stops the
+    loop at all (rounds.py still computes it, to steer the next round's moves
+    towards the uncovered elements), and the loop runs at least MIN_ROUNDS
+    before any stop but the hard round cap (leader, 2026-09-18).
+
+    `rounds_done` counts completed rounds, so it is 1 after round 0.
+    `dry_streak` counts consecutive rounds that added no STRONG GOOD."""
     if rounds_done >= MAX_ROUNDS:
         return f"{MAX_ROUNDS} rounds"
+    if rounds_done < MIN_ROUNDS:
+        return None
     if cover and all(n >= COVER_TARGET for n in cover.values()):
-        return f"every element covered by >={COVER_TARGET} GOOD"
-    if rounds_done > 1 and new_good == 0:
-        return "a round added no GOOD"
+        return f"every element covered by >={COVER_TARGET} strong GOOD"
+    if dry_streak >= DRY_ROUNDS:
+        return f"{dry_streak} consecutive rounds with no new strong GOOD"
     return None

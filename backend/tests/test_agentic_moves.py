@@ -26,11 +26,37 @@ def test_round_budget_drops_duplicates_across_moves():
 
 
 def test_stop_conditions():
-    assert M.done({"e1": 3, "e2": 3}, 5, 1) == f"every element covered by >={M.COVER_TARGET} GOOD"
-    assert M.done({"e1": 3, "e2": 0}, 5, 1) is None
-    assert M.done({"e1": 0}, 0, 2) == "a round added no GOOD"
-    assert M.done({"e1": 0}, 0, 1) is None                       # round 0 finding nothing is why we walk
-    assert M.done({"e1": 0}, 9, M.MAX_ROUNDS) == f"{M.MAX_ROUNDS} rounds"
+    # coverage no longer stops the loop before MIN_ROUNDS — that is what let m1a's first paper
+    # stop after round 1 with reach 0/5, on one-element GOOD it had counted as coverage
+    assert M.done({"e1": 3, "e2": 3}, 5, 1, 0) is None
+    assert M.done({"e1": 3, "e2": 3}, 5, M.MIN_ROUNDS, 0) == f"every element covered by >={M.COVER_TARGET} strong GOOD"
+    assert M.done({"e1": 3, "e2": 0}, 5, M.MIN_ROUNDS, 0) is None
+    assert M.done({"e1": 0}, 0, 2, 2) is None                    # under MIN_ROUNDS, keep walking
+    assert M.done({"e1": 0}, 0, M.MIN_ROUNDS, M.DRY_ROUNDS) == f"{M.DRY_ROUNDS} consecutive rounds with no new strong GOOD"
+    assert M.done({"e1": 0}, 0, M.MIN_ROUNDS, 1) is None         # one dry round is not two
+    assert M.done({"e1": 0}, 9, M.MAX_ROUNDS, 0) == f"{M.MAX_ROUNDS} rounds"
+
+
+def test_p5_pages_on_from_where_the_last_round_stopped():
+    """m1a round 1: P5 made 4 calls and brought back 0, because it re-read the
+    pages round 0 had already put in `known`."""
+    seen = []
+
+    async def fake_enum(terms, cpc, before=None, max_records=3000, start=0):
+        seen.append((cpc, start))
+        base = start // 100
+        return [_c(f"US{cpc}{base}{i}A1", "odp") for i in range(100)], 5000, None
+    import patent_analyzer.recall.uspto_odp as odp
+    orig, odp.enumerate_group = odp.enumerate_group, fake_enum
+    try:
+        offsets = {}
+        r1 = asyncio.run(M.p5_cpc_enum(["H04N7"], ["camera"], None, set(), cap=100, offsets=offsets))
+        r2 = asyncio.run(M.p5_cpc_enum(["H04N7"], ["camera"], None, set(), cap=100, offsets=offsets))
+    finally:
+        odp.enumerate_group = orig
+    assert seen == [("H04N7", 0), ("H04N7", 100)]
+    assert len(r1.candidates) == 100 and len(r2.candidates) == 100
+    assert not {c.pub_num for c in r1.candidates} & {c.pub_num for c in r2.candidates}
 
 
 def test_a_move_with_no_seeds_is_free():
