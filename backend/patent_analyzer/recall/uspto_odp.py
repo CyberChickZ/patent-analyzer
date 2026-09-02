@@ -26,7 +26,12 @@ Searchable fields that answered (counts from the live index):
   AND of the three                                         -> 66
 CPC symbols are stored padded ("H04N   7/15"), so a main group is matched with
 a prefix wildcard. `applicationMetaData` carries no abstract and no claims:
-this index is title + classification + dates + names only. What it gives that
+this index is title + classification + dates + names only. "Names" means
+INVENTORS: on US20120194631A1 the search projection answered
+firstInventorName "Gina D. Venolia" and inventorBag[0].inventorNameText, while
+firstApplicantName, applicantBag and applicantName were all null (measured
+2026-09-18). So the same-party move can walk inventors but not assignees —
+neither this index nor amie_patents.pubs carries an assignee at all. What it gives that
 Google Patents does not is COMPLETENESS — `count` is the real total and
 `offset` pages through all of it, against Google's hard top-100.
 
@@ -206,8 +211,8 @@ async def search_patents(title_terms: list[str], cpc: str | None = None, before:
 
 
 async def enumerate_group(title_terms: list[str], cpc: str, before: str | None = None,
-                          max_records: int = 3000) -> tuple[list[Candidate], int | None, str | None]:
-    """Every application in a CPC main group, before the cutoff, whose title
+                          max_records: int = 3000, start: int = 0) -> tuple[list[Candidate], int | None, str | None]:
+    r"""Every application in a CPC main group, before the cutoff, whose title
     carries any of the terms — paged to exhaustion.
 
     This is what no other channel of ours can do. Google Patents answers a
@@ -217,18 +222,25 @@ async def enumerate_group(title_terms: list[str], cpc: str, before: str | None =
     guidance AND cpcClassificationBag:G05D\ \ \ 1* AND filingDate:[… TO
     2013-10-31]` returns 162 records and application 12216582 is one of them
     (verified 2026-09-18 by paging all 162).
+
+    `start` resumes paging where a previous call stopped: a group with 8,000
+    records is not exhausted by one round's cap, and restarting at offset 0
+    returns the same page the `known` filter already dropped (m1a round 1:
+    P5 brought back 0 from 4 calls for exactly this reason).
     """
     out: list[Candidate] = []
     total: int | None = None
-    for offset in range(0, max_records, 100):
+    offset = start
+    while len(out) < max_records:
         got, n, err = await search_patents(title_terms, cpc=cpc, before=before, size=100, offset=offset)
         if err:
             return out, total, err
         total = n if total is None else total
         out.extend(got)
-        if not got or (total is not None and len(out) >= total):
+        offset += 100
+        if not got or (total is not None and offset >= total):
             break
-    return out, total, None
+    return out[:max_records], total, None
 
 
 async def application(app_num: str) -> tuple[dict | None, str | None]:
@@ -252,6 +264,54 @@ async def download(app_num: str, document_id: str, mime: str = "PDF") -> tuple[b
     ext = {"PDF": "pdf", "XML": "xml", "MS_WORD": "docx"}.get(mime.upper(), "pdf")
     body, err = await _get(f"/download/applications/{app_num}/{document_id}.{ext}", kind="wrapper", binary=True)
     return (body if isinstance(body, (bytes, bytearray)) else None), err
+
+
+async def find_many_by_publication(pub_nums: list[str], limit: int = 100) -> dict[str, dict]:
+    """Application records for up to `limit` US publication numbers in ONE
+    Lucene OR query — the per-number form costs two calls each, which at
+    60 req/min is a minute for twenty seeds. Keys are the input spellings that
+    matched. Non-US numbers are skipped: ODP only holds US applications."""
+    def _d(x) -> str:
+        return "".join(ch for ch in str(x or "") if ch.isdigit())
+
+    us = [p for p in dict.fromkeys(pub_nums) if p and p.upper().startswith("US")][:limit]
+    if not us:
+        return {}
+    out: dict[str, dict] = {}
+    for field in ("applicationMetaData.earliestPublicationNumber", "applicationMetaData.patentNumber"):
+        left = [p for p in us if p not in out]
+        if not left:
+            break
+        ors = " OR ".join(f'"{p.upper() if field.endswith("PublicationNumber") else _d(p)}"' for p in left)
+        data, err = await _get("/patent/applications/search", {"q": f"{field}:({ors})", "limit": limit})
+        if err or not isinstance(data, dict):
+            continue
+        by_digits: dict[str, dict] = {}
+        for w in data.get("patentFileWrapperDataBag") or []:
+            m = w.get("applicationMetaData") or {}
+            for k in (m.get("earliestPublicationNumber"), m.get("patentNumber")):
+                if _d(k):
+                    by_digits.setdefault(_d(k), w)
+        for p in left:
+            w = by_digits.get(_d(p))
+            if w:
+                out[p] = w
+    return out
+
+
+def party_names(wrapper: dict) -> dict:
+    """{inventor, applicant} from an ODP file wrapper (fields verified
+    2026-09-18: firstInventorName -> 158 hits, firstApplicantName -> 89)."""
+    m = (wrapper or {}).get("applicationMetaData") or {}
+    inv = (m.get("firstInventorName") or "").strip()
+    if not inv:
+        bag = m.get("inventorBag") or []
+        inv = str((bag[0] or {}).get("inventorNameText") or "").strip() if bag else ""
+    app = (m.get("firstApplicantName") or "").strip()
+    if not app:
+        bag = m.get("applicantBag") or []
+        app = str((bag[0] or {}).get("applicantNameText") or "").strip() if bag else ""
+    return {"inventor": inv or None, "applicant": app or None}
 
 
 async def find_by_publication(pub_num: str) -> tuple[dict | None, str | None]:
