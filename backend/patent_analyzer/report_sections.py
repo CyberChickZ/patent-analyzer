@@ -546,15 +546,20 @@ def draft_md(draft: dict | None, extraction: dict | None = None) -> list[str]:
 
 _RISK_STYLE = {"blocking": ("#fee2e2", "#991b1b"), "relevant": ("#fef3c7", "#92400e"), "related": ("#e0f2fe", "#075985")}
 _LABEL_TEXT = {"102": "Blocking risk (§102): a single reference discloses every element",
-               "103": "Obviousness risk (§103): the elements are disclosed across a combination of references",
+               "103": "§103 screening flag: the elements are disclosed across a combination of references",
                "ALLOW": "No blocking art found among the evaluated documents"}
 _SCORE_TEXT = {2: "Present", 1: "Partial", 0: "–"}
 _DETERMINATION_NOTE = ("Deterministic rule over the verified evidence: an element counts as disclosed by a reference only when "
                        "the evaluator scored it and at least one verbatim quote was located in that reference's text. One "
-                       "reference disclosing every element is the §102 pattern (MPEP 2131); a union of up to three references, "
-                       "or a primary reference disclosing at least 70% with the rest left to a secondary reference or a routine "
-                       "modification, is the §103 pattern (MPEP 2143). This states blocking risk from the documents evaluated "
-                       "here only — an unpublished application or a document outside the search can always change the picture.")
+                       "reference disclosing every element is the §102 pattern (MPEP 2131). The §103 flags — a union of up to "
+                       "three references, or a primary reference disclosing at least 70% of the elements — are screening "
+                       "heuristics, not the statutory obviousness test: the 70% threshold comes from the PANORAMA "
+                       "benchmark's scoring rule (App. C.5.3 (a)) and has no MPEP basis, and neither flag establishes the Graham "
+                       "inquiries (MPEP 2141 II), an articulated rationale (MPEP 2143 I.(A)-(G)), a motivation to combine "
+                       "(2143.01) or a reasonable expectation of success (2143.02). They say the elements are known across the "
+                       "art, which is where an examiner would start, not where one would finish. This states blocking risk from "
+                       "the documents evaluated here only — an unpublished application or a document outside the search can "
+                       "always change the picture.")
 
 
 def determination_label(adj: dict | None) -> str:
@@ -562,7 +567,7 @@ def determination_label(adj: dict | None) -> str:
         return ""
     label = adj.get("label")
     if label == "103" and adj.get("basis") == "primary_partial":
-        return "Obviousness risk (§103): a primary reference discloses most elements; the gap is a secondary reference or routine modification away"
+        return "§103 screening flag: a primary reference discloses most of the elements; the gap is small enough that an examiner would look for a secondary reference"
     return _LABEL_TEXT.get(label, str(label or ""))
 
 

@@ -101,7 +101,7 @@ def test_determination_claim_chart_rows_columns_and_cells():
     assert "Partial · quote not located" in rows[3] and "#fef3c7" in rows[3]           # scored but unverified: amber, not counted
     assert rows[3].count("Present · 1✓") == 1                                          # only US-B discloses the housing
     full = determination_html(adj, ch, "")
-    assert "Obviousness risk (§103)" in full and "US-A</a> — 3/4 elements: a lens; a mirror; a sensor" in full
+    assert "§103 screening flag" in full and "US-A</a> — 3/4 elements: a lens; a mirror; a sensor" in full
     assert "US-B</a> — 1/4 elements: a housing" in full and "US-C" not in full.split("§103 combination relied on")[1].split("</ul>")[0]
     md = "\n".join(determination_md(adj, ch))
     assert "| a housing | Partial (quote not located) | Present 1✓ | – |" in md
@@ -119,7 +119,7 @@ def test_determination_three_verdict_wordings():
     part = [d("US-A", E[:3])]
     adj = adjudicate(E, part, single_partial_103=0.7)
     h = determination_html(adj, claim_chart(adj, E, part), "Routine.")
-    assert "primary reference discloses most elements" in h and "Not disclosed by any reference" in h and "a housing" in h and "<p>Routine.</p>" in h
+    assert "primary reference discloses most of the elements" in h and "Not disclosed by any reference" in h and "a housing" in h and "<p>Routine.</p>" in h
     none = [d("US-A", E[:1]), d("US-B", E[1:2])]
     adj = adjudicate(E, none, single_partial_103=0.7)
     h = determination_html(adj, claim_chart(adj, E, none))
@@ -148,7 +148,7 @@ def test_generate_html_leads_with_the_determination_and_drops_the_old_novelty_ch
     ch = claim_chart(adj, E, docs)
     h = generate_html(_results(E, docs, adj, ch, "Because.\n\nNothing cuts against it."))
     assert h.index('class="sec det-sec"') < h.index("Invention Summary")
-    assert "Obviousness risk (§103)" in h and "<p>Because.</p>" in h and 'class="tbl claim-chart"' in h
+    assert "§103 screening flag" in h and "<p>Because.</p>" in h and 'class="tbl claim-chart"' in h
     low = h.lower()
     for gone in ("innovation landscape", "novelty score", "novelty assessment", "combination analysis", "ewss", "css=",
                  "old llm novelty text", "old combo text"):

@@ -78,10 +78,10 @@ def test_report_section_states_blocking_risk_only():
     ch = claim_chart(adj, E, docs)
     html = determination_html(adj, ch, "Because.\n\nNothing cuts against it.")
     md = "\n".join(determination_md(adj, ch, "Because."))
-    assert "Prior-Art Determination" in html and "Obviousness risk (§103)" in html and "blocking" in html
+    assert "Prior-Art Determination" in html and "§103 screening flag" in html and "blocking" in html
     assert "US-1</a>" not in html and "US-1 — 3/4 elements" in html and "US-2 — 2/4 elements" in html   # no url: plain names
     assert "<p>Because.</p><p>Nothing cuts against it.</p>" in html
-    assert "Obviousness risk (§103)" in md and "US-1 (3/4)" in md and "US-2 (2/4)" in md and "Because." in md
+    assert "§103 screening flag" in md and "US-1 (3/4)" in md and "US-2 (2/4)" in md and "Because." in md
     for text in (html, md):
         low = text.lower()
         assert "grantable" not in low and "would be granted" not in low and "patentable" not in low

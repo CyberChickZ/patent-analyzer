@@ -7,11 +7,22 @@ counts as covered by a document only when the evaluator scored it above
 `min_score` AND at least one evidence quote was located in the document
 text (verified_quotes non-empty) — an unquoted score is not evidence.
 
-Rules (MPEP 2131 / 2141-2143, PANORAMA App. C.5.3):
+Labels:
   "102"  one document covers every element (allow_missing / min_cover relax it)
   "103"  no single document does, but a greedy union of <= max_combo documents does
   "ALLOW" neither — read as "no blocking reference found among these
           candidates", never as "grantable" (the record is always incomplete).
+
+Only "102" tracks a statutory test (MPEP 2131: a single reference disclosing
+every element, arranged as claimed). **Both "103" branches are coverage
+heuristics, not the statutory obviousness test.** MPEP 2141 II requires the
+Graham inquiries (scope and content of the prior art, differences, level of
+ordinary skill, objective evidence) and MPEP 2143 requires an articulated
+rationale from I.(A)-(G) — rationale A alone needs four findings — plus a
+motivation to combine (2143.01) and a reasonable expectation of success
+(2143.02). This function makes none of them: it computes set coverage. The
+70% primary-reference threshold is the PANORAMA benchmark's scoring rule
+(App. C.5.3 (a)); MPEP 2143 states no percentage anywhere.
 
 The label is about blocking risk from the documents at hand; the report
 wording follows report_sections' rule (blocking risk only, no grant talk).
@@ -81,8 +92,10 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
     min_cover: fraction of elements a document (or the union) must cover.
     allow_missing: absolute number of elements that may be missing; the
     looser of the two applies. single_partial_103: when set, a best single
-    document covering at least this fraction (but not `needed`) yields "103"
-    (PANORAMA C.5.3 rule (a), primary reference >= 70%).
+    document covering at least this fraction (but not `needed`) yields "103".
+    That threshold is a screening heuristic taken from the PANORAMA benchmark's
+    scoring rule (App. C.5.3 (a), primary reference >= 70%) — it is not a
+    statutory standard and has no MPEP basis; see the module docstring.
     """
     names = [_criterion(e) for e in elements if _criterion(e)]
     n = len(names)
@@ -134,12 +147,17 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
     elif combo and len(combo_docs) >= 2 and combo["n_covered"] >= needed:
         label, basis = "103", "combination"
         reason = (f"no single document reaches {needed}/{n}; {' + '.join(combo_docs)} together cover "
-                  f"{combo['n_covered']}/{n} — every element is known, combination risk under §103 (MPEP 2143 A).")
+                  f"{combo['n_covered']}/{n}, so every element is disclosed somewhere in the art. That is finding (1) "
+                  f"of MPEP 2143 I.A only; whether a person of ordinary skill would have combined these references "
+                  f"(2143.01 motivation, 2143.02 reasonable expectation of success) is not determined here. Treat this "
+                  f"as a §103 screening flag, not an obviousness conclusion.")
     elif single_partial_103 is not None and best and best_cov >= single_partial_103:
         label, basis = "103", "primary_partial"
         reason = (f"{_key(best)} alone covers {best['n_covered']}/{n} elements ({best_cov:.0%} >= {single_partial_103:.0%}); "
-                  f"the remaining {n - best['n_covered']} would need only a secondary reference or a routine modification "
-                  f"— primary-reference combination risk under §103 (MPEP 2143).")
+                  f"the remaining {n - best['n_covered']} element(s) are not disclosed by it. Flagged as a §103 screening risk by a "
+                  f"coverage heuristic (the PANORAMA benchmark's scoring rule, App. C.5.3 (a)) — a heuristic, not a "
+                  f"statutory standard: MPEP 2143 sets no percentage, and no rationale, motivation or expectation of "
+                  f"success has been established here.")
     else:
         label, basis = "ALLOW", "none"
         missing = combo["missing"] if combo else names
