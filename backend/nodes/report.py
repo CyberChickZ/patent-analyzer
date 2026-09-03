@@ -7,7 +7,6 @@ from pathlib import Path
 
 from state import GraphState
 
-
 GCS_TIMEOUT_S = float(os.environ.get("GCS_TIMEOUT_S", "60"))
 
 

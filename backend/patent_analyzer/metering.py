@@ -55,7 +55,7 @@ def count_bq(bytes_billed: float) -> None:
 
 
 def _llm_usage() -> dict:
-    from app.llm import usage          # imported late: patent_analyzer must not need app/
+    from app.llm import usage  # imported late: patent_analyzer must not need app/
     return copy.deepcopy(usage)
 
 
