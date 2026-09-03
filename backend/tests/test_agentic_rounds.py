@@ -9,7 +9,12 @@ from patent_analyzer.agentic import moves as M
 from patent_analyzer.agentic import rounds as R
 from patent_analyzer.recall.pool import Candidate
 
-ELS = [{"id": "e1", "text": "a camera"}, {"id": "e2", "text": "a marker"}]
+ELS = [{"id": "e1", "text": "a camera", "facets": {"thing": ["stereo camera"]}},
+       {"id": "e2", "text": "a marker", "facets": {"thing": ["fiducial marker"]}}]
+
+
+def _quiet(monkeypatch):
+    monkeypatch.setattr(R, "_score_cos", lambda els, docs: None)
 
 
 def test_groups_of_reads_the_good_documents_own_cpc():
@@ -17,54 +22,127 @@ def test_groups_of_reads_the_good_documents_own_cpc():
     assert R._groups_of(docs)[0] == "H04N7"
 
 
-def test_seed_meta_keeps_only_documents_with_a_party():
-    docs = [{"raw": {"inventor": "Yulun Wang"}}, {"raw": {}}, {"raw": {"applicant": "InTouch"}}]
-    assert R._seed_meta(docs) == [{"inventor": "Yulun Wang", "applicant": None},
-                                  {"inventor": None, "applicant": "InTouch"}]
+def test_seed_meta_asks_odp_because_no_table_of_ours_has_a_party(monkeypatch):
+    """The m1a bug: this read raw.inventor / raw.applicant, which BigQuery
+    candidates never carry, so P6 was never called once in eight papers."""
+    asked = {}
+
+    async def fake_find(pubs, limit=100):
+        asked["pubs"] = pubs
+        return {"US1A1": {"applicationMetaData": {"firstInventorName": "Yulun Wang"}},
+                "US2A1": {"applicationMetaData": {}}}
+    import patent_analyzer.recall.uspto_odp as odp
+    monkeypatch.setattr(odp, "find_many_by_publication", fake_find)
+    got = asyncio.run(R._seed_meta([{"pub_num": "US1A1", "raw": {}}, {"pub_num": "US2A1", "raw": {}}]))
+    assert asked["pubs"] == ["US1A1", "US2A1"]
+    assert got == [{"inventor": "Yulun Wang", "applicant": None}]
 
 
-def test_round0_only_when_the_stop_rule_fires(monkeypatch):
-    # every element covered by COVER_TARGET GOOD in round 0 -> one round, no later moves
+def test_terms_for_follows_the_uncovered_elements():
+    assert R._terms_for(ELS, ["e2"]) == ["fiducial", "marker"]
+    assert R._terms_for(ELS, []) == ["stereo", "camera", "fiducial", "marker"]   # nothing named -> all
+
+
+def _harness(monkeypatch, judge_fn, n_round0=6):
+    _quiet(monkeypatch)
+
     async def round0():
-        cands = [Candidate(pub_num=f"US{i}B2", match_type="Patent") for i in range(6)]
+        cands = [Candidate(pub_num=f"US{i}B2", match_type="Patent") for i in range(n_round0)]
         return cands, [M.MoveResult("S2_predicted_cpc", 0, cands)]
 
     async def fake_claims(cands):
         return {c.pub_num: f"1. A camera and a marker ({c.pub_num})." for c in cands}, 1
-
-    async def fake_judge(elements, docs, claims, call=None):
-        for d in docs:
-            d["good_touches"] = {"e1": 1, "e2": 1}
-            d["good"] = True
-        return {"judged": len(docs), "calls": 1, "good": len(docs), "with_claims": len(docs)}
     monkeypatch.setattr(R, "_claims_for", fake_claims)
-    monkeypatch.setattr(G, "judge", fake_judge)
-
-    async def boom(*a, **k):
-        raise AssertionError("no later round expected")
-    monkeypatch.setattr(R, "_later_round", boom)
-    out = asyncio.run(R.run_rounds(ELS, ["H04N7"], ["camera"], "20110202", round0))
-    assert out["rounds"] == 1 and out["stop"].startswith("every element covered")
-    assert len(out["good"]) == 6 and out["coverage"] == {"e1": 6, "e2": 6}
-    assert [r for r in out["rows"] if r["move"] == "_round"][0]["new_good"] == 6
+    monkeypatch.setattr(G, "judge", judge_fn)
+    return round0
 
 
-def test_a_round_that_adds_no_good_stops_the_loop(monkeypatch):
-    async def round0():
-        return [], [M.MoveResult("S2_predicted_cpc", 0, [])]
+def test_round_1_expands_from_what_was_read_not_only_from_good(monkeypatch):
+    """The core m1a fix: the gold arrives one hop from a query hit, and that
+    hit is usually not GOOD itself, so round 1 must seed from the whole judged
+    set ranked by (touches, cosine)."""
+    seen = {}
 
-    async def fake_claims(cands):
-        return {}, 0
+    async def judge_nothing(elements, docs, claims, call=None):
+        for d in docs:
+            d["good"], d["good_touches"] = False, {}
+        return {"judged": len(docs), "calls": 1, "good": 0, "with_claims": len(docs)}
+    round0 = _harness(monkeypatch, judge_nothing)
 
-    async def fake_judge(elements, docs, claims, call=None):
-        return {"judged": 0, "calls": 0, "good": 0, "with_claims": 0}
-    calls = {"n": 0}
+    async def fake_wide(judged, before, known, round_no):
+        seen["seeds"] = [d["pub_num"] for d in judged]
+        return [M.MoveResult("W1_citations", round_no, [])]
 
     async def fake_later(*a, **k):
-        calls["n"] += 1
-        return [M.MoveResult("P1_citations", 1, [])]
-    monkeypatch.setattr(R, "_claims_for", fake_claims)
-    monkeypatch.setattr(G, "judge", fake_judge)
+        seen["later"] = seen.get("later", 0) + 1
+        return [M.MoveResult("P1_citations", 2, [])]
+    monkeypatch.setattr(R, "_wide_round", fake_wide)
     monkeypatch.setattr(R, "_later_round", fake_later)
+    out = asyncio.run(R.run_rounds(ELS, ["H04N7"], ["camera"], "20110202", round0))
+    assert seen["seeds"] == [f"US{i}B2" for i in range(6)]        # none of them GOOD, all still seeds
+    assert out["rounds"] == 3 and out["stop"].endswith("no new strong GOOD")
+
+
+def test_one_element_good_does_not_cover_and_does_not_stop_the_loop(monkeypatch):
+    """m1a round 0 judged 17% GOOD on one element each, which met 'every
+    element covered by >=3 GOOD' immediately. Reach was 0/5."""
+    async def judge_weak(elements, docs, claims, call=None):
+        for d in docs:
+            d["good"], d["good_touches"] = True, {"e1": 1}
+        return {"judged": len(docs), "calls": 1, "good": len(docs), "with_claims": len(docs)}
+    round0 = _harness(monkeypatch, judge_weak)
+
+    async def empty(*a, **k):
+        return [M.MoveResult("W1_citations", 1, [])]
+    monkeypatch.setattr(R, "_wide_round", empty)
+    monkeypatch.setattr(R, "_later_round", empty)
     out = asyncio.run(R.run_rounds(ELS, [], [], None, round0))
-    assert out["stop"] == "a round added no GOOD" and out["rounds"] == 2 and calls["n"] == 1
+    assert out["coverage"] == {"e1": 0, "e2": 0} and out["strong"] == 0
+    assert out["rounds"] >= M.MIN_ROUNDS
+    assert out["uncovered"] == ["e1", "e2"]
+
+
+def test_strong_good_covers_and_the_round_row_carries_the_uncovered_list(monkeypatch):
+    async def judge_strong(elements, docs, claims, call=None):
+        for d in docs:
+            d["good"], d["good_touches"] = True, {"e1": 1, "e2": 4}
+        return {"judged": len(docs), "calls": 1, "good": len(docs), "with_claims": len(docs)}
+    round0 = _harness(monkeypatch, judge_strong)
+
+    async def empty(*a, **k):
+        return [M.MoveResult("W1_citations", 1, [])]
+    monkeypatch.setattr(R, "_wide_round", empty)
+    monkeypatch.setattr(R, "_later_round", empty)
+    out = asyncio.run(R.run_rounds(ELS, [], [], None, round0))
+    assert out["coverage"] == {"e1": 6, "e2": 6} and out["strong"] == 6
+    assert out["rounds"] == M.MIN_ROUNDS and out["stop"].startswith("every element covered")
+    row0 = [r for r in out["rows"] if r["move"] == "_round"][0]
+    assert row0["new_strong"] == 6 and row0["uncovered"] == [] and row0["dry_streak"] == 0
+
+
+def test_later_rounds_aim_their_moves_at_the_uncovered_elements(monkeypatch):
+    got = {}
+
+    async def fake_p5(groups, terms, before, known, cap=0, round_no=0, name="P5_cpc_enum", offsets=None):
+        got["groups"], got["terms"] = groups, terms
+        return M.MoveResult(name, round_no, [])
+
+    async def nothing(*a, **k):
+        return M.MoveResult("x", 2, [])
+
+    async def no_meta(docs, cap=20):
+        return []
+    monkeypatch.setattr(M, "p5_cpc_enum", fake_p5)
+    monkeypatch.setattr(M, "p1_citations", nothing)
+    monkeypatch.setattr(M, "p4_similar", nothing)
+    monkeypatch.setattr(M, "p3_cited_papers", nothing)
+    monkeypatch.setattr(M, "p6_same_party", nothing)
+    monkeypatch.setattr(R, "_seed_meta", no_meta)
+    good = [{"pub_num": "US1A1", "good": True, "good_touches": {"e2": 3},
+             "raw": {"cpc": ["G01S  17/00"]}},
+            {"pub_num": "US2A1", "good": True, "good_touches": {"e1": 1, "e3": 2},
+             "raw": {"cpc": ["H04N   7/15"]}}]
+    res = asyncio.run(R._later_round(good, ELS, ["Z99Z9"], ["camera"], None, set(), 2, ["e2"], {}))
+    assert got["terms"] == ["fiducial", "marker"]                 # the uncovered element's own words
+    assert got["groups"][0] == "G01S17"                           # the GOOD doc that touches it, first
+    assert all("aimed at 1 uncovered: e2" in r.note for r in res)

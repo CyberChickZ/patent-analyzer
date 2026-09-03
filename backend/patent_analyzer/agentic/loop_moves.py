@@ -13,6 +13,7 @@ import asyncio
 import os
 
 from ..recall.pool import Candidate
+from . import good as G
 from . import moves as M
 from . import rounds as R
 from .elements import attach_facets, candidates_from_state
@@ -43,6 +44,7 @@ async def run_moves(state: dict, serpapi_left, serpapi_take, event) -> tuple[lis
     cutoff = str(state.get("date_cutoff") or "")
     cutoff = cutoff if cutoff.isdigit() and len(cutoff) == 8 else None
 
+    offsets: dict[str, int] = {}                 # P5's ODP page cursor, shared by round 0 and rounds 2+
     pred = [str(c).split("/")[0] for c in (core.get("cpc_pred") or []) if len(str(c).split("/")[0]) >= 5]
     neigh = ((core.get("elements") or [{}])[0].get("cpc_groups") if core.get("elements") else None) or []
     groups = list(dict.fromkeys(pred + neigh))[:4]
@@ -56,7 +58,7 @@ async def run_moves(state: dict, serpapi_left, serpapi_take, event) -> tuple[lis
         results: list[M.MoveResult] = []
         s2, wide = await asyncio.gather(
             M.p5_cpc_enum(groups, terms, cutoff, set(), cap=M.CAPS["S2_predicted_cpc"],
-                          round_no=0, name="S2_predicted_cpc"),
+                          round_no=0, name="S2_predicted_cpc", offsets=offsets),
             run_wide(state, serpapi_left, serpapi_take, event),
             return_exceptions=True)
         if isinstance(s2, Exception):
@@ -75,14 +77,15 @@ async def run_moves(state: dict, serpapi_left, serpapi_take, event) -> tuple[lis
             cands0 += r.candidates
         return cands0, results
 
-    out = await R.run_rounds(elements, groups, terms, cutoff, round0, event=event)
+    out = await R.run_rounds(elements, groups, terms, cutoff, round0, event=event, offsets=offsets)
     good = out["good"]
     stats = {
         "mode": "moves", "rounds": out["rounds"], "stop": out["stop"], "coverage": out["coverage"],
+        "uncovered": out["uncovered"], "n_strong": out["strong"],
         "move_rows": out["rows"], "seconds": out["seconds"],
         "good": [{"pub_num": d.get("pub_num"), "title": (d.get("title") or "")[:100],
                   "sources": d.get("sources"), "touches": d.get("good_touches"),
-                  "reasons": d.get("good_reasons")} for d in good],
+                  "strong": G.is_strong(d), "reasons": d.get("good_reasons")} for d in good],
         "elements": [{"id": e["id"], "text": e["text"], "facets": e.get("facets"),
                       "candidate": c["id"]} for c in cands for e in c["elements"]],
         "candidates": [{"id": c["id"], "level": c["level"], "n_elements": len(c["elements"])} for c in cands],

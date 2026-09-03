@@ -1,10 +1,17 @@
-"""M1 round controller: run the moves, read the claims, keep what is GOOD.
+"""M1 round controller: run the moves, read the claims, keep what is STRONG.
 
 Round 0 starts from the input paper alone (predicted CPC enumeration, the
-paper's own neighbourhood bridge, and the ReAct queries). Every later round
-starts from the GOOD set that the claims judge produced, which is the whole
-point: the old loop expanded from every query hit, this one expands only from
-documents whose claims a model could point at.
+paper's own neighbourhood bridge, and the ReAct queries). Round 1 walks one
+hop out from what round 0 read — from the best of it by (elements touched,
+cosine), NOT only from the GOOD ones. Rounds 2+ expand only from the GOOD set.
+
+That split is the m1a lesson. The first version expanded from GOOD at every
+round and reached 0 of 5 gold families on US20120194631A1, where the old wide
+loop reached 3 (h1h) and 4 (h1i). The gold in those runs came from the
+one-hop citations of a query hit, and those hits were mostly NOT GOOD
+themselves — a bridge document does not have to claim any element of the
+invention. So "expand only from GOOD" cannot hold at the first hop; it holds
+once there is a GOOD set worth walking from (leader, 2026-09-18).
 """
 
 from __future__ import annotations
@@ -34,18 +41,60 @@ async def _claims_for(cands: list[Candidate]) -> tuple[dict[str, str], int]:
     return out, calls
 
 
-def _seed_meta(docs: list[dict]) -> list[dict]:
-    """Inventor / applicant of the GOOD patents, for the same-party move."""
-    out = []
-    for d in docs[:20]:
-        raw = d.get("raw") or {}
-        out.append({"inventor": raw.get("inventor") or raw.get("first_inventor"),
-                    "applicant": raw.get("applicant") or raw.get("first_applicant")})
-    return [m for m in out if m["inventor"] or m["applicant"]]
+def _score_cos(elements: list[dict], docs: list[dict]) -> None:
+    """Set `prune_cos` on every doc (te005 against the element texts) so the
+    wide round can rank documents the judge found nothing in."""
+    if not docs or not elements:
+        return
+    try:
+        from .prune import stage1_embed
+        stage1_embed(elements, docs, topk=1, cap=1)          # we only want the side effect
+    except Exception:
+        for d in docs:
+            d.setdefault("prune_cos", 0.0)
+
+
+async def _seed_meta(docs: list[dict], cap: int = 20) -> list[dict]:
+    """Inventor / applicant of the seed patents, for the same-party move.
+
+    m1a never called P6 once: this read `raw.inventor` and `raw.applicant`,
+    which no BigQuery candidate has — amie_patents.pubs has no such column and
+    neither does any other table we hold. The names come from USPTO ODP
+    instead, one batched query for up to `cap` publication numbers. ODP's
+    search projection answers firstInventorName but leaves firstApplicantName
+    null, so this walks inventors only.
+    """
+    from ..recall import uspto_odp as odp
+    pubs = [d["pub_num"] for d in docs[:cap] if d.get("pub_num")]
+    if not pubs:
+        return []
+    try:
+        got = await odp.find_many_by_publication(pubs)
+    except Exception:
+        return []
+    out = [odp.party_names(w) for w in got.values()]
+    return [m for m in out if m.get("inventor") or m.get("applicant")]
+
+
+def _terms_for(elements: list[dict], ids, cap: int = 12) -> list[str]:
+    """Single title words from the named elements' `thing` forms — what the
+    ODP title index can match. Called with the uncovered element ids so the
+    enumeration moves towards what is still missing rather than repeating the
+    round-0 term set."""
+    want = set(ids or ())
+    pick = [e for e in elements if e.get("id") in want] or elements
+    out: list[str] = []
+    for e in pick:
+        for form in ((e.get("facets") or {}).get("thing") or [])[:3]:
+            for w in str(form).lower().split():
+                if len(w) > 3 and w not in out:
+                    out.append(w)
+    return out[:cap]
 
 
 async def run_rounds(elements: list[dict], cpc_groups: list[str], title_terms: list[str],
-                     before: str | None, round0_moves, event=None) -> dict:
+                     before: str | None, round0_moves, event=None,
+                     offsets: dict[str, int] | None = None) -> dict:
     """`round0_moves()` is awaited once and returns (candidates, MoveResults)
     for the seed round — the caller supplies it because it owns the ReAct
     budget and the paper neighbourhood. Returns the loop's record."""
@@ -53,8 +102,12 @@ async def run_rounds(elements: list[dict], cpc_groups: list[str], title_terms: l
     docs_by_pub: dict[str, dict] = {}
     all_rows: list[dict] = []
     good_docs: list[dict] = []
+    judged: list[dict] = []
+    offsets = {} if offsets is None else offsets  # P5's paging cursor, shared with round 0
     cover: dict[str, int] = {e["id"]: 0 for e in elements}
+    uncovered = [e["id"] for e in elements]
     stop = None
+    dry = 0
     t_start = time.monotonic()
 
     cands0, results0 = await round0_moves()
@@ -63,8 +116,13 @@ async def run_rounds(elements: list[dict], cpc_groups: list[str], title_terms: l
 
     round_no = 0
     while True:
-        results = results0 if round_no == 0 else await _later_round(
-            good_docs, elements, cpc_groups, title_terms, before, set(pool), round_no)
+        if round_no == 0:
+            results = results0
+        elif round_no == 1:
+            results = await _wide_round(judged, before, set(pool), round_no)
+        else:
+            results = await _later_round(good_docs, elements, cpc_groups, title_terms, before,
+                                         set(pool), round_no, uncovered, offsets)
         for r in results:
             all_rows.append(r.row())
             for c in r.candidates:
@@ -73,9 +131,11 @@ async def run_rounds(elements: list[dict], cpc_groups: list[str], title_terms: l
         claims, bq_calls = await _claims_for(batch)
         docs = [{"pub_num": c.pub_num, "title": c.title, "sources": c.sources,
                  "abstract": c.abstract, "raw": c.raw} for c in batch]
+        _score_cos(elements, docs)
         stats = await G.judge(elements, docs, claims)
         stats["bq_calls"] = bq_calls
-        new_good = 0
+        judged.extend(docs)
+        new_good = new_strong = 0
         for d in docs:
             if d.get("good"):
                 key = (d.get("pub_num") or "").upper()
@@ -83,38 +143,75 @@ async def run_rounds(elements: list[dict], cpc_groups: list[str], title_terms: l
                     docs_by_pub[key] = d
                     good_docs.append(d)
                     new_good += 1
+                    new_strong += 1 if G.is_strong(d) else 0
         cover = G.coverage(good_docs, elements)
+        uncovered = G.uncovered(cover)
+        dry = 0 if new_strong else dry + 1
+        row = {"move": "_round", "round": round_no, "read": len(batch), "new_good": new_good,
+               "new_strong": new_strong, "judge": stats, "coverage": dict(cover),
+               "uncovered": list(uncovered), "dry_streak": dry}
         if event:
-            event("m1_round", f"round {round_no}: {len(batch)} claims read, {new_good} new GOOD, "
-                              f"coverage {sorted(cover.values())}",
-                  {"round": round_no, "read": len(batch), "new_good": new_good, "coverage": cover,
-                   "moves": [r.row() for r in results], "judge": stats})
-        all_rows.append({"move": "_round", "round": round_no, "read": len(batch), "new_good": new_good,
-                         "judge": stats, "coverage": dict(cover)})
-        stop = M.done(cover, new_good, round_no + 1)
+            event("m1_round", f"round {round_no}: {len(batch)} claims read, {new_good} new GOOD "
+                              f"({new_strong} strong), {len(uncovered)} elements still uncovered", row)
+        all_rows.append(row)
+        stop = M.done(cover, new_strong, round_no + 1, dry)
         if stop:
             break
         round_no += 1
 
     return {"pool": list(pool.values()), "good": G.rank_good(good_docs), "rows": all_rows,
-            "rounds": round_no + 1, "stop": stop, "coverage": cover,
+            "rounds": round_no + 1, "stop": stop, "coverage": cover, "uncovered": uncovered,
+            "strong": sum(1 for d in good_docs if G.is_strong(d)),
             "seconds": round(time.monotonic() - t_start, 1)}
+
+
+async def _wide_round(judged: list[dict], before: str | None, known: set[str],
+                      round_no: int) -> list[M.MoveResult]:
+    """Round 1: one hop out from the best of what round 0 read, GOOD or not.
+
+    A document that cites the gold does not have to claim any element itself,
+    so requiring GOOD here throws away the bridges. Ranking is (elements
+    touched, cosine): a GOOD hit leads, an unjudged-but-close one still gets a
+    place, and the tail is cut at M1_WIDE_SEEDS."""
+    seeds = [d["pub_num"] for d in sorted(
+        judged, key=lambda d: (-len(d.get("good_touches") or {}), -float(d.get("prune_cos") or 0.0)),
+    )[:M.WIDE_SEEDS] if d.get("pub_num")]
+    out = await asyncio.gather(
+        M.p1_citations(seeds, known, cap=M.CAPS["W1_citations"], round_no=round_no),
+        M.p4_similar(seeds, known, cap=M.CAPS["W4_similar"], round_no=round_no),
+        return_exceptions=True)
+    results: list[M.MoveResult] = []
+    for name, r in zip(("W1_citations", "W4_similar"), out):
+        if isinstance(r, Exception):
+            results.append(M.MoveResult(name=name, round=round_no, error=f"{type(r).__name__}: {r}"[:200]))
+        else:
+            r.name = name
+            r.note = (r.note + f" | {len(seeds)} seeds, GOOD not required").strip(" |")
+            results.append(r)
+    return results
 
 
 async def _later_round(good_docs: list[dict], elements: list[dict], cpc_groups: list[str],
                        title_terms: list[str], before: str | None, known: set[str],
-                       round_no: int) -> list[M.MoveResult]:
-    """Rounds 1+: every move starts from the GOOD set."""
-    seeds = [d["pub_num"] for d in G.rank_good(good_docs)[:M.SEEDS_PER_ROUND] if d.get("pub_num")]
-    uncovered = [e["id"] for e in elements if not any(e["id"] in (d.get("good_touches") or {}) for d in good_docs)]
-    groups = list(dict.fromkeys(cpc_groups + _groups_of(good_docs)))[:4]
+                       round_no: int, uncovered: list[str],
+                       offsets: dict[str, int]) -> list[M.MoveResult]:
+    """Rounds 2+: every move starts from the GOOD set, aimed at what is still
+    uncovered — the GOOD documents that touch an uncovered element seed first,
+    their CPC groups are enumerated first, and the ODP title terms come from
+    those elements' own `thing` forms."""
+    aimed = G.rank_for(good_docs, uncovered, M.SEEDS_PER_ROUND)
+    seeds = [d["pub_num"] for d in aimed if d.get("pub_num")]
+    touching = [d for d in good_docs if set(uncovered) & set(d.get("good_touches") or {})]
+    groups = list(dict.fromkeys(_groups_of(touching) + _groups_of(good_docs) + cpc_groups))[:4]
+    terms = _terms_for(elements, uncovered) or title_terms
+    meta = await _seed_meta(aimed)
     tasks = [
         M.p1_citations(seeds, known, round_no=round_no),
         M.p1_citations(seeds, known, examiner_only=True, round_no=round_no),
         M.p4_similar(seeds, known, round_no=round_no),
         M.p3_cited_papers(seeds, known, round_no=round_no),
-        M.p5_cpc_enum(groups, title_terms, before, known, round_no=round_no),
-        M.p6_same_party(_seed_meta(good_docs), before, known, round_no=round_no),
+        M.p5_cpc_enum(groups, terms, before, known, round_no=round_no, offsets=offsets),
+        M.p6_same_party(meta, before, known, round_no=round_no),
     ]
     out = await asyncio.gather(*tasks, return_exceptions=True)
     results: list[M.MoveResult] = []
@@ -123,8 +220,9 @@ async def _later_round(good_docs: list[dict], elements: list[dict], cpc_groups: 
             results.append(M.MoveResult(name=name, round=round_no, error=f"{type(r).__name__}: {r}"[:200]))
         else:
             results.append(r)
-    if uncovered:
-        results[-1].note += f" | uncovered: {','.join(uncovered[:6])}"
+    aim = f"aimed at {len(uncovered)} uncovered: {','.join(uncovered[:6])}"
+    for r in results:
+        r.note = (r.note + f" | {aim}").strip(" |")
     return results
 
 
