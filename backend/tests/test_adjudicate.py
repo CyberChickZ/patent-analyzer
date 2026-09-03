@@ -189,3 +189,63 @@ def test_basis_names_which_rule_fired():
     assert adjudicate(E, [_doc("A", E[:3]), _doc("B", E[2:])])["basis"] == "combination"
     assert adjudicate(E, [_doc("A", E[:3])], single_partial_103=0.7)["basis"] == "primary_partial"
     assert adjudicate(E, [_doc("A", E[:1])])["basis"] == "none" and adjudicate([], [])["basis"] == "none"
+
+
+# ── one coverage rule, one source ──
+#
+# The report's evidence matrix used to call a cell green on its own terms (every
+# quote verified) while the determination used element_covered (min_score AND a
+# verified quote). Same page, two answers: "best single covers 4/5" beside a
+# badge reading "1/5 covered". adjudicate now emits the decision per cell and
+# everything downstream reads it.
+
+def test_cells_agree_with_element_covered_and_with_the_covered_list():
+    from patent_analyzer.adjudicate import coverage_cells, element_covered
+    els = ["e1", "e2", "e3", "e4"]
+    cr = {"e1": {"score": 2, "verified_quotes": ["q"]},      # covered
+          "e2": {"score": 2},                                 # scored, no quote -> NOT covered
+          "e3": {"score": 0, "verified_quotes": ["q"]},       # not disclosed
+          }                                                   # e4 absent -> not evaluated
+    adj = adjudicate(els, [{"pub_num": "US-1", "checklist_results": cr}])
+    row = adj["per_doc_coverage"][0]
+    cells = row["cells"]
+    assert set(cells) == set(els)
+    for name in els:
+        assert cells[name]["covered"] is element_covered(cr.get(name)), name
+    assert {k for k, v in cells.items() if v["covered"]} == set(row["covered"])
+    assert {k for k, v in cells.items() if not v["covered"]} == set(row["missing"])
+    assert row["n_covered"] == sum(1 for v in cells.values() if v["covered"]) == 1
+    assert coverage_cells(els, cr) == cells
+
+
+def test_cell_reasons_name_the_test_that_failed():
+    from patent_analyzer.adjudicate import coverage_cells
+    cells = coverage_cells(["a", "b", "c", "d"], {
+        "a": {"score": 2, "verified_quotes": ["q"]},
+        "b": {"score": 2},
+        "c": {"score": 0},
+    }, min_score=2)
+    assert cells["a"]["reason"] == ""
+    assert cells["b"]["reason"] == "quote_not_verified"
+    assert cells["c"]["reason"] == "not_disclosed"
+    assert cells["d"]["reason"] == "not_evaluated" and cells["d"]["evaluated"] is False
+    low = coverage_cells(["a"], {"a": {"score": 1, "verified_quotes": ["q"]}}, min_score=2)
+    assert low["a"]["reason"] == "below_min_score"
+
+
+def test_matrix_and_determination_cannot_disagree():
+    """The regression that started this: a cell the matrix paints green must be a
+    cell the determination counts as covered."""
+    from patent_analyzer.report_sections import quote_matrix_html
+    els = ["e1", "e2"]
+    # e2 is scored 2 with all quote_checks verified, but carries no verified_quotes,
+    # so element_covered says no. The old matrix painted it green regardless.
+    docs = [{"pub_num": "US-1", "title": "D", "checklist_results": {
+        "e1": {"score": 2, "verified_quotes": ["q"], "quote_checks": [{"quote": "q", "verified": True}]},
+        "e2": {"score": 2, "quote_checks": [{"quote": "x", "verified": True}]}}}]
+    adj = adjudicate(els, docs)
+    cl = [{"criterion": "e1"}, {"criterion": "e2"}]
+    h = quote_matrix_html(docs, cl, adjudication=adj)
+    green = h.count("#dcfce7")
+    assert adj["per_doc_coverage"][0]["n_covered"] == 1
+    assert green == 1, f"matrix painted {green} cells green; the determination counts 1"

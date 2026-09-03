@@ -66,6 +66,68 @@ def doc_coverage(elements: list, checklist_results: dict | None, min_score: int 
     return covered, missing
 
 
+# Why a "not covered" cell is not covered. The report and the frontend used to
+# each re-derive this from `score`, with their own threshold — the matrix used
+# score >= 2 while the determination uses element_covered (min_score=1 AND a
+# verified quote) — so one page could say "best single covers 4/5" next to a
+# badge reading "1/5 covered". The rule lives here and nowhere else now.
+UNCOVERED_NOT_EVALUATED = "not_evaluated"      # the evaluator never produced a row
+UNCOVERED_NOT_DISCLOSED = "not_disclosed"      # scored 0 / no match
+UNCOVERED_BELOW_SCORE = "below_min_score"      # scored, but under min_score
+UNCOVERED_NO_QUOTE = "quote_not_verified"      # scored, but no quote was located in the reference
+
+
+def cell_reason(item: dict | None, min_score: int = 1, require_quotes: bool = True) -> str:
+    """"" when the cell IS covered, else why not — same inputs, same order of
+    tests, as element_covered."""
+    if element_covered(item, min_score, require_quotes):
+        return ""
+    if not isinstance(item, dict):
+        return UNCOVERED_NOT_EVALUATED
+    score = item.get("score")
+    if score is None:
+        score = 2 if item.get("match") else 0
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        return UNCOVERED_NOT_EVALUATED
+    if score <= 0:
+        return UNCOVERED_NOT_DISCLOSED
+    if score < min_score:
+        return UNCOVERED_BELOW_SCORE
+    return UNCOVERED_NO_QUOTE
+
+
+def coverage_cells(elements: list, checklist_results: dict | None, min_score: int = 1,
+                   require_quotes: bool = True) -> dict[str, dict]:
+    """One cell per (document, element), decided by element_covered.
+
+    Downstream reads `covered`; it must not recompute it from `score`. The other
+    keys are for display only: `score` and `n_verified` say what the evaluator
+    produced, `reason` says which test the cell failed.
+    """
+    cr = checklist_results or {}
+    cells: dict[str, dict] = {}
+    for e in elements:
+        c = _criterion(e)
+        if not c:
+            continue
+        item = cr.get(c)
+        item = item if isinstance(item, dict) else None
+        score = (item or {}).get("score")
+        if score is None and item is not None:
+            score = 2 if item.get("match") else 0
+        vq = (item or {}).get("verified_quotes") or []
+        cells[c] = {
+            "covered": element_covered(item, min_score, require_quotes),
+            "reason": cell_reason(item, min_score, require_quotes),
+            "score": score,
+            "n_verified": len(vq) if isinstance(vq, (list, tuple)) else int(bool(vq)),
+            "evaluated": item is not None,
+        }
+    return cells
+
+
 def greedy_cover(elements: list[str], doc_sets: list[tuple[str, set[str]]], needed: int,
                  max_combo: int = 3) -> tuple[list[str], set[str]]:
     """Pick up to max_combo documents that together cover >= needed elements.
@@ -120,6 +182,8 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
             "title": d.get("title", ""),
             "covered": [c for c in names if c in covered],
             "missing": [c for c in names if c in missing],
+            # the same decision, per element, so nothing downstream has to re-derive it
+            "cells": coverage_cells(names, d.get("checklist_results"), min_score, require_quotes),
             "coverage": round(len(covered) / n, 4),
             "n_covered": len(covered),
             "source": d.get("source", ""),

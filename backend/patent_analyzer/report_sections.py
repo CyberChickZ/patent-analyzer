@@ -328,15 +328,36 @@ def loop_md(search_stats: dict | None) -> list[str]:
 
 # ── 3. element × document quote matrix ──
 
-def quote_matrix_html(scoring_report: list[dict] | None, checklist: list[dict] | None, top_n: int = 8) -> str:
+_MATRIX_NOTE = ("Rows: your elements. Columns: top candidate documents. Green = this reference discloses the element "
+                "by the same rule the determination above uses (scored at or above the threshold AND at least one quote "
+                "located in the reference); amber = scored but the quote could not be located, so it does not count; "
+                "grey dash = not disclosed or not evaluated. The count is verbatim quotes located. This report states "
+                "blocking risk only; it does not predict grant.")
+
+
+def _cell_of(adjudication: dict | None, doc: dict, crit: str) -> dict | None:
+    """The (document, element) cell adjudicate already decided, or None.
+
+    Never re-derive coverage from `score` here: the determination uses
+    element_covered (min_score AND a verified quote) and a second, looser rule in
+    this file is exactly how one page came to show "best single covers 4/5"
+    beside a badge reading "1/5 covered"."""
+    key = (doc.get("pub_num") or "").strip()
+    title = (doc.get("title") or "").strip()
+    for row in (adjudication or {}).get("per_doc_coverage") or []:
+        if (key and row.get("pub_num") == key) or (not key and title and row.get("title") == title):
+            return (row.get("cells") or {}).get(crit)
+    return None
+
+
+def quote_matrix_html(scoring_report: list[dict] | None, checklist: list[dict] | None, top_n: int = 8,
+                      adjudication: dict | None = None) -> str:
     docs = [d for d in (scoring_report or []) if d.get("checklist_results")][:top_n]
     crits = [c.get("criterion", "") for c in (checklist or []) if c.get("criterion")]
     if not docs or not crits:
         return ""
     out = ['<div class="sec"><div class="sec-t">Evidence Matrix</div>',
-           '<div class="sec-note">Rows: your elements. Columns: top candidate documents. A cell shows the number of verbatim quotes '
-           'the evaluator gave; green = every quote was found in the document, amber = some were, red = none (score set to 0). '
-           'This report states blocking risk only; it does not predict grant.</div>',
+           f'<div class="sec-note">{_e(_MATRIX_NOTE)}</div>',
            '<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>Element</th>']
     for d in docs:
         out.append(f'<th title="{_e(d.get("title", ""))}">{_e((d.get("pub_num") or d.get("title", ""))[:18])}</th>')
@@ -347,27 +368,30 @@ def quote_matrix_html(scoring_report: list[dict] | None, checklist: list[dict] |
             item = (d.get("checklist_results") or {}).get(crit) or {}
             qs = item.get("quote_checks") or []
             n_ok = sum(1 for q in qs if q.get("verified"))
-            score = item.get("score")
-            if score is None:
-                score = 2 if item.get("match") else 0
-            if not qs and score <= 0:
-                cell, bg = "–", "transparent"
-            elif not qs:
-                cell, bg = f"s{score}", "#f1f5f9"
-            elif n_ok == len(qs):
-                cell, bg = f"{n_ok}✓", "#dcfce7"
-            elif n_ok:
-                cell, bg = f"{n_ok}/{len(qs)}", "#fef3c7"
+            cell_info = _cell_of(adjudication, d, crit)
+            if cell_info is not None:
+                covered = bool(cell_info.get("covered"))
+                reason = cell_info.get("reason") or ""
+            else:                      # no adjudication (e.g. no elements): fall back, and say so
+                covered = bool(qs) and n_ok == len(qs)
+                reason = "" if covered else "quote_not_verified" if qs else "not_disclosed"
+            if covered:
+                cell, bg = f"{n_ok}✓" if qs else "✓", "#dcfce7"
+            elif reason == "quote_not_verified":
+                cell, bg = (f"{n_ok}/{len(qs)}" if qs else "s?"), "#fef3c7"
+            elif reason == "below_min_score":
+                cell, bg = f"{n_ok}/{len(qs)}" if qs else "low", "#fef3c7"
             else:
-                cell, bg = f"0/{len(qs)}", "#fee2e2"
-            tip = " | ".join(q.get("quote", "")[:120] for q in qs[:3])
+                cell, bg = "–", "transparent"
+            tip = " | ".join(q.get("quote", "")[:120] for q in qs[:3]) or reason.replace("_", " ")
             out.append(f'<td style="background:{bg};text-align:center" title="{_e(tip)}">{cell}</td>')
         out.append("</tr>")
     out.append("</tbody></table></div></div>")
     return "\n".join(out)
 
 
-def quote_matrix_md(scoring_report: list[dict] | None, checklist: list[dict] | None, top_n: int = 6) -> list[str]:
+def quote_matrix_md(scoring_report: list[dict] | None, checklist: list[dict] | None, top_n: int = 6,
+                    adjudication: dict | None = None) -> list[str]:
     docs = [d for d in (scoring_report or []) if d.get("checklist_results")][:top_n]
     crits = [c.get("criterion", "") for c in (checklist or []) if c.get("criterion")]
     if not docs or not crits:
@@ -380,7 +404,10 @@ def quote_matrix_md(scoring_report: list[dict] | None, checklist: list[dict] | N
             item = (d.get("checklist_results") or {}).get(crit) or {}
             qs = item.get("quote_checks") or []
             n_ok = sum(1 for q in qs if q.get("verified"))
-            cells.append(f"{n_ok}/{len(qs)}" if qs else "–")
+            cell_info = _cell_of(adjudication, d, crit)
+            covered = bool(cell_info.get("covered")) if cell_info is not None else (bool(qs) and n_ok == len(qs))
+            mark = "**✓**" if covered else ""
+            cells.append(f"{mark}{n_ok}/{len(qs)}" if qs else (mark or "–"))
         lines.append(f"| {crit[:70]} | " + " | ".join(cells) + " |")
     lines.append("")
     return lines
@@ -865,7 +892,7 @@ def inject_html(report_html: str, extraction: dict | None, search_stats: dict | 
     adj_block = determination_html(adjudication) if adjudication and "Prior-Art Determination" not in report_html else ""
     block = "\n".join(x for x in (extraction_html(extraction), channel_health_html(search_stats),
                                   evidence_coverage_html(scoring_report), loop_html(search_stats),
-                                  quote_matrix_html(scoring_report, checklist), adj_block,
+                                  quote_matrix_html(scoring_report, checklist, adjudication=adjudication), adj_block,
                                   draft_html(draft, extraction), cost_html(cost)) if x)
     if not block:
         return report_html
@@ -884,7 +911,7 @@ def inject_md(report_md: str, extraction: dict | None, search_stats: dict | None
     adj_lines = determination_md(adjudication) if adjudication and "## Prior-Art Determination" not in report_md else []
     lines = (extraction_md(extraction) + channel_health_md(search_stats)
              + evidence_coverage_md(scoring_report) + loop_md(search_stats)
-             + quote_matrix_md(scoring_report, checklist) + adj_lines
+             + quote_matrix_md(scoring_report, checklist, adjudication=adjudication) + adj_lines
              + draft_md(draft, extraction) + cost_md(cost))
     if not lines:
         return report_md
