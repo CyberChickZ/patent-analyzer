@@ -842,6 +842,66 @@ async def get_results(job_id: str, user: dict | None = Depends(optional_auth)):
     raise HTTPException(404, "Results not ready")
 
 
+def _job_artifact(job_id: str, name: str, what: str):
+    """Serve a per-job JSON artefact: local disk first, then the bucket."""
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    path = Path(job.get("output_dir", f"/tmp/outputs/{job_id}")) / name
+    if path.exists():
+        return FileResponse(str(path), media_type="application/json")
+    try:
+        blob = _get_gcs().bucket(GCS_BUCKET).blob(f"{GCS_PREFIX}{job_id}/{name}")
+        if blob.exists():
+            return Response(content=blob.download_as_bytes(), media_type="application/json")
+    except Exception as exc:
+        _gcs_failed(f"read_{name}", exc)
+    raise HTTPException(404, f"{what} not ready")
+
+
+@app.get("/api/jobs/{job_id}/funnel")
+async def get_funnel(job_id: str, user: dict | None = Depends(optional_auth)):
+    """The per-document search funnel, split out of results.json because it is
+    most of its size (job 075b99c1: 12.0 MB of a 20.5 MB file) and almost nobody
+    reads it — the Express proxy re-serialises whatever it forwards, so the
+    bytes are paid for twice. results.json keeps a projection plus a
+    `search.summary.funnel_ref` pointing here."""
+    return _job_artifact(job_id, "funnel.json", "Funnel")
+
+
+@app.get("/api/jobs/{job_id}/usage")
+async def get_usage(job_id: str, user: dict | None = Depends(optional_auth)):
+    """Per-phase LLM / external / BigQuery counts for one job.
+
+    The job record is the source: app.llm.usage is a process-wide meter, so
+    reading it live would report whatever else this instance has run since.
+    patent_analyzer.metering diffs it per phase while the job runs and the
+    result is persisted on the job (and in results.json under `cost`).
+    """
+    job = _get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    cost = job.get("cost") or {}
+    phases = job.get("phase_metrics") or cost.get("phases") or {}
+    if not phases:
+        # finished before the job record carried it, or an older job: fall back
+        # to results.json, which report_node writes with the same block
+        try:
+            rp = Path(job.get("output_dir", f"/tmp/outputs/{job_id}")) / "results.json"
+            if rp.exists():
+                cost = (json.loads(rp.read_text()) or {}).get("cost") or {}
+                phases = cost.get("phases") or {}
+        except Exception:
+            pass
+    if not phases:
+        raise HTTPException(404, "No usage recorded for this job yet")
+    return {"job_id": job_id, "status": job.get("status"), "phase": job.get("phase"),
+            "phases": phases, "totals": cost.get("totals") or {},
+            "prices_usd_per_mtok": cost.get("prices_usd_per_mtok") or {},
+            "bigquery_usd_per_tib": cost.get("bigquery_usd_per_tib"),
+            "note": cost.get("note") or ""}
+
+
 @app.post("/feedback/{job_id}")
 async def submit_feedback(job_id: str, payload: dict):
     """Capture user feedback on a completed job. Used later (offline) to pair
