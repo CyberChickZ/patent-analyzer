@@ -169,6 +169,62 @@ def channel_health_md(search_stats: dict | None) -> list[str]:
     return lines
 
 
+# ── 2c. evidence coverage ──
+#
+# A document evaluated with source "no_content" was read from nothing: no PDF
+# (the download failed or none was offered) and no abstract worth the name. It
+# still occupies a row in the evaluation, and it still counts as "checked" when
+# the determination says no reference discloses the invention. Measured on the
+# M2 e2e runs: 17/25 and 24/25 no_content. That has to be on the page.
+
+_EVIDENCE_NOTE = ("A reference read from nothing cannot disclose anything, so every no-content row below is "
+                  "an unchecked reference, not a cleared one. Treat the determination as provisional while "
+                  "this fraction is high \u2014 the usual causes are prior-art PDF downloads failing and "
+                  "patent candidates arriving with a title but no abstract.")
+
+
+def _evidence_mix(scoring_report: list[dict] | None) -> dict:
+    mix: dict[str, int] = {}
+    for r in scoring_report or []:
+        k = r.get("source") or "unknown"
+        mix[k] = mix.get(k, 0) + 1
+    return mix
+
+
+_EV_LABEL = {"pdf": "full PDF", "full_text": "abstract + claims",
+             "abstract": "abstract only", "no_content": "nothing to read"}
+
+
+def evidence_coverage_html(scoring_report: list[dict] | None) -> str:
+    mix = _evidence_mix(scoring_report)
+    total, empty = sum(mix.values()), mix.get("no_content", 0)
+    if not total or not empty:
+        return ""
+    out = ['<div class="sec"><div class="sec-t">Evidence Coverage</div>',
+           f'<div class="sec-note"><b>{empty} of {total} references were evaluated with no text at all.</b> '
+           f'{_e(_EVIDENCE_NOTE)}</div>',
+           '<table class="tbl"><thead><tr><th>What was read</th><th>References</th><th>Share</th></tr></thead><tbody>']
+    for k, n in sorted(mix.items(), key=lambda kv: -kv[1]):
+        hl = ' style="background:#fee2e2"' if k == "no_content" else ""
+        out.append(f'<tr{hl}><td>{_e(_EV_LABEL.get(k, k))}</td><td>{n}</td><td>{100 * n / total:.0f}%</td></tr>')
+    out.append("</tbody></table></div>")
+    return "\n".join(out)
+
+
+def evidence_coverage_md(scoring_report: list[dict] | None) -> list[str]:
+    mix = _evidence_mix(scoring_report)
+    total, empty = sum(mix.values()), mix.get("no_content", 0)
+    if not total or not empty:
+        return []
+    lines = ["## Evidence Coverage", "",
+             f"**{empty} of {total} references were evaluated with no text at all.** {_EVIDENCE_NOTE}", "",
+             "| What was read | References | Share |", "|---|---|---|"]
+    for k, n in sorted(mix.items(), key=lambda kv: -kv[1]):
+        lines.append(f"| {_EV_LABEL.get(k, k)} | {n} | {100 * n / total:.0f}% |")
+    lines.append("")
+    return lines
+
+
 def lens_attribution_html(search_stats: dict | None) -> str:
     """Lens trial terms: results sourced from Lens carry "Data Sourced from The Lens"
     with a link and the logo (Lens.org attribution requirement, trial to 2026-10-02)."""
@@ -808,7 +864,7 @@ def inject_html(report_html: str, extraction: dict | None, search_stats: dict | 
     anchor = '<div class="sec-t">Invention Summary</div>'
     adj_block = determination_html(adjudication) if adjudication and "Prior-Art Determination" not in report_html else ""
     block = "\n".join(x for x in (extraction_html(extraction), channel_health_html(search_stats),
-                                  loop_html(search_stats),
+                                  evidence_coverage_html(scoring_report), loop_html(search_stats),
                                   quote_matrix_html(scoring_report, checklist), adj_block,
                                   draft_html(draft, extraction), cost_html(cost)) if x)
     if not block:
@@ -826,7 +882,8 @@ def inject_md(report_md: str, extraction: dict | None, search_stats: dict | None
               adjudication: dict | None = None, draft: dict | None = None,
               cost: dict | None = None) -> str:
     adj_lines = determination_md(adjudication) if adjudication and "## Prior-Art Determination" not in report_md else []
-    lines = (extraction_md(extraction) + channel_health_md(search_stats) + loop_md(search_stats)
+    lines = (extraction_md(extraction) + channel_health_md(search_stats)
+             + evidence_coverage_md(scoring_report) + loop_md(search_stats)
              + quote_matrix_md(scoring_report, checklist) + adj_lines
              + draft_md(draft, extraction) + cost_md(cost))
     if not lines:

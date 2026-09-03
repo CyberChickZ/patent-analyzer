@@ -90,3 +90,37 @@ def test_warnings_reach_the_injected_report():
     assert "Search Coverage Warnings" in html and "bigquery_patents" in html
     md = inject_md("# R\n\n## Evaluation Criteria\n", None, HEALTH, None, None)
     assert "## Search Coverage Warnings" in md and "bigquery_patents" in md
+
+
+# ── evidence coverage ──
+#
+# A reference evaluated with source "no_content" was read from nothing, yet it
+# occupies a row in the evaluation and counts as "checked" behind a determination
+# of "no blocking reference". Measured on the M2 e2e runs: 17/25 and 24/25.
+
+from patent_analyzer.report_sections import evidence_coverage_html, evidence_coverage_md  # noqa: E402
+
+MIX = [{"source": "pdf"}] * 6 + [{"source": "abstract"}] * 2 + [{"source": "no_content"}] * 17
+
+
+def test_evidence_coverage_counts_and_warns():
+    h = evidence_coverage_html(MIX)
+    assert "17 of 25 references were evaluated with no text at all" in h
+    assert "68%" in h and "unchecked reference, not a cleared one" in h
+    assert "full PDF" in h and "nothing to read" in h
+    md = evidence_coverage_md(MIX)
+    assert md[0] == "## Evidence Coverage"
+    assert any("17 of 25" in line for line in md)
+
+
+def test_evidence_coverage_silent_when_everything_was_read():
+    assert evidence_coverage_html([{"source": "pdf"}, {"source": "full_text"}]) == ""
+    assert evidence_coverage_md([{"source": "pdf"}]) == []
+    assert evidence_coverage_html([]) == "" and evidence_coverage_md(None) == []
+
+
+def test_evidence_coverage_reaches_the_report():
+    html = inject_html('<div class="sec-t">Invention Summary</div><div>x</div>\n</div>', None, None, MIX, None)
+    assert "Evidence Coverage" in html and "17 of 25" in html
+    md = inject_md("# R\n\n## Evaluation Criteria\n", None, None, MIX, None)
+    assert "## Evidence Coverage" in md
