@@ -60,8 +60,19 @@ def embed_vertex(texts: list[str], task_type: str, model: str | None = None,
         batch = 100 if model == "text-embedding-005" else 1
 
         def embed_batch(idxs: list[int]):
+            from . import metering
             contents = [texts[i][:8000] or " " for i in idxs]
-            resp = client.models.embed_content(model=model, contents=contents, config=config)
+            try:
+                resp = client.models.embed_content(model=model, contents=contents, config=config)
+            except Exception as exc:
+                metering.incident(model, metering.FAILED, f"{type(exc).__name__}: {exc}")
+                raise
+            # Vertex prices embeddings per 1,000 input "count"; the response
+            # carries billable_character_count when the SDK surfaces metadata,
+            # otherwise the ledger estimates from what we sent.
+            meta = getattr(resp, "metadata", None)
+            metering.count_embed(model, len(contents), sum(len(c) for c in contents),
+                                 getattr(meta, "billable_character_count", None))
             for i, emb in zip(idxs, resp.embeddings):
                 v = np.array(emb.values, dtype=np.float32)
                 v /= (np.linalg.norm(v) or 1.0)

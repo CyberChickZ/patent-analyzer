@@ -73,6 +73,26 @@ _UNPRICED_NOTE = "model not in the price table — counted, not costed"
 
 external: dict[str, int] = {}          # channel -> outbound calls that hit the network
 bq: dict[str, float] = {"queries": 0, "bytes_billed": 0.0}
+embed: dict[str, dict] = {}            # model -> {"requests": n, "texts": n, "est_tokens": n}
+
+# Append-only log of calls that did not go cleanly: a retry, an outright
+# failure, a quota that ran out, or a fall back to a cheaper/lossier path. This
+# is the third question the ledger has to answer ("which call failed or
+# degraded"), and it is the one no counter can reconstruct after the fact.
+# Sliced by index between two snapshots, so a phase gets exactly its own.
+incidents: list[dict] = []
+
+RETRY, FAILED, DEGRADED, EXHAUSTED = "retry", "failed", "degraded", "exhausted"
+
+
+def incident(source: str, kind: str, detail: str = "") -> None:
+    """`source` is a model id or a channel name; `kind` is one of the four
+    constants above. Never raises: accounting must not break the pipeline."""
+    try:
+        incidents.append({"t": round(time.monotonic(), 1), "source": str(source),
+                          "kind": str(kind), "detail": str(detail)[:200]})
+    except Exception:
+        pass
 
 _job_id: str | None = None
 _phases: dict[str, dict] = {}          # phase -> metrics, in the order they ran
@@ -91,6 +111,19 @@ def count_bq(bytes_billed: float) -> None:
     bq["bytes_billed"] += float(bytes_billed or 0)
 
 
+def count_embed(model: str, texts: int, chars: int, billable_chars: int | None = None) -> None:
+    """One embedding request. Vertex prices these per 1,000 "count" (input
+    tokens) but the embeddings endpoint returns no token count, so tokens are
+    ESTIMATED at 4 chars/token from the characters we sent — or from the
+    provider's own billable_character_count when the response carries one."""
+    m = embed.setdefault(model, {"requests": 0, "texts": 0, "chars": 0, "est_tokens": 0})
+    c = int(billable_chars if billable_chars is not None else chars or 0)
+    m["requests"] += 1
+    m["texts"] += int(texts or 0)
+    m["chars"] += c
+    m["est_tokens"] += -(-c // 4)
+
+
 def _llm_usage() -> dict:
     from app.llm import usage  # imported late: patent_analyzer must not need app/
     return copy.deepcopy(usage)
@@ -98,7 +131,8 @@ def _llm_usage() -> dict:
 
 def snapshot() -> dict:
     return {"t": time.monotonic(), "llm": _llm_usage(),
-            "external": dict(external), "bq": dict(bq)}
+            "external": dict(external), "bq": dict(bq),
+            "embed": copy.deepcopy(embed), "incidents": len(incidents)}
 
 
 def cost_usd(model: str, prompt_tokens: int, output_tokens: int, thought_tokens: int) -> float:
@@ -132,6 +166,18 @@ def _delta(before: dict, after: dict) -> dict:
     bq_bytes = after["bq"]["bytes_billed"] - before["bq"]["bytes_billed"]
     bq_cost = round(bq_bytes / 2 ** 40 * BQ_USD_PER_TIB, 4)
 
+    emb: dict[str, dict] = {}
+    for model, a in (after.get("embed") or {}).items():
+        b = (before.get("embed") or {}).get(model, {})
+        d = {k: a.get(k, 0) - b.get(k, 0) for k in ("requests", "texts", "chars", "est_tokens")}
+        if d["requests"] <= 0:
+            continue
+        d["cost_usd"] = round(d["est_tokens"] / 1_000_000 * EMBED_USD_PER_MTOK, 4)
+        emb[model] = d
+    emb_cost = round(sum(m["cost_usd"] for m in emb.values()), 4)
+
+    inc = incidents[before.get("incidents", 0):after.get("incidents", len(incidents))]
+
     llm_cost = round(sum(m["cost_usd"] for m in models.values()), 4)
     return {
         "seconds": round(after["t"] - before["t"], 1),
@@ -140,7 +186,12 @@ def _delta(before: dict, after: dict) -> dict:
         "external_calls": sum(ext.values()),
         "external": ext,
         "bigquery": {"queries": bq_queries, "gib_billed": round(bq_bytes / 2 ** 30, 3), "cost_usd": bq_cost},
-        "cost_usd": round(llm_cost + bq_cost, 4),
+        "embedding": emb,
+        "incidents": [dict(i) for i in inc],
+        "failures": sum(1 for i in inc if i["kind"] in (FAILED, EXHAUSTED)),
+        "degradations": sum(1 for i in inc if i["kind"] == DEGRADED),
+        "retries": sum(1 for i in inc if i["kind"] == RETRY),
+        "cost_usd": round(llm_cost + bq_cost + emb_cost, 4),
     }
 
 
@@ -157,6 +208,8 @@ def start_run(job_id: str) -> None:
     _job_id = job_id
     _phases = {}
     external.clear()
+    embed.clear()
+    incidents.clear()
     bq.update(queries=0, bytes_billed=0.0)
     _mark_t0 = time.monotonic()
     _mark_base = snapshot()
@@ -198,12 +251,23 @@ def totals(ph: dict | None = None) -> dict:
     for m in ph.values():
         for k, v in (m.get("external") or {}).items():
             ext[k] = ext.get(k, 0) + v
+    emb: dict[str, dict] = {}
+    for m in ph.values():
+        for name, d in (m.get("embedding") or {}).items():
+            acc = emb.setdefault(name, {"requests": 0, "texts": 0, "chars": 0,
+                                        "est_tokens": 0, "cost_usd": 0.0})
+            for k in acc:
+                acc[k] = round(acc[k] + d.get(k, 0), 4) if k == "cost_usd" else acc[k] + d.get(k, 0)
     return {
         "seconds": round(sum(m.get("seconds", 0) for m in ph.values()), 1),
         "llm_calls": sum(m.get("llm_calls", 0) for m in ph.values()),
         "llm": models,
         "external_calls": sum(ext.values()),
         "external": ext,
+        "embedding": emb,
+        "failures": sum(m.get("failures", 0) for m in ph.values()),
+        "degradations": sum(m.get("degradations", 0) for m in ph.values()),
+        "retries": sum(m.get("retries", 0) for m in ph.values()),
         "bigquery": {"queries": sum((m.get("bigquery") or {}).get("queries", 0) for m in ph.values()),
                      "gib_billed": round(sum((m.get("bigquery") or {}).get("gib_billed", 0) for m in ph.values()), 3),
                      "cost_usd": round(sum((m.get("bigquery") or {}).get("cost_usd", 0) for m in ph.values()), 4)},
@@ -218,3 +282,126 @@ def report(ph: dict | None = None) -> dict:
             "bigquery_usd_per_tib": BQ_USD_PER_TIB,
             "note": "Estimated from list prices; thought tokens billed as output. Not a bill.",
             "phases": ph, "totals": totals(ph)}
+
+
+# ── the ledger ────────────────────────────────────────────────────────────────
+
+def _incident_counts(m: dict) -> dict[str, dict]:
+    """Incidents of one phase, grouped by the source that raised them."""
+    out: dict[str, dict] = {}
+    for i in m.get("incidents") or []:
+        c = out.setdefault(i.get("source", "?"), {"retries": 0, "failures": 0, "degradations": 0})
+        kind = i.get("kind")
+        if kind == RETRY:
+            c["retries"] += 1
+        elif kind == DEGRADED:
+            c["degradations"] += 1
+        else:
+            c["failures"] += 1
+    return out
+
+
+def _attach(row: dict, counts: dict[str, dict]) -> dict:
+    """A row owns an incident when the incident's source is the row's resource,
+    or its prefix — SerpAPI reports as "serpapi", the channel is
+    "serpapi:google_patents"."""
+    acc = {"retries": 0, "failures": 0, "degradations": 0}
+    for src, c in counts.items():
+        if row["name"] == src or row["name"].startswith(src + ":") or src.startswith(row["name"] + ":"):
+            for k in acc:
+                acc[k] += c[k]
+    row.update(acc)
+    return row
+
+
+def ledger(ph: dict | None = None) -> dict:
+    """Every line of spend on one job, flat enough to sort and total.
+
+    Answers the three questions a finished job has to answer: what did it cost
+    (`totals`), which step was the most expensive (`most_expensive`), and which
+    call failed or degraded (`incidents`, and the counts on each row).
+
+    One row = one (phase, resource). `kind` is model | embedding | bigquery |
+    external; only the first three carry a dollar figure, external channels are
+    free at the margin but are what actually runs out (see /quota).
+    """
+    from datetime import datetime, timezone
+    ph = phases() if ph is None else ph
+    rows: list[dict] = []
+    all_incidents: list[dict] = []
+
+    for phase, m in ph.items():
+        counts = _incident_counts(m)
+        for i in m.get("incidents") or []:
+            all_incidents.append({"phase": phase, **{k: v for k, v in i.items() if k != "t"}})
+        for model, d in (m.get("llm") or {}).items():
+            rows.append(_attach({
+                "phase": phase, "kind": "model", "name": model,
+                "calls": d.get("calls", 0), "input_tokens": d.get("prompt_tokens", 0),
+                "output_tokens": d.get("output_tokens", 0), "thought_tokens": d.get("thought_tokens", 0),
+                "seconds": d.get("seconds", 0.0), "cost_usd": d.get("cost_usd", 0.0),
+                "note": d.get("note", ""),
+            }, counts))
+        for model, d in (m.get("embedding") or {}).items():
+            rows.append(_attach({
+                "phase": phase, "kind": "embedding", "name": model,
+                "calls": d.get("requests", 0), "texts": d.get("texts", 0),
+                "input_tokens": d.get("est_tokens", 0), "output_tokens": 0, "thought_tokens": 0,
+                "seconds": 0.0, "cost_usd": d.get("cost_usd", 0.0),
+                "note": "tokens estimated at 4 chars/token — the embeddings API reports none",
+            }, counts))
+        bqd = m.get("bigquery") or {}
+        if bqd.get("queries"):
+            rows.append(_attach({
+                "phase": phase, "kind": "bigquery", "name": "bigquery",
+                "calls": bqd.get("queries", 0), "gib_billed": bqd.get("gib_billed", 0.0),
+                "seconds": 0.0, "cost_usd": bqd.get("cost_usd", 0.0),
+                "note": "the account's first 1 TiB each month is free and is not deducted here",
+            }, counts))
+        for channel, n in (m.get("external") or {}).items():
+            rows.append(_attach({
+                "phase": phase, "kind": "external", "name": channel,
+                "calls": n, "seconds": 0.0, "cost_usd": 0.0,
+                "note": "no marginal price; consumes a quota — see /quota",
+            }, counts))
+
+    t = totals(ph)
+    by_phase = sorted(((p, m.get("cost_usd", 0.0)) for p, m in ph.items()), key=lambda x: -x[1])
+    most = None
+    if by_phase and by_phase[0][1] > 0:
+        name, amount = by_phase[0]
+        top = max((r for r in rows if r["phase"] == name), key=lambda r: r["cost_usd"], default=None)
+        most = {"phase": name, "cost_usd": amount,
+                "share_of_total": round(amount / t["cost_usd"], 3) if t["cost_usd"] else 0.0,
+                "seconds": (ph[name] or {}).get("seconds", 0.0),
+                "driver": (f'{top["name"]} (${top["cost_usd"]:.4f})' if top else "")}
+
+    return {
+        "job_id": _job_id,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "totals": {"cost_usd": t["cost_usd"], "seconds": t["seconds"], "llm_calls": t["llm_calls"],
+                   "external_calls": t["external_calls"], "failures": t["failures"],
+                   "degradations": t["degradations"], "retries": t["retries"]},
+        "most_expensive": most,
+        "rows": sorted(rows, key=lambda r: -r["cost_usd"]),
+        "incidents": all_incidents,
+        "phases": ph,
+        "prices": {
+            "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing"
+                      " and https://cloud.google.com/bigquery/pricing, read 2026-09-18",
+            "usd_per_mtok": {k: {"input": v[0], "output": v[1]} for k, v in PRICES.items()},
+            "bigquery_usd_per_tib": BQ_USD_PER_TIB,
+            "embedding_usd_per_mtok": EMBED_USD_PER_MTOK,
+            "review_by": PRICE_REVIEW_DATE,
+        },
+        "caveats": [
+            "Estimated from list prices, not a bill: no Vertex committed-use discount,"
+            " no context-caching credit and no free tier is modelled.",
+            _TIER_NOTE,
+            "Prices are the Global-region column; llm.py defaults VERTEX_LOCATION=global."
+            " A regional deployment pays ~10% more.",
+            "A call whose response carried no usage_metadata contributes its call count"
+            " but no tokens, so its cost is missing rather than wrong.",
+            f"The Gemini 3.x Flash rate is introductory and lapses on {PRICE_REVIEW_DATE}.",
+        ],
+    }

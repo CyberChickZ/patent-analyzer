@@ -227,15 +227,32 @@ async def _smooth(model: str | None = None) -> None:
         pass
 
 
+def _incident(source: str, kind: str, detail: str = "") -> None:
+    """Tell the ledger a call did not go cleanly. Late import (patent_analyzer
+    must not need app/, and metering reads `usage` from here), and never raises
+    — accounting must not be able to fail a request."""
+    try:
+        from patent_analyzer import metering
+        metering.incident(source, kind, detail)
+    except Exception:
+        pass
+
+
 def _is_retryable(exc: BaseException) -> bool:
+    model = _current_model.get() or MODEL
     if isinstance(exc, APIError) and exc.code in (429, 503, 500):
         # DSQ 429 = "temporary high contention for a specific shared resource", not a fixed quota
         print(f"[LLM] {exc.code} from Vertex: {str(getattr(exc, 'message', exc))[:300]}")
         if exc.code == 429:
-            _meter(_current_model.get() or MODEL)["errors_429"] += 1
+            _meter(model)["errors_429"] += 1
+        _incident(model, "retry", f"{exc.code} from Vertex: {str(getattr(exc, 'message', exc))[:160]}")
         return True
     name = type(exc).__name__
-    return any(k in name for k in ("Timeout", "ServiceUnavailable", "ResourceExhausted"))
+    retryable = any(k in name for k in ("Timeout", "ServiceUnavailable", "ResourceExhausted"))
+    # Not retryable = the call is over. The ledger records it either way; this
+    # predicate is the one place every exception out of Vertex passes through.
+    _incident(model, "retry" if retryable else "failed", f"{name}: {exc}"[:200])
+    return retryable
 
 
 _retry_decorator = retry(
@@ -338,6 +355,8 @@ async def call_llm_with_pdfs(
             file_uri = f"gs://{bucket_name}/{blob_path}"
             parts.append(types.Part.from_uri(
                 file_uri=file_uri, mime_type="application/pdf"))
+            _incident("vertex:pdf", "degraded",
+                      f"{Path(p).name} is {size // 1048576}MB, over the inline cap — sent as a gs:// uri")
     for img_data in (image_parts or []):
         parts.append(types.Part.from_bytes(data=img_data, mime_type="image/png"))
     parts.append(types.Part.from_text(text=user))
