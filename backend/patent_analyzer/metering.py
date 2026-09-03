@@ -18,15 +18,52 @@ from __future__ import annotations
 import copy
 import time
 
-# USD per 1,000,000 tokens: (input, output). Thought tokens bill at the output
-# rate, so they are added to output before costing. Prices as given by Harry,
-# 2026-09-18; gemini-2.5-pro's input price is the <=200k-context tier.
+# ── the rate card, and where every number comes from ─────────────────────────
+#
+# All figures read off https://cloud.google.com/vertex-ai/generative-ai/pricing
+# ("Agent Platform Pricing"), Standard tier, **Global** region, fetched
+# 2026-09-18. Global is the right column because app/llm.py builds its client
+# with `location=os.getenv("VERTEX_LOCATION", "global")`; a deployment that
+# pins a region pays the Non-global column (+10%) and this table under-counts.
+#
+# Verbatim from that page, 2026-09-18:
+#   "Gemini 3.8 Flash* through December 31, 2026 | Input (text, image, video,
+#    audio) Global $0.75 ... Text output (response and reasoning) Global $3.75"
+#   "Gemini 3.8 Flash Starting January 1, 2027 | Input ... Global $1.50 ...
+#    Text output (response and reasoning) Global $7.50"
+#   "Gemini 3.1 Flash-Lite | Input (text, image, video) Global $0.25 ... Text
+#    output (response and reasoning) Global $1.50"
+#   "Gemini 2.5 Pro | Input (text, image, video, audio) $1.25 [<=200K] $2.50
+#    [>200K] ... Text output (response and reasoning) $10.00 $15.00"
+# Thought tokens are not a separate line anywhere on the page: every output row
+# reads "Text output (response and reasoning)", so reasoning bills as output.
+#
+# USD per 1,000,000 tokens: (input, output).
 PRICES: dict[str, tuple[float, float]] = {
-    "gemini-3.8-flash": (0.75, 3.75),
-    "gemini-2.5-pro": (1.25, 10.00),
+    "gemini-3.8-flash": (0.75, 3.75),        # introductory price, ends 2026-12-31 -> (1.50, 7.50)
+    "gemini-2.5-pro": (1.25, 10.00),         # the <=200K-context tier; see _TIER_NOTE
     "gemini-3.1-flash-lite": (0.25, 1.50),
 }
+# When the introductory Gemini 3.x Flash price lapses, this table is wrong by 2x.
+PRICE_REVIEW_DATE = "2027-01-01"
+_TIER_NOTE = ("gemini-2.5-pro is costed at its <=200K-context tier; the per-model meter "
+              "aggregates tokens across calls, so a single >200K call cannot be told apart "
+              "and is under-costed (its true rate is $2.50/$15.00 per 1M).")
+
+# https://cloud.google.com/bigquery/pricing, fetched 2026-09-18: "Queries
+# (on-demand) | 0 tebibyte to 1 tebibyte Free per 1 month / account | 1 tebibyte
+# and above $6.25 / 1 tebibyte, per 1 month / account. The first 1 TiB per month
+# is free." The free TiB is account-wide and not modelled here, so a small
+# month's BigQuery line is an over-estimate.
 BQ_USD_PER_TIB = 6.25
+
+# Same Vertex page, embeddings table: "Embeddings for Text (Excluding Gemini
+# Embedding) | Input | Global | Online requests $0.000025 | Batch requests
+# $0.00002 | Output | Online requests No charge" — priced per 1,000 *count*
+# (input tokens). text-embedding-005 (patent_analyzer/encoders.py) is in that
+# row. $0.000025/1k count == $0.025 per 1M.
+EMBED_USD_PER_MTOK = 0.025
+
 # SerpAPI is on the free tier: no marginal cost, but the call count is the thing
 # that actually runs out, so it is counted like a priced resource.
 
