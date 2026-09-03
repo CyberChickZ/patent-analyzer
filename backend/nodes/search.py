@@ -434,10 +434,13 @@ async def search_node(state: GraphState) -> dict:
             d = by_pub.get((g.get("pub_num") or "").upper())
             if d:
                 d["good_touches"] = g.get("touches")
+                d["good_strong"] = bool(g.get("strong"))
                 ranked.append(d)
         _event("info", f"M1: delivering {len(ranked)} GOOD documents of {len(good)} "
-                       f"({loop_stats.get('rounds')} rounds, stop: {loop_stats.get('stop')})")
-        prune_stats = {"mode": "moves", "good": len(good), "delivered": len(ranked)}
+                       f"({loop_stats.get('n_strong', 0)} strong, {loop_stats.get('rounds')} rounds, "
+                       f"stop: {loop_stats.get('stop')})")
+        prune_stats = {"mode": "moves", "good": len(good), "strong": loop_stats.get("n_strong", 0),
+                       "delivered": len(ranked), "uncovered": loop_stats.get("uncovered", [])}
         rank_of = {id(d): i + 1 for i, d in enumerate(ranked)}
         pruned_docs = ranked
 
@@ -541,6 +544,8 @@ async def search_node(state: GraphState) -> dict:
             "move_rows": loop_stats.get("move_rows", []),
             "good": loop_stats.get("good", []),
             "coverage": loop_stats.get("coverage", {}),
+            "uncovered": loop_stats.get("uncovered", []),
+            "n_strong": loop_stats.get("n_strong", 0),
             "stop": loop_stats.get("stop"),
             "loop_elements": loop_stats.get("elements", []),
             "loop_mode": loop_stats.get("mode", "elements"),
