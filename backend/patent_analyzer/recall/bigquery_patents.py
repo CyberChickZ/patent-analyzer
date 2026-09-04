@@ -152,8 +152,13 @@ async def search_claims(
               AND {_build_like(keywords[:2])}
             LIMIT {limit}
             """
+            # A second scan of the same table, on two keywords instead of four:
+            # the recall is worse and it is billed again, so the ledger sees it.
+            metering.incident("bigquery", metering.DEGRADED,
+                              f"{len(keywords[:4])} keywords returned nothing; re-ran on {len(keywords[:2])}")
             result = await asyncio.to_thread(guarded_query, client, sql_fallback)
     except Exception as e:
+        metering.incident("bigquery", metering.FAILED, f"{type(e).__name__}: {e}")
         return [], f"BigQuery error: {type(e).__name__}: {e}"
 
     candidates = []

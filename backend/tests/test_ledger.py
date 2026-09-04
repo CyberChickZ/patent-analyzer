@@ -111,6 +111,30 @@ def test_a_free_job_has_no_most_expensive_step():
     assert metering.ledger()["most_expensive"] is None
 
 
+def test_a_spent_serpapi_key_reaches_the_ledger(tmp_path, monkeypatch):
+    """The wiring, not the mechanism: a real channel hitting a real cap has to
+    end up as a row the reader can see, not only as a returned error string."""
+    import asyncio
+
+    from patent_analyzer import cache
+    from patent_analyzer.recall import serpapi as sp
+    cache.reset_for_tests(tmp_path / "kv.sqlite")
+    monkeypatch.setenv("SERPAPI_KEYS", "keyA")
+    monkeypatch.setattr(sp, "FREE_TIER_PER_KEY", 1)
+    monkeypatch.setattr(sp, "_sync_search", lambda *a: (
+        [{"title": "T", "pub_num": "US1B2", "match_type": "Patent", "total": 1}], None))
+    try:
+        assert asyncio.run(sp.search_patents("q1"))[1] is None
+        assert "exhausted" in asyncio.run(sp.search_patents("q2"))[1]
+    finally:
+        cache.reset_for_tests(None)
+
+    m = metering.mark("search")
+    assert m["failures"] == 1 and m["incidents"][0]["kind"] == metering.EXHAUSTED
+    row = next(r for r in metering.ledger()["rows"] if r["name"].startswith("serpapi"))
+    assert row["failures"] == 1
+
+
 def test_a_new_job_clears_the_incidents_of_the_last_one():
     metering.incident("serpapi", metering.FAILED, "HTTP 500")
     metering.mark("search")

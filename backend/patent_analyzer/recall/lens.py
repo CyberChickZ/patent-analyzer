@@ -162,6 +162,9 @@ async def _post(endpoint: str, body: dict) -> tuple[dict | None, str | None]:
                 if wait is None or wait > _MAX_RETRY_WAIT:
                     break
                 retries += 1
+                metering.incident(f"lens:{endpoint}", metering.RETRY,
+                                  f"429; waiting {wait:.1f}s (remaining/month="
+                                  f"{r.headers.get('x-rate-limit-remaining-request-per-month')})")
                 await asyncio.sleep(wait)
         status = r.status_code
         if status == 200:
@@ -190,6 +193,11 @@ async def _post(endpoint: str, body: dict) -> tuple[dict | None, str | None]:
                      "returned": len((data or {}).get("data") or []), "total": (data or {}).get("total"),
                      "seconds": round(time.time() - t0, 2), "http_status": status, "cached": False,
                      **({"retries_429": retries} if retries else {}), **({"err": err} if err else {})})
+    if err:
+        # 429 after the retries and 401 both mean the trial ran out of something;
+        # every other error is one lost call.
+        metering.incident(f"lens:{endpoint}",
+                          metering.EXHAUSTED if status in (401, 429) else metering.FAILED, err)
     if data is not None and not err:
         kv().put(_CACHE_NS, ck, data)
     return data, err

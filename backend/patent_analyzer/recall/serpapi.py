@@ -111,18 +111,21 @@ async def _search(engine: str, query: str, max_pages: int, num: int, match_type:
         q = _quota(key)
         if not q.take(max_pages):
             last_err = f"serpapi key {_fp(key)} monthly quota exhausted"
+            metering.incident("serpapi", metering.EXHAUSTED, last_err)
             continue
         metering.count(f"serpapi:{engine}")
         matches, err = await asyncio.to_thread(_sync_search, engine, query, key, None, max_pages, num, extra)
         if err and _exhausted(err):
             q.exhaust()
             last_err = f"serpapi key {_fp(key)}: {err}"
+            metering.incident("serpapi", metering.EXHAUSTED, last_err)
             continue
         if err and _NO_RESULTS in err:
             # billed by SerpAPI like any answer; cache it as an empty page
             matches, err = [], None
         if err:
             q.release(max_pages)
+            metering.incident("serpapi", metering.FAILED, f"{engine}: {err}")
             return [], err
         cands = [_to_candidate(m, m.get("match_type") or match_type) for m in matches if m.get("title")]
         total = int((matches[0].get("total") or 0) if matches else 0)

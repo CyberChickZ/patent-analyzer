@@ -97,7 +97,10 @@ async def _get(client: httpx.AsyncClient, url: str, params: dict | None = None,
                 # Anonymous rate limit is 100 req / 5min — back off, but bounded
                 # (S2_429_MAX_RETRIES, default 1): a wide search has many queries
                 if i + 1 >= int(os.environ.get("S2_429_MAX_RETRIES", "3")):
+                    metering.incident("semantic_scholar", metering.EXHAUSTED,
+                                      f"{last_err}, gave up after {i + 1} attempts")
                     return None, last_err
+                metering.incident("semantic_scholar", metering.RETRY, last_err)
                 await asyncio.sleep(5 + i * 10)
                 continue
             if resp.status_code == 404:
@@ -115,6 +118,7 @@ async def _get(client: httpx.AsyncClient, url: str, params: dict | None = None,
         except Exception as e:
             last_err = f"{type(e).__name__}: {e}"
             await asyncio.sleep(1 + i)
+    metering.incident("semantic_scholar", metering.FAILED, last_err or "unknown error")
     return None, last_err or "unknown error"
 
 

@@ -294,11 +294,15 @@ async def search_node(state: GraphState) -> dict:
     # channels degraded (events are a side channel and never reach results.json).
     channel_health: list[dict] = []
     channel_results: dict[str, list] = {}
+    from patent_analyzer import metering
     for (name, _), (result, secs) in zip(channel_specs, gathered):
         if isinstance(result, Exception):
             kind = "channel_timeout" if isinstance(result, asyncio.TimeoutError) else "channel_crashed"
             detail = f"{type(result).__name__}: {result}"
             _event(kind, f"{name}: {detail}", {"channel": name, "seconds": round(secs, 1)})
+            # A channel lost whole is the biggest degradation the pipeline can
+            # suffer and results.json never said so — only the event stream did.
+            metering.incident(name, metering.FAILED, f"{kind} after {secs:.0f}s: {detail}")
             channel_results[name] = []
             channel_health.append({"channel": name, "status": "timeout" if kind == "channel_timeout" else "crashed",
                                    "n": 0, "seconds": round(secs, 1), "detail": detail[:200], "errors": []})
@@ -311,6 +315,7 @@ async def search_node(state: GraphState) -> dict:
                    if any(k in str(e.get("error", "")) for k in ("blocked", "429", "budget", "quota", "Sorry"))]
         for msg in limited:
             _event("channel_limited", f"{name}: {msg[:120]}")
+            metering.incident(name, metering.DEGRADED, msg[:160])
         status = "limited" if limited else ("ok" if cands else ("errored" if errs else "empty"))
         channel_health.append({"channel": name, "status": status, "n": len(cands), "seconds": round(secs, 1),
                                "detail": (limited[0][:200] if limited else

@@ -105,6 +105,7 @@ async def _get(path: str, params: dict | None = None, kind: str = "metadata",
             call_log.append({"path": path, "cached": True, "status": 200})
             return hit.get("payload"), None
     if not quota(kind).take():
+        metering.incident("uspto_odp", metering.EXHAUSTED, f"weekly {kind} quota exhausted ({week_key()})")
         return None, f"odp weekly {kind} quota exhausted"
     t0 = time.monotonic()
 
@@ -139,6 +140,7 @@ async def _get(path: str, params: dict | None = None, kind: str = "metadata",
     if err is not None:
         call_log.append({"path": path, "error": err, "attempts": attempt + 1,
                          "seconds": round(time.monotonic() - t0, 2)})
+        metering.incident("uspto_odp", metering.FAILED, f"{path}: {err} after {attempt + 1} attempts")
         return None, err
     call_log.append({"path": path, "status": status, "bytes": len(body),
                      "seconds": round(time.monotonic() - t0, 2)})
