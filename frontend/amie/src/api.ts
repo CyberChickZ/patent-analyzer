@@ -107,6 +107,12 @@ export const getEvents = (id: string, since = 0) =>
   json<{ events: JobEvent[]; total: number; status: string; phase: string }>(
     `/api/events/${encodeURIComponent(id)}?since=${since}`,
   );
+
+/** Stable identity of an event, for dropping the ones the backend sends twice.
+ *  See `dedupeEvents` in phases.ts for why that happens. */
+export function eventKey(e: JobEvent): string {
+  return `${e.ts}|${e.phase}|${e.kind}|${e.message}`;
+}
 export const getResults = (id: string) => json<any>(`/api/results/${encodeURIComponent(id)}`);
 export const deleteJob = (id: string) => req(`/api/jobs/${encodeURIComponent(id)}`, { method: "DELETE" });
 export const reportUrl = (id: string) => `/api/report/${encodeURIComponent(id)}`;

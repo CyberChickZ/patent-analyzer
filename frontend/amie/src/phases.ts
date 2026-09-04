@@ -1,4 +1,33 @@
-import type { JobEvent, JobStatus } from "./api";
+import { eventKey, type JobEvent, type JobStatus } from "./api";
+
+/** Drop events the page has already seen.
+ *
+ *  Two things produce repeats and neither is fixable from here:
+ *
+ *  1. The backend. `graph/extraction_subgraph.py` declares its own
+ *     `events: Annotated[list, operator.add]`, so the compiled subgraph is
+ *     handed the parent's accumulated events on entry and echoes them back in
+ *     its update patch; `app/main.py` appends that patch wholesale, and every
+ *     phase-1 event lands in `job["events"]` a second time. Verified against
+ *     the persisted records of jobs 96eada38 / ff3c54ad / ba03cfe3: 8 phase-1
+ *     entries, four of them byte-identical duplicates down to the timestamp.
+ *  2. This page. `/events/{job}` is a `since`-indexed poll, not a stream, so
+ *     two polls that overlap both ask from the same index and both get the
+ *     same tail. The in-flight guard in pages/run.ts closes that one.
+ *
+ *  Identity is (ts, phase, kind, message): the backend's timestamps are
+ *  microsecond ISO strings minted per event, so two genuinely distinct events
+ *  never collide, while a re-sent copy is exact. */
+export function dedupeEvents(seen: Set<string>, incoming: JobEvent[]): JobEvent[] {
+  const out: JobEvent[] = [];
+  for (const e of incoming) {
+    const k = eventKey(e);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(e);
+  }
+  return out;
+}
 
 /** The six steps the UI shows, and the backend phase keys each one absorbs.
  *  The backend emits phase1 · phase2 · phase3 · phase4 · phase4b · phase5 plus the

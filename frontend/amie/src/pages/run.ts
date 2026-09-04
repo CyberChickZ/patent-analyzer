@@ -1,6 +1,6 @@
 import { getStatus, getEvents, reportUrl, type JobEvent, type JobStatus } from "../api";
 import { esc, clip, pill, fmtTime, errorBox, empty, openModal, md, promptBlocks, on } from "../ui";
-import { STEPS, stepOfEvent, stepStates, PAUSE_LABEL, PAUSE_STEP, llmCallsByStep } from "../phases";
+import { STEPS, stepOfEvent, stepStates, PAUSE_LABEL, PAUSE_STEP, llmCallsByStep, dedupeEvents } from "../phases";
 import { mountReview, queriesTable } from "../hitl";
 import { rememberJob } from "../main";
 
@@ -10,10 +10,16 @@ let job: JobStatus | null = null;
 let openStep: string | null = null;
 let reviewFor = "";        // paused_at the panel is currently mounted for
 let lastSig = "";
+/** Server-side index asked for next — NOT events.length: the server's list is
+ *  longer than ours whenever it re-sent something we dropped. */
+let cursor = 0;
+let seenKeys = new Set<string>();
+let inFlight = false;
 
 export function disposeRun(): void {
   if (timer) { clearInterval(timer); timer = null; }
   events = []; job = null; openStep = null; reviewFor = ""; lastSig = "";
+  cursor = 0; seenKeys = new Set<string>(); inFlight = false;
 }
 
 export function renderRun(host: HTMLElement, jobId: string): void {
@@ -39,11 +45,17 @@ export function renderRun(host: HTMLElement, jobId: string): void {
       <div class="panel"><div class="panel-body live" id="live"><div class="small muted"><span class="spinner"></span> waiting…</div></div></div>
     </section>`;
 
+  // A poll that outlives its 2s slot used to have the next one start from the
+  // same `since`, so both appended the same tail. One at a time.
   const poll = async () => {
+    if (inFlight) return;
+    inFlight = true;
     try {
-      const [s, e] = await Promise.all([getStatus(jobId), getEvents(jobId, events.length)]);
+      const [s, e] = await Promise.all([getStatus(jobId), getEvents(jobId, cursor)]);
       job = s;
-      if (e.events?.length) events = events.concat(e.events);
+      cursor = typeof e.total === "number" ? e.total : cursor + (e.events?.length || 0);
+      const fresh = dedupeEvents(seenKeys, e.events || []);
+      if (fresh.length) events = events.concat(fresh);
       paint(jobId);
       if (s.status === "completed" || s.status === "error") {
         if (timer) { clearInterval(timer); timer = null; }
@@ -51,6 +63,8 @@ export function renderRun(host: HTMLElement, jobId: string): void {
     } catch (err: any) {
       const box = document.getElementById("run-error");
       if (box && !job) box.innerHTML = errorBox(`Cannot reach job ${jobId} — ${err?.message || err}`);
+    } finally {
+      inFlight = false;
     }
   };
   void poll();
