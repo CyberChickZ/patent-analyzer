@@ -69,19 +69,25 @@ async def run_moves(state: dict, serpapi_left, serpapi_take, event) -> tuple[lis
             results.append(M.MoveResult("S3_react", 0, error=f"{type(wide).__name__}: {wide}"[:200]))
         else:
             wide_cands, wide_stats = wide
-            r = M.MoveResult("S3_react", 0, list(wide_cands)[:M.CAPS["S3_react"]])
+            # everything the queries, the paper neighbourhood, Lens and the bridges returned goes
+            # into the pool; the claims budget only chooses what to READ of it
+            read, sel = R.select_for_reading(elements, list(wide_cands), M.CAPS["S3_react"],
+                                             state.get("summary", ""))
+            r = M.MoveResult("S3_react", 0, read)
             rnd = (wide_stats.get("rounds") or [{}])[0]
             r.calls = len(rnd.get("queries") or [])
-            r.note = f"wide loop: {len(wide_cands)} candidates, {r.calls} queries"
+            r.note = (f"wide loop: {len(wide_cands)} candidates, {r.calls} queries; read {sel['read']} "
+                      f"({sel['must_read']} must-read, cut cos {sel['cut_cos']})")
+            r.select = sel
             results.append(r)
-            cands0 += r.candidates
+            cands0 += list(wide_cands)
         return cands0, results
 
     out = await R.run_rounds(elements, groups, terms, cutoff, round0, event=event, offsets=offsets)
     good = out["good"]
     stats = {
         "mode": "moves", "rounds": out["rounds"], "stop": out["stop"], "coverage": out["coverage"],
-        "uncovered": out["uncovered"], "n_strong": out["strong"],
+        "uncovered": out["uncovered"], "n_strong": out["strong"], "read": out["read"],
         "move_rows": out["rows"], "seconds": out["seconds"],
         "good": [{"pub_num": d.get("pub_num"), "title": (d.get("title") or "")[:100],
                   "sources": d.get("sources"), "touches": d.get("good_touches"),

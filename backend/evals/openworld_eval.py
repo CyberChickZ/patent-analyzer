@@ -219,7 +219,7 @@ async def run_pipeline_one(key: str, g: dict) -> dict:
             "date_cutoff": g.get("priority_date") or None,
             "output_dir": str(RUN_DIR / "pdf" / key)})
         rec["loop_rounds"] = (p3.get("search_stats") or {}).get("loop_rounds", [])
-        for k in ("move_rows", "good", "coverage", "stop"):          # LOOP_MODE=moves (M1)
+        for k in ("move_rows", "good", "coverage", "stop", "uncovered", "n_strong", "read"):   # LOOP_MODE=moves (M1)
             rec[k] = (p3.get("search_stats") or {}).get(k)
         rec["serpapi_quota"] = (p3.get("search_stats") or {}).get("serpapi_quota", [])
         rec["ranked"] = [{"pub_num": d.get("pub_num", ""), "match_type": d.get("match_type", ""),

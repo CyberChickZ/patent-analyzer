@@ -551,6 +551,7 @@ async def search_node(state: GraphState) -> dict:
             "coverage": loop_stats.get("coverage", {}),
             "uncovered": loop_stats.get("uncovered", []),
             "n_strong": loop_stats.get("n_strong", 0),
+            "read": loop_stats.get("read", []),
             "stop": loop_stats.get("stop"),
             "loop_elements": loop_stats.get("elements", []),
             "loop_mode": loop_stats.get("mode", "elements"),

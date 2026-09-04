@@ -69,8 +69,9 @@ def test_round_1_expands_from_what_was_read_not_only_from_good(monkeypatch):
         return {"judged": len(docs), "calls": 1, "good": 0, "with_claims": len(docs)}
     round0 = _harness(monkeypatch, judge_nothing)
 
-    async def fake_wide(judged, before, known, round_no):
+    async def fake_wide(judged, pool, before, known, round_no):
         seen["seeds"] = [d["pub_num"] for d in judged]
+        seen["pool"] = [c.pub_num for c in pool]
         return [M.MoveResult("W1_citations", round_no, [])]
 
     async def fake_later(*a, **k):
@@ -80,6 +81,7 @@ def test_round_1_expands_from_what_was_read_not_only_from_good(monkeypatch):
     monkeypatch.setattr(R, "_later_round", fake_later)
     out = asyncio.run(R.run_rounds(ELS, ["H04N7"], ["camera"], "20110202", round0))
     assert seen["seeds"] == [f"US{i}B2" for i in range(6)]        # none of them GOOD, all still seeds
+    assert seen["pool"] == [f"US{i}B2" for i in range(6)]        # and the whole pool is offered, read or not
     assert out["rounds"] == 3 and out["stop"].endswith("no new strong GOOD")
 
 
@@ -146,3 +148,26 @@ def test_later_rounds_aim_their_moves_at_the_uncovered_elements(monkeypatch):
     assert got["terms"] == ["fiducial", "marker"]                 # the uncovered element's own words
     assert got["groups"][0] == "G01S17"                           # the GOOD doc that touches it, first
     assert all("aimed at 1 uncovered: e2" in r.note for r in res)
+
+
+def test_select_for_reading_keeps_the_must_read_sources_and_every_query_top_ten(monkeypatch):
+    """m1a/m1b read the first 300 of 2,140 in channel order and dropped the
+    rest from the pool entirely. Now the pool keeps everything and only the
+    reading is selected."""
+    def fake_embed(elements, rows, topk=1, cap=1, **kw):
+        for i, r in enumerate(rows):
+            r["prune_cos"] = 1.0 - i / 100.0                      # earlier = closer
+        return list(range(len(rows))), {}
+    import patent_analyzer.agentic.prune as P
+    monkeypatch.setattr(P, "stage1_embed", fake_embed)
+    cands = []
+    for i in range(20):
+        cands.append(Candidate(pub_num=f"C{i}", title=f"t{i}", match_type="Patent",
+                               sources=["google_patents"], raw={"loop": {"rank": i}}))
+    far = Candidate(pub_num="LENS", title="lens hit", match_type="Patent", sources=["lens_bridge"])
+    cands.append(far)                                             # worst cosine, must still be read
+    picked, info = R.select_for_reading([{"id": "e1", "text": "a camera"}], cands, 12)
+    got = [c.pub_num for c in picked]
+    assert "LENS" in got                                          # a Lens hit is never ranked out
+    assert all(f"C{i}" in got for i in range(10))                 # every query's top 10
+    assert info["in"] == 21 and info["must_read"] == 11 and info["read"] == 12

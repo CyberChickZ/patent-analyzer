@@ -71,4 +71,4 @@ def test_a_move_with_no_seeds_is_free():
 def test_move_result_row_is_the_accounting_line():
     r = M.MoveResult("P5_cpc_enum", 2, [_c("US1A1", "P5")], calls=3, gib=1.25, seconds=4.06, note="G05D1:162 ")
     assert r.row() == {"move": "P5_cpc_enum", "round": 2, "brought": 1, "calls": 3, "gib": 1.25,
-                       "seconds": 4.1, "error": None, "note": "G05D1:162 "}
+                       "seconds": 4.1, "error": None, "note": "G05D1:162 ", "select": None}

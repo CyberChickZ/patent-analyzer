@@ -41,6 +41,60 @@ async def _claims_for(cands: list[Candidate]) -> tuple[dict[str, str], int]:
     return out, calls
 
 
+# Sources whose candidates are read whatever the cosine says. Of the four gold families h1i
+# reached on US20120194631A1, two came straight off a ReAct query, one off Lens and one off the
+# citation expansion — an embedding cut that ranks them 400th of 2,140 loses three of the four
+# before anything reads them (leader, 2026-09-18).
+MUST_READ_SOURCES = {"lens_bridge", "lens_search", "reliance_bridge", "citation_graph",
+                     "google_similar", "P2_examiner"}
+MUST_READ_QUERY_RANK = int(os.environ.get("M1_MUST_READ_RANK", "10"))
+
+
+def _cos_of(elements: list[dict], cands: list[Candidate], summary: str = "") -> list[float]:
+    """Cosine of each candidate against the element texts, written to
+    `raw["cos"]` as well so a candidate the budget did not read can still be
+    ranked as a seed later."""
+    rows = [{"title": c.title, "abstract": c.abstract or c.snippet, "sources": c.sources} for c in cands]
+    try:
+        from .prune import stage1_embed
+        stage1_embed(elements, rows, topk=1, cap=1)
+    except Exception:
+        for c in cands:
+            c.raw.setdefault("cos", 0.0)
+        return [0.0] * len(cands)
+    out = []
+    for c, r in zip(cands, rows):
+        v = float(r.get("prune_cos") or 0.0)
+        c.raw["cos"] = v
+        out.append(v)
+    return out
+
+
+def select_for_reading(elements: list[dict], cands: list[Candidate], n: int,
+                       summary: str = "") -> tuple[list[Candidate], dict]:
+    """Which of a round-0 channel's candidates the claims budget reads.
+
+    m1a and m1b both took the first `n` in channel order — 300 of 2,140 — and
+    everything past the cut never entered the pool either, so the run could not
+    even be compared with h1h/h1i, whose pool reach counted what the channels
+    returned. Here the whole list stays in the pool and only the READING is
+    selected: the must-read set first (see MUST_READ_SOURCES and every query's
+    top MUST_READ_QUERY_RANK), then the rest by cosine.
+    """
+    cos = _cos_of(elements, cands, summary)
+    must, rest = [], []
+    for i, c in enumerate(cands):
+        rank = ((c.raw or {}).get("loop") or {}).get("rank")
+        hit = bool(set(c.sources or []) & MUST_READ_SOURCES) or \
+            (isinstance(rank, int) and rank < MUST_READ_QUERY_RANK)
+        (must if hit else rest).append((i, c))
+    rest.sort(key=lambda ic: -cos[ic[0]])
+    picked = [c for _, c in must][:n] + [c for _, c in rest][:max(0, n - len(must))]
+    info = {"in": len(cands), "must_read": len(must), "read": len(picked),
+            "cut_cos": round(cos[rest[max(0, n - len(must)) - 1][0]], 4) if rest and n > len(must) else None}
+    return picked, info
+
+
 def _score_cos(elements: list[dict], docs: list[dict]) -> None:
     """Set `prune_cos` on every doc (te005 against the element texts) so the
     wide round can rank documents the judge found nothing in."""
@@ -119,7 +173,7 @@ async def run_rounds(elements: list[dict], cpc_groups: list[str], title_terms: l
         if round_no == 0:
             results = results0
         elif round_no == 1:
-            results = await _wide_round(judged, before, set(pool), round_no)
+            results = await _wide_round(judged, list(pool.values()), before, set(pool), round_no)
         else:
             results = await _later_round(good_docs, elements, cpc_groups, title_terms, before,
                                          set(pool), round_no, uncovered, offsets)
@@ -162,20 +216,29 @@ async def run_rounds(elements: list[dict], cpc_groups: list[str], title_terms: l
     return {"pool": list(pool.values()), "good": G.rank_good(good_docs), "rows": all_rows,
             "rounds": round_no + 1, "stop": stop, "coverage": cover, "uncovered": uncovered,
             "strong": sum(1 for d in good_docs if G.is_strong(d)),
+            # every publication whose claims were actually read — the pool is what the channels
+            # found, this is what the budget could afford to look at, and the two reaches differ
+            "read": [d["pub_num"] for d in judged if d.get("pub_num")],
             "seconds": round(time.monotonic() - t_start, 1)}
 
 
-async def _wide_round(judged: list[dict], before: str | None, known: set[str],
-                      round_no: int) -> list[M.MoveResult]:
-    """Round 1: one hop out from the best of what round 0 read, GOOD or not.
+async def _wide_round(judged: list[dict], pool: list[Candidate], before: str | None,
+                      known: set[str], round_no: int) -> list[M.MoveResult]:
+    """Round 1: one hop out from the best of round 0, GOOD or not.
 
     A document that cites the gold does not have to claim any element itself,
     so requiring GOOD here throws away the bridges. Ranking is (elements
-    touched, cosine): a GOOD hit leads, an unjudged-but-close one still gets a
-    place, and the tail is cut at M1_WIDE_SEEDS."""
-    seeds = [d["pub_num"] for d in sorted(
-        judged, key=lambda d: (-len(d.get("good_touches") or {}), -float(d.get("prune_cos") or 0.0)),
-    )[:M.WIDE_SEEDS] if d.get("pub_num")]
+    touched, cosine), and it runs over the WHOLE round-0 pool rather than only
+    over what the claims budget could afford to read — a high-cosine query hit
+    that did not make the reading cut is still a perfectly good bridge to walk
+    from, and seeding costs nothing per seed."""
+    ranked = sorted(judged, key=lambda d: (-len(d.get("good_touches") or {}),
+                                           -float(d.get("prune_cos") or 0.0)))
+    seeds = [d["pub_num"] for d in ranked if d.get("pub_num")]
+    seen = set(seeds)
+    unread = sorted((c for c in pool if c.pub_num and c.pub_num not in seen),
+                    key=lambda c: -float((c.raw or {}).get("cos") or 0.0))
+    seeds = (seeds + [c.pub_num for c in unread])[:M.WIDE_SEEDS]
     out = await asyncio.gather(
         M.p1_citations(seeds, known, cap=M.CAPS["W1_citations"], round_no=round_no),
         M.p4_similar(seeds, known, cap=M.CAPS["W4_similar"], round_no=round_no),

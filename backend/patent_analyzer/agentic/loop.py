@@ -116,8 +116,14 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
                 continue
             hits, total, chan = await _search(q["query"], before, budget, num=100, scholar=True)
             returned, new_keys = [], []
-            for c in hits:
-                c.raw.setdefault("loop", {})["candidate"] = q["candidate"]
+            for rank, c in enumerate(hits):
+                loop_meta = c.raw.setdefault("loop", {})
+                loop_meta["candidate"] = q["candidate"]
+                # first query that found it, and where in that query's results — M1 reads every
+                # query's top 10 whatever the embedding says (h1i reached 2 of its 4 gold families
+                # straight off a query, and a cosine cut would have to keep them to see them)
+                loop_meta.setdefault("q", q["query"][:160])
+                loop_meta.setdefault("rank", rank)
                 key = (c.pub_num or c.title).upper()
                 returned.append(c.pub_num or c.title[:80])
                 if key not in pool:
@@ -267,7 +273,12 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
     if os.environ.get("WIDE_SEED_ONLY") == "1":
         # M1 round 0 wants the queries and the paper neighbourhood only: the citation expansion,
         # Google similar and the CPC round are moves of their own, run from GOOD documents rather
-        # than from every query hit, and repeating them here would spend the BigQuery budget twice
+        # than from every query hit, and repeating them here would spend the BigQuery budget twice.
+        # The Reliance bridge patents are seeds here and nothing else, so in this mode they would
+        # never reach M1's pool at all — and the bridges first reached 8 of h1h's 30 families.
+        for pub in bridge_seeds:
+            pool.setdefault(pub.upper(), Candidate(pub_num=pub, match_type="Patent",
+                                                   sources=["reliance_bridge"], raw={"move": "reliance_bridge"}))
         return list(pool.values()), {"rounds": [{"round": 1, "queries": log, "n_queries": len(log),
                                                  "seeds": len(seeds), "pool_size": len(pool),
                                                  "neighbourhood": neigh_info, "bridge": bridge_info,

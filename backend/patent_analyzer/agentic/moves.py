@@ -62,11 +62,12 @@ class MoveResult:
     seconds: float = 0.0
     error: str | None = None
     note: str = ""
+    select: dict | None = None          # round 0: how the claims budget chose what to read
 
     def row(self) -> dict:
         return {"move": self.name, "round": self.round, "brought": len(self.candidates),
                 "calls": self.calls, "gib": round(self.gib, 2), "seconds": round(self.seconds, 1),
-                "error": self.error, "note": self.note[:200]}
+                "error": self.error, "note": self.note[:200], "select": self.select}
 
 
 def _cands(pubs: list[str], meta: dict, source: str, cap: int) -> list[Candidate]:

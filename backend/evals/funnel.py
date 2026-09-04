@@ -206,8 +206,14 @@ async def build_funnel(rec: dict, gold_entry: dict) -> dict:
     ranked = [(i + 1, r.get("pub_num", "")) for i, r in enumerate(rec.get("ranked", []))]
     rows.append({"stage": "rerank", "out": len(ranked),
                  "gold_ranks": [{"rank": i, "pub": p, "family": fam_of[_canon(p)]} for i, p in ranked if _canon(p) in fam_of]})
+    # M1: the pool is what the channels found, `read` is what the claims budget could afford to
+    # look at. A gold family in the pool but not in `read` was found and then ranked out before
+    # anything judged it — that is the cost of the cosine cut, and it gets its own column.
+    read_g = sorted(_fams(rec.get("read") or [], fam_of)) if rec.get("read") else []
     return {"key": rec.get("key"), "cutoff": cutoff, "gold_families": sorted(gold_f), "n_gold": len(gold_f),
-            "reach_pool": len(pool_g), "rows": rows}
+            "reach_pool": len(pool_g), "reach_read": len(read_g), "has_read": bool(rec.get("read")),
+            "gold_in_pool_unread": sorted(set(pool_g) - set(read_g)) if rec.get("read") else [],
+            "rows": rows}
 
 
 def funnel_md(f: dict) -> str:
@@ -237,7 +243,8 @@ def funnel_md(f: dict) -> str:
             L.append(f"| — | other channels | | | | | {r['returned']} | {r['new']} | {','.join(r['gold_families']) or '—'} (+{r['gold_new']}) | {r['reach']} | S2/OpenAlex/arXiv/BQ |")
         elif r["stage"] == "prune_stage1_embed":
             lost = "; ".join(f"{d['pub']} cos={d['cos']:.2f} ({d['best_element']})" for d in r["gold_lost"]) or "none"
-            L.append(f"| — | prune: embedding | top-100/element | | | | {r['in']} | → {r['out']} | gold {len(r['gold_in'])}→{len(r['gold_out'])} | | cut cos {r['cut_cos']:.3f}; lost: {lost} |")
+            cut = f"{r['cut_cos']:.3f}" if r.get("cut_cos") is not None else "n/a"   # moves mode has no embedding cut
+            L.append(f"| — | prune: embedding | top-100/element | | | | {r['in']} | → {r['out']} | gold {len(r['gold_in'])}→{len(r['gold_out'])} | | cut cos {cut}; lost: {lost} |")
         elif r["stage"] == "prune_stage3_claims":
             v = "; ".join(f'{g["pub"]}: {"keep" if g["claims_worth_reading"] else "DROP"} {g.get("claims_elements")} {g.get("claims_reason", "")}'
                           for g in r["gold_verdicts"])[:400]
@@ -327,22 +334,41 @@ def moves_table(recs: list[tuple[dict, dict]]) -> str:
 
 
 def reach_table(funnels: list[dict]) -> str:
-    """Per-case pool reach and where the prune left it (L1 8-paper table)."""
-    L = ["| case | gold families | in pool | pool reach | after embedding | after screen | in top-30 |", "|---|---:|---:|---:|---:|---:|---:|"]
+    """Per-case reach at each of the three places it can be lost (leader,
+    2026-09-18: report pool / read / delivered side by side, never one alone —
+    pool alone overstates what the run can act on, read alone cannot be
+    compared with the h1* runs, which had no claims budget)."""
+    moves = any(f.get("has_read") for f in funnels)
+    L = (["| case | gold families | in pool | pool reach | claims read | read reach | delivered | lost to the read cut |",
+          "|---|---:|---:|---:|---:|---:|---:|---|"] if moves else
+         ["| case | gold families | in pool | pool reach | after embedding | after screen | in top-30 |",
+          "|---|---:|---:|---:|---:|---:|---:|"])
     tot = [0, 0, 0, 0, 0]
     for f in sorted(funnels, key=lambda x: x["key"]):
         by = {r["stage"]: r for r in f["rows"]}
-        s1 = len((by.get("prune_stage1_embed") or {}).get("gold_out") or []) if "prune_stage1_embed" in by else None
-        s2 = len((by.get("prune_stage2_llm") or {}).get("gold_out") or []) if "prune_stage2_llm" in by else None
-        if s2 is None and "prune" in by:
-            s2 = len(by["prune"].get("gold_out") or [])
         rr = len({g["family"] for g in (by.get("rerank") or {}).get("gold_ranks") or []})
-        L.append(f"| {f['key']} | {f['n_gold']} | {f['reach_pool']} | {f['reach_pool'] / f['n_gold']:.2f} | "
-                 f"{'' if s1 is None else s1} | {'' if s2 is None else s2} | {'' if rr is None else rr} |")
-        tot[0] += f["n_gold"]; tot[1] += f["reach_pool"]
-        for i, v in enumerate((s1, s2, rr)):
-            tot[2 + i] += v or 0
-    L.append(f"| **total** | **{tot[0]}** | **{tot[1]}** | **{tot[1] / max(1, tot[0]):.3f}** | {tot[2]} | {tot[3]} | {tot[4]} |")
+        if moves:
+            rd = f.get("reach_read", 0)
+            lost = ",".join(f.get("gold_in_pool_unread") or []) or "—"
+            L.append(f"| {f['key']} | {f['n_gold']} | {f['reach_pool']} | {f['reach_pool'] / f['n_gold']:.2f} | "
+                     f"{rd} | {rd / f['n_gold']:.2f} | {rr} | {lost} |")
+            tot[2] += rd
+        else:
+            s1 = len((by.get("prune_stage1_embed") or {}).get("gold_out") or []) if "prune_stage1_embed" in by else None
+            s2 = len((by.get("prune_stage2_llm") or {}).get("gold_out") or []) if "prune_stage2_llm" in by else None
+            if s2 is None and "prune" in by:
+                s2 = len(by["prune"].get("gold_out") or [])
+            L.append(f"| {f['key']} | {f['n_gold']} | {f['reach_pool']} | {f['reach_pool'] / f['n_gold']:.2f} | "
+                     f"{'' if s1 is None else s1} | {'' if s2 is None else s2} | {rr} |")
+            tot[2] += s1 or 0
+            tot[3] += s2 or 0
+        tot[0] += f["n_gold"]; tot[1] += f["reach_pool"]; tot[4] += rr
+    n = max(1, tot[0])
+    if moves:
+        L.append(f"| **total** | **{tot[0]}** | **{tot[1]}** | **{tot[1] / n:.3f}** | | "
+                 f"**{tot[2]}** → **{tot[2] / n:.3f}** | **{tot[4]}** → **{tot[4] / n:.3f}** | |")
+    else:
+        L.append(f"| **total** | **{tot[0]}** | **{tot[1]}** | **{tot[1] / n:.3f}** | {tot[2]} | {tot[3]} | {tot[4]} |")
     return "\n".join(L) + "\n"
 
 
