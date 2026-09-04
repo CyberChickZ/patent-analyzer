@@ -1,7 +1,7 @@
 import { getResults, getStatus, reportUrl, type JobEvent } from "../api";
 import { esc, clip, pill, num, empty, errorBox, openModal, md, on, plainTitle } from "../ui";
 import { queriesTable } from "../hitl";
-import { dedupeEvents } from "../phases";
+import { dedupeEvents, isLegacyEvent } from "../phases";
 import { RATES, jobCostRange } from "../pricing";
 import { rememberJob } from "../main";
 
@@ -54,7 +54,7 @@ export async function renderResults(host: HTMLElement, jobId: string): Promise<v
     R = res;
     // the record carries the backend's duplicates too; the call counts below
     // would otherwise be inflated by them
-    EVENTS = dedupeEvents(new Set<string>(), (st as any)?.events || []);
+    EVENTS = dedupeEvents(new Set<string>(), ((st as any)?.events || []).filter((e: JobEvent) => !isLegacyEvent(e)));
   } catch (e: any) {
     const msg = String(e?.message || e);
     host.innerHTML = `<div class="page-head"><div class="kicker">Step 3</div><h1>Results <span class="mono small muted">${esc(jobId)}</span></h1></div>`

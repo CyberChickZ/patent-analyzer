@@ -29,6 +29,26 @@ export function dedupeEvents(seen: Set<string>, incoming: JobEvent[]): JobEvent[
   return out;
 }
 
+/** Events from code that no longer exists, kept out of the feed.
+ *
+ *  Saved job records are replayed by /events and /status long after the node
+ *  that wrote them is gone, so the log of an old job otherwise advertises a
+ *  stage the pipeline no longer has. Personas went with the legacy pipeline in
+ *  d834d6a; nothing in backend/ emits this any more (`grep -r personas
+ *  --include=*.py` finds only a comment), but three of the jobs still on disk
+ *  carry it, and job records outlive deletions.
+ *
+ *  Anything listed here is dropped on arrival, not greyed out: a reviewer
+ *  reading the timeline should see what this pipeline did, and a stage that no
+ *  longer runs is noise whichever way it is styled. */
+const LEGACY_EVENTS: RegExp[] = [
+  /^Crafted \d+ domain-specific personas$/,
+];
+
+export function isLegacyEvent(e: JobEvent): boolean {
+  return LEGACY_EVENTS.some((re) => re.test(e.message || ""));
+}
+
 /** The six components of architecture v2 §2, and the backend phase keys each
  *  one absorbs. The backend still emits phase1 · phase2 · phase3 · phase4 ·
  *  phase4b · phase5 plus the gate names (`idca` / `extract` / `search` /

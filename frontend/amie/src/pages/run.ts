@@ -1,6 +1,6 @@
 import { getStatus, getEvents, reportUrl, type JobEvent, type JobStatus } from "../api";
 import { esc, clip, pill, fmtTime, errorBox, empty, openModal, md, promptBlocks, on } from "../ui";
-import { STEPS, stepOfEvent, stepStates, PAUSE_LABEL, PAUSE_STEP, llmCallsByStep, dedupeEvents } from "../phases";
+import { STEPS, stepOfEvent, stepStates, PAUSE_LABEL, PAUSE_STEP, llmCallsByStep, dedupeEvents, isLegacyEvent } from "../phases";
 import { mountReview, queriesTable } from "../hitl";
 import { rememberJob } from "../main";
 
@@ -54,7 +54,7 @@ export function renderRun(host: HTMLElement, jobId: string): void {
       const [s, e] = await Promise.all([getStatus(jobId), getEvents(jobId, cursor)]);
       job = s;
       cursor = typeof e.total === "number" ? e.total : cursor + (e.events?.length || 0);
-      const fresh = dedupeEvents(seenKeys, e.events || []);
+      const fresh = dedupeEvents(seenKeys, (e.events || []).filter((x) => !isLegacyEvent(x)));
       if (fresh.length) events = events.concat(fresh);
       paint(jobId);
       if (s.status === "completed" || s.status === "error") {
