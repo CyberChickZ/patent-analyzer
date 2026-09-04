@@ -7,18 +7,55 @@ import re
 from pathlib import Path
 
 
+def _effective(name: str, env: str) -> bool:
+    """Whether a prompt-behaviour switch is ON for this run, asked of the code
+    that actually implements it rather than of the environment.
+
+    This has to be the effective value, not `os.getenv(env) == "1"`. A run file
+    is keyed on model_tag(), and a file that exists is returned without calling
+    the model at all, so a switch that is on by default but only tagged when
+    set explicitly makes a run read another configuration's cached answer. That
+    is how a lean deep-read gate once passed with "0 live, 0 cached". Both of
+    these are currently on by default."""
+    try:
+        from app import llm
+        return bool(getattr(llm, name)())
+    except Exception:
+        return os.getenv(env) == "1"
+
+
 def model_tag() -> str:
-    """Run-file suffix when a stage model is overridden (LLM_MODEL_<STAGE>), so runs of
-    different models never share a cached run file. Empty for the default model."""
+    """Run-file suffix when a stage model is overridden (LLM_MODEL_<STAGE>) or a
+    prompt-behaviour switch is on, so runs of different configurations never
+    share a cached run file. Empty for the plain default.
+
+    Still NOT covered: the prompt text itself. Editing an eval prompt without
+    changing a model or a switch leaves the tag identical, so the stale run
+    file has to be deleted by hand."""
     parts = [f"{st}-{os.getenv(f'LLM_MODEL_{st.upper()}')}" for st in ("extract", "screen", "eval", "idca")
              if os.getenv(f"LLM_MODEL_{st.upper()}")]
     if os.getenv("LLM_THINKING_LEVEL"):
         parts.append(f"think-{os.getenv('LLM_THINKING_LEVEL').lower()}")
-    if os.getenv("EVAL_LEAN") == "1":
+    if _effective("_lean_eval", "EVAL_LEAN"):
         parts.append("lean")           # deep read without thinking and without the analysis prose
-    if os.getenv("EVAL_BRI") == "1":
-        parts.append("bri")
+    if _effective("_bri_enabled", "EVAL_BRI"):
+        parts.append("bri")            # claims construed under MPEP 2111 BRI
+    cap = _dep_cap()
+    if cap is not None:
+        parts.append(f"dep{cap}")      # DRAFT_MAX_DEPENDENTS sweep: different caps, different claim sets
     return ("_" + "+".join(parts)) if parts else ""
+
+
+def _dep_cap() -> int | None:
+    """The dependent-claim cap when it is not the module default, else None.
+    Same reason as _effective: a draft run file keyed only on the model would
+    serve the 8-dependent claim set back to a run asking for 20."""
+    try:
+        from patent_analyzer.draft import avoid
+        return avoid.max_dependents() if avoid.max_dependents() != avoid.MAX_DEPENDENTS else None
+    except Exception:
+        raw = os.getenv("DRAFT_MAX_DEPENDENTS")
+        return int(raw) if raw and raw.isdigit() and int(raw) != 8 else None
 
 
 def load_env_yaml(path: Path | None = None, override: bool = False) -> list[str]:
