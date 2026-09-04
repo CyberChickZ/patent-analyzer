@@ -106,7 +106,7 @@ function paint(jobId: string): void {
         <div class="step-head" data-step="${s.key}" role="button" tabindex="0">
           <span class="caret">${evs.length ? (open ? "▾" : "▸") : ""}</span>
           <span class="idx">${st === "completed" ? "✓" : i + 1}</span>
-          <span class="name">${esc(s.label)}</span>
+          <span class="name">${esc(s.label)}<span class="blurb">${esc(s.blurb)}</span></span>
           <span class="meta">
             ${calls[s.key] ? `<span class="pill pill-tag">${calls[s.key]} LLM</span>` : ""}
             ${evs.length ? `<span class="small muted nowrap">${evs.length} ev</span>` : ""}

@@ -319,7 +319,11 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); ou
 .step.is-running .idx { background: var(--accent-soft); color: var(--accent-ink); border-color: var(--accent); }
 .step.is-paused .idx { background: var(--warn-soft); color: var(--warn); border-color: var(--warn); }
 .step.is-failed .idx { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); }
-.step-head .name { font-family: var(--font-head); font-weight: 600; font-size: .85rem; }
+.step-head .name { font-family: var(--font-head); font-weight: 600; font-size: .85rem; min-width: 0; }
+/* The v2 component names are short; the one-liner is what makes them mean
+   something to a reader who has not read the architecture note. */
+.step-head .name .blurb { display: block; font-family: var(--font-body); font-weight: 400; font-size: .74rem; color: var(--text-3); line-height: 1.35; }
+@media (max-width: 640px) { .step-head .name .blurb { display: none; } }
 .step-head .meta { margin-left: auto; display: flex; gap: .4rem; align-items: center; }
 .step-head .caret { color: var(--text-3); font-size: .7rem; width: .7rem; }
 .step-body { padding: 0 .7rem .6rem 2.65rem; background: var(--bg-sunk); }

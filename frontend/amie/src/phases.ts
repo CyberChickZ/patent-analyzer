@@ -29,10 +29,22 @@ export function dedupeEvents(seen: Set<string>, incoming: JobEvent[]): JobEvent[
   return out;
 }
 
-/** The six steps the UI shows, and the backend phase keys each one absorbs.
- *  The backend emits phase1 · phase2 · phase3 · phase4 · phase4b · phase5 plus the
- *  gate names `extract` / `draft`; there is no phase3b event stream, so semantic
- *  ranking is recognised by the prune events inside phase3. */
+/** The six components of architecture v2 §2, and the backend phase keys each
+ *  one absorbs. The backend still emits phase1 · phase2 · phase3 · phase4 ·
+ *  phase4b · phase5 plus the gate names (`idca` / `extract` / `search` /
+ *  `evaluate` / `draft`, which a gate stamps on the reviewer's own edit
+ *  events); those keys are load-bearing for checkpoints, so they stay as they
+ *  are and only the labels follow the architecture.
+ *
+ *  Two changes from the first cut:
+ *  — Semantic Ranking is no longer a step. §3 folds ranking into the
+ *    prior-art loop's `judge` stage; it was never a phase of its own on the
+ *    wire either (its prune events are emitted under phase3), so a step that
+ *    could only ever light up at the very end of another one was misleading.
+ *  — Draft is a step. `nodes/draft.py` emits under phase4b and has its own
+ *    gate, so "Pause after → Draft" pointed at a step the timeline did not
+ *    draw. §2 makes it a component in its own right (Claim Set Designer, second
+ *    pass), which is what it should have been. */
 export interface Step {
   key: string;
   label: string;
@@ -41,29 +53,28 @@ export interface Step {
 }
 
 export const STEPS: Step[] = [
-  { key: "detect", label: "Invention Detection", blurb: "Read the document, decide whether an invention is present, classify it", phases: ["phase1", "idca"] },
-  { key: "decompose", label: "Decomposition", blurb: "Candidate inventions, their elements and the checklist", phases: ["phase2", "extract"] },
-  { key: "search", label: "Prior Art Search", blurb: "Query planning and the parallel recall channels", phases: ["phase3"] },
-  { key: "rank", label: "Semantic Ranking", blurb: "Prune the pool down to what is worth reading", phases: ["phase3b"] },
-  { key: "evaluate", label: "Deep Evaluation", blurb: "Read each document against the checklist, score, adjudicate, draft claims", phases: ["phase4", "phase4b", "evaluate", "draft"] },
-  { key: "report", label: "Report", blurb: "Compile the report and notify", phases: ["phase5"] },
+  { key: "read", label: "Read", blurb: "Document to text layer: detect whether an invention is present, and classify it", phases: ["phase1", "idca"] },
+  { key: "claimset", label: "Claim set", blurb: "Candidate inventions and their elements, each pinned to verbatim text", phases: ["phase2", "extract"] },
+  { key: "loop", label: "Prior-art loop", blurb: "Query, judge, expand from what was found — ranking included — until coverage or budget stops it", phases: ["phase3", "search"] },
+  { key: "evidence", label: "Evidence & verdict", blurb: "Read each reference against the elements, chart the evidence, adjudicate", phases: ["phase4", "evaluate"] },
+  { key: "draft", label: "Draft", blurb: "Claims written from the elements and narrowed against what the art covers", phases: ["phase4b", "draft"] },
+  { key: "report", label: "Report", blurb: "Compile the report and notify", phases: ["phase5", "report"] },
 ];
 
-const RANK_KINDS = new Set(["prune_done"]);
-
 export function stepOfEvent(e: JobEvent): string {
-  if (e.phase === "phase3" && RANK_KINDS.has(e.kind)) return "rank";
   const s = STEPS.find((x) => x.phases.includes(e.phase));
-  return s ? s.key : "search";
+  return s ? s.key : "loop";
 }
 
 /** Gate name → the step it pauses after. */
 export const PAUSE_STEP: Record<string, string> = {
-  idca: "detect", extract: "decompose", search: "rank", evaluate: "evaluate", draft: "evaluate",
+  idca: "read", extract: "claimset", search: "loop", evaluate: "evidence", draft: "draft",
 };
 
+/** The gate keys go to the backend unchanged; only what the reviewer reads
+ *  follows the architecture's vocabulary. */
 export const PAUSE_LABEL: Record<string, string> = {
-  idca: "Detection", extract: "Decomposition", search: "Search", evaluate: "Evaluation", draft: "Draft claims",
+  idca: "Read", extract: "Claim set", search: "Prior-art loop", evaluate: "Evidence & verdict", draft: "Draft",
 };
 
 export const PAUSE_ORDER = ["idca", "extract", "search", "evaluate", "draft"];
