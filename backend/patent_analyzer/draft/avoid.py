@@ -20,10 +20,28 @@ dependent_claims    MPEP 608.01(n) III: a dependent limitation must further
 
 from __future__ import annotations
 
+import os
 import re
 
 MAX_DEPENDENTS = 8
 FURTHER_TAU = 0.85
+
+
+def max_dependents() -> int:
+    """Dependent claims kept per independent claim (DRAFT_MAX_DEPENDENTS).
+
+    Read per call, not at import: the eval sweeps set it per run. The default 8
+    is a claim-count budget, not a drafting rule — the node writes the same
+    dependents onto the mirror-form independent claim, so a set of N per parent
+    is 2 + 2N claims in total, and 37 CFR 1.16(i) charges an excess-claims fee
+    above 20 total (see outputs/leader_dependent_count.md)."""
+    raw = os.environ.get("DRAFT_MAX_DEPENDENTS")
+    if not raw:
+        return MAX_DEPENDENTS
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return MAX_DEPENDENTS
 _NEGATION = re.compile(r"\b(instead of|in place of|without the|omitting|rather than|replacing the|excluding the)\b", re.I)
 
 
@@ -146,11 +164,13 @@ def plan(adj: dict | None, chart: dict | None, checklist: list[dict] | None, poo
     return out
 
 
-def dependent_claims(items: list[dict], parent: dict, similarity, max_n: int = MAX_DEPENDENTS,
+def dependent_claims(items: list[dict], parent: dict, similarity, max_n: int | None = None,
                      tau: float = FURTHER_TAU) -> tuple[list[dict], list[dict]]:
     """Keep the pool items that further limit `parent`: no negation of a parent
     element, cosine < tau to every parent limitation and to every dependent
-    already kept; at most max_n. Returns (kept, rejected-with-reason)."""
+    already kept; at most max_n (default: max_dependents()). Returns
+    (kept, rejected-with-reason)."""
+    max_n = max_dependents() if max_n is None else max_n
     parent_texts = [l.get("text", "") for l in parent.get("limitations") or []]
     kept, rejected = [], []
     for it in items:
