@@ -2,7 +2,7 @@ import { getResults, getStatus, reportUrl, type JobEvent } from "../api";
 import { esc, clip, pill, num, empty, errorBox, openModal, md, on, plainTitle } from "../ui";
 import { queriesTable } from "../hitl";
 import { dedupeEvents, isLegacyEvent } from "../phases";
-import { RATES, jobCostRange } from "../pricing";
+import { loadQuota, jobCostRange, perM, quotaNote, EMDASH, type Quota } from "../pricing";
 import { rememberJob } from "../main";
 
 let R: any = null;            // results.json
@@ -11,6 +11,7 @@ let showAllDocs = false;
 /** Which collapsible blocks the reader has opened, so a repaint (Show every
  *  reference) does not close them again. */
 let opened = new Set<string>();
+let QUOTA: Quota | null = null;
 let spy: IntersectionObserver | null = null;
 
 /** Coverage as the adjudicator counts it — score >= 1 with a verified quote
@@ -35,7 +36,7 @@ function isCovered(doc: any, criterion: string): boolean {
 }
 
 export function disposeResults(): void {
-  R = null; EVENTS = []; showAllDocs = false;
+  R = null; EVENTS = []; showAllDocs = false; QUOTA = null;
   opened = new Set<string>();
   spy?.disconnect(); spy = null;
 }
@@ -68,10 +69,12 @@ export async function renderResults(host: HTMLElement, jobId: string): Promise<v
     <div class="lede"><span class="spinner"></span> Loading results.json — a full run's is tens of MB, so this can take a moment.</div></div>`;
 
   try {
-    const [res, st] = await Promise.all([
+    const [res, st, q] = await Promise.all([
       getResults(jobId),
       getStatus(jobId).catch(() => null),
+      loadQuota(),
     ]);
+    QUOTA = q;
     R = res;
     // the record carries the backend's duplicates too; the call counts below
     // would otherwise be inflated by them
@@ -473,13 +476,13 @@ function costSection(sr: any[]): string {
 
   return `<section class="section" id="sec-cost">
     <header><h2>Cost and call counts</h2>
-      <span class="hint">counts are real; the dollar figure is an estimate — app/llm.py meters tokens per model but no endpoint exposes them</span></header>
+      <span class="hint">counts are real and come from this job's own record; anything in dollars comes from <code>GET /api/quota</code> or is left blank</span></header>
     <div class="stack">
       <div class="budget">
-        <div><div class="k">Estimated for this job</div><div class="v">${jobCostRange()}</div></div>
+        <div><div class="k">Estimated for this job</div><div class="v">${jobCostRange(QUOTA)}</div></div>
         <div><div class="k">Documents evaluated</div><div class="v">${num((R.eval_stats || {}).evaluated ?? sr.length)}</div></div>
         <div><div class="k">Quotes verified</div><div class="v">${num(((R.eval_stats || {}).quote_stats || {}).verified)}<small> of ${num(((R.eval_stats || {}).quote_stats || {}).quotes)}</small></div></div>
-        <div><div class="k">SerpAPI spend</div><div class="v">$0<small> free tier</small></div></div>
+        <div><div class="k">SerpAPI spend</div><div class="v">${esc(QUOTA?.other.find((o) => /serp/i.test(o.item))?.price || EMDASH)}<small> ${QUOTA?.available ? "from /api/quota" : "no rate card"}</small></div></div>
       </div>
       <div class="tbl-wrap"><div class="tw"><table class="tbl">
         <thead><tr><th>What was called</th><th class="right">Count</th><th>Note</th></tr></thead>
@@ -488,8 +491,11 @@ function costSection(sr: any[]): string {
       <details class="box"><summary>Rate card and prompt versions</summary><div class="box-body">
         <div class="tw"><table class="tbl">
           <thead><tr><th>Model</th><th class="right">In / 1M</th><th class="right">Out / 1M</th></tr></thead>
-          <tbody>${RATES.map((r) => `<tr><td class="mono">${esc(r.model)}</td><td class="right num">$${r.inPerM.toFixed(2)}</td><td class="right num">$${r.outPerM.toFixed(2)}</td></tr>`).join("")}</tbody>
+          <tbody>${(QUOTA?.rates || []).length
+            ? (QUOTA?.rates || []).map((r) => `<tr><td class="mono">${esc(r.model)}</td><td class="right num">${perM(r.inPerM)}</td><td class="right num">${perM(r.outPerM)}</td></tr>`).join("")
+            : `<tr><td class="mono muted">${EMDASH}</td><td class="right num muted">${EMDASH}</td><td class="right num muted">${EMDASH}</td></tr>`}</tbody>
         </table></div>
+        <div class="small muted">${esc(quotaNote(QUOTA || { available: false, rates: [], other: [], jobCost: null }))}</div>
         ${Object.keys(pv).length ? `<div class="subhead">Prompt versions used</div><div class="tw"><table class="tbl">
           <thead><tr><th>Prompt</th><th class="right">Version</th></tr></thead>
           <tbody>${Object.entries(pv).map(([k, v]) => `<tr><td class="mono tiny">${esc(k)}</td><td class="right num">${esc(v)}</td></tr>`).join("")}</tbody>

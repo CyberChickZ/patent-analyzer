@@ -1,7 +1,7 @@
 import { listJobs, submitJob, deleteJob, type JobSummary } from "../api";
 import { esc, pill, fmtDate, errorBox, empty, on } from "../ui";
 import { PAUSE_ORDER, PAUSE_LABEL } from "../phases";
-import { RATES, OTHER_RATES, jobCostRange, fmtUSD, JOB_COST } from "../pricing";
+import { loadQuota, jobCostRange, perM, quotaNote, fmtUSD, EMDASH, type Quota } from "../pricing";
 import { go, rememberJob } from "../main";
 
 const INPUT_MODES = [
@@ -67,26 +67,8 @@ export function renderSubmit(host: HTMLElement): void {
   </section>
 
   <section class="section">
-    <header><h2>Budget</h2><span class="hint">estimate — the backend meters tokens per model but does not expose them over the API</span></header>
-    <div class="stack">
-      <div class="budget">
-        <div><div class="k">Estimated per job</div><div class="v" id="budget-job">${jobCostRange()}</div></div>
-        <div><div class="k">Midpoint</div><div class="v">${fmtUSD((JOB_COST.low + JOB_COST.high) / 2)}</div></div>
-        <div><div class="k">Reruns</div><div class="v" id="budget-rerun">—<small> extra</small></div></div>
-        <div><div class="k">SerpAPI</div><div class="v">$0<small> free tier</small></div></div>
-      </div>
-      <div class="tbl-wrap"><div class="tw"><table class="tbl">
-        <thead><tr><th>Model</th><th class="right">Input / 1M</th><th class="right">Output / 1M</th><th>Note</th></tr></thead>
-        <tbody>
-          ${RATES.map((r) => `<tr><td class="mono">${esc(r.model)}</td>
-            <td class="right num">$${r.inPerM.toFixed(2)}</td>
-            <td class="right num">$${r.outPerM.toFixed(2)}</td>
-            <td class="small muted">${esc(r.note || "")}</td></tr>`).join("")}
-          ${OTHER_RATES.map((r) => `<tr><td class="mono">${esc(r.item)}</td><td colspan="3">${esc(r.price)}</td></tr>`).join("")}
-        </tbody>
-      </table></div></div>
-      <div class="small muted">$${JOB_COST.low.toFixed(2)}–${JOB_COST.high.toFixed(2)} is what full runs actually cost. Pausing is free; each <b>Rerun this phase</b> re-charges that phase.</div>
-    </div>
+    <header><h2>Budget</h2><span class="hint">prices come from <code>GET /api/quota</code></span></header>
+    <div class="stack" id="budget">${budgetBody(null)}</div>
   </section>
 
   <div class="row" style="margin-bottom:1.6rem">
@@ -157,7 +139,9 @@ export function renderSubmit(host: HTMLElement): void {
 
   function syncBudget() {
     const n = pauses().length;
-    $("budget-rerun").innerHTML = n
+    const el = document.getElementById("budget-rerun");
+    if (!el) return;   // the block is replaced once the quota answers
+    el.innerHTML = n
       ? `${n} gate${n > 1 ? "s" : ""}<small> can be rerun</small>`
       : `—<small> no pauses</small>`;
   }
@@ -191,6 +175,39 @@ export function renderSubmit(host: HTMLElement): void {
 
   $("refresh-jobs").addEventListener("click", () => void loadJobs());
   void loadJobs();
+  void loadQuota().then((q) => {
+    const box = document.getElementById("budget");
+    if (box) { box.innerHTML = budgetBody(q); syncBudget(); }
+  });
+}
+
+/** The budget block, with or without prices. `null` is "still asking". */
+function budgetBody(q: Quota | null): string {
+  const rates = q?.rates || [];
+  const other = q?.other || [];
+  const mid = q?.jobCost ? fmtUSD((q.jobCost.low + q.jobCost.high) / 2) : EMDASH;
+  // one placeholder row so the table is a table, not a gap
+  const rows = rates.length
+    ? rates.map((r) => `<tr><td class="mono">${esc(r.model)}</td>
+        <td class="right num">${perM(r.inPerM)}</td>
+        <td class="right num">${perM(r.outPerM)}</td>
+        <td class="small muted">${esc(r.note || "")}</td></tr>`).join("")
+      + other.map((r) => `<tr><td class="mono">${esc(r.item)}</td><td colspan="3">${esc(r.price)}</td></tr>`).join("")
+    : `<tr><td class="mono muted">${EMDASH}</td><td class="right num muted">${EMDASH}</td>
+       <td class="right num muted">${EMDASH}</td><td class="small muted">${q ? "no rate card" : "asking the backend…"}</td></tr>`;
+  return `
+    <div class="budget">
+      <div><div class="k">Estimated per job</div><div class="v" id="budget-job">${jobCostRange(q)}</div></div>
+      <div><div class="k">Midpoint</div><div class="v">${mid}</div></div>
+      <div><div class="k">Reruns</div><div class="v" id="budget-rerun">${EMDASH}<small> extra</small></div></div>
+      <div><div class="k">External calls</div><div class="v">${esc(other[0]?.price || EMDASH)}<small> ${esc(other[0]?.item || "")}</small></div></div>
+    </div>
+    <div class="tbl-wrap"><div class="tw"><table class="tbl">
+      <thead><tr><th>Model</th><th class="right">Input / 1M</th><th class="right">Output / 1M</th><th>Note</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div></div>
+    <div class="small muted">${q ? esc(quotaNote(q)) : "Asking the backend for the rate card…"}
+      Pausing is free; each <b>Rerun this phase</b> re-charges that phase.</div>`;
 }
 
 async function loadJobs(): Promise<void> {

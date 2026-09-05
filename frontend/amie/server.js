@@ -403,6 +403,19 @@ app.post("/api/admin/set-developer", async (req, res) => {
 });
 
 // Health
+// Rate card / quota. The backend endpoint is N1's and is not live yet; until
+// it is, this passes the backend's 404 straight through, which is exactly what
+// src/pricing.ts reads as "no prices to show" — so the day it lands, nothing
+// here has to change.
+app.get("/api/quota", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend("/quota", { firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: "Backend unreachable" });
+  }
+});
+
 app.get("/api/healthz", async (req, res) => {
   try {
     const { status, data } = await proxyBackend("/healthz");
