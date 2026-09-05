@@ -198,6 +198,25 @@ function wireSecNav(host: HTMLElement): void {
 
 // ─── Determination ───
 
+/** The headline sentence is `adj.label_text`, which is
+ *  `patent_analyzer.report_sections.determination_label(adj)` — the backend's
+ *  own string, printed as given.
+ *
+ *  It is not composed here from `label` and `basis`, and it must not be. That
+ *  wording changed in 00e30b0 precisely because the old one read a benchmark's
+ *  scoring convention (PANORAMA App. C.5.3 (a), primary reference >= 70%) as if
+ *  it were the statutory standard, and cited MPEP 2143 for a percentage that
+ *  appears nowhere in it. A second copy of that sentence living in the
+ *  frontend would have had to be found and fixed separately, and the next time
+ *  it changes it would drift again. One author, one string.
+ *
+ *  `label_text` is not on any endpoint yet: results.json's `adjudication` (see
+ *  graph/eval_subgraph.py, which stores what `adjudicate()` returns) carries
+ *  label / basis / risk / reason but not the rendered label, which today only
+ *  report_sections and report_generator call. Until the backend adds one line
+ *  putting `determination_label(adj)` on the dict, this renders nothing extra
+ *  and the reader gets `adj.reason`, which is the same author's full sentence
+ *  and already carries the corrected wording. */
 function determinationSection(adj: any, sr: any[]): string {
   if (!adj || !adj.label) {
     return `<section class="section" id="sec-verdict"><header><h2>Determination</h2></header>
@@ -215,8 +234,11 @@ function determinationSection(adj: any, sr: any[]): string {
         <span class="pill ${adj.risk === "blocking" ? "pill-failed" : "pill-paused"}">${esc(adj.risk || "")}</span>
         <span class="small muted">${esc(adj.n_elements || 0)} elements · best single reference covers ${adj.best_coverage != null ? Math.round(adj.best_coverage * 100) + "%" : "—"}</span>
       </div>
+      ${adj.label_text ? `<div class="verdict-headline">${esc(adj.label_text)}</div>` : ""}
       <div class="prose">${esc(adj.reason || "")}</div>
-      ${adj.obviousness_explanation ? `<details class="box" open><summary>§103 reasoning</summary><div class="box-body prose">${md(adj.obviousness_explanation)}</div></details>` : ""}
+      ${adj.obviousness_explanation ? `<details class="box" open>
+        <summary>Obviousness explanation <span class="pill pill-tag">model narrative, not the rule's output</span></summary>
+        <div class="box-body prose">${md(adj.obviousness_explanation)}</div></details>` : ""}
       ${docs.length ? `<div class="tbl-wrap"><div class="tw"><table class="tbl">
         <thead><tr><th>Charted reference</th><th style="min-width:14rem">Title</th><th class="right">Elements covered</th><th class="right">Coverage</th></tr></thead>
         <tbody>${docs.map((d: any) => `<tr><td class="mono tiny">${esc(d.pub_num || "—")}</td>
