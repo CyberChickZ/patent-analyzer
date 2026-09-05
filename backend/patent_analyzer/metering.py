@@ -109,6 +109,15 @@ def count(channel: str, n: int = 1) -> None:
 def count_bq(bytes_billed: float) -> None:
     bq["queries"] += 1
     bq["bytes_billed"] += float(bytes_billed or 0)
+    # Also accumulate across jobs and instances, in MiB because the KV counter
+    # is integer-only: the free 1 TiB/month is the one BigQuery number that
+    # behaves like a quota, and /quota reports what is left of it.
+    try:
+        from .cache import kv
+        from .runtime_state import month_key
+        kv().incr("runtime", f"usage:bigquery_mib:{month_key()}", by=int(float(bytes_billed or 0) // 2 ** 20))
+    except Exception:
+        pass
 
 
 def count_embed(model: str, texts: int, chars: int, billable_chars: int | None = None) -> None:

@@ -78,7 +78,7 @@ from typing import Any
 import httpx
 
 from ..cache import kv
-from ..runtime_state import MinuteGate
+from ..runtime_state import MinuteGate, MonthlyQuota
 from .. import metering
 from .pool import Candidate
 
@@ -90,6 +90,12 @@ _CACHE_DAYS = 30
 # trial plan, from /subscriptions/*/usage (see module docstring)
 PER_MINUTE = {"patent": 10, "scholarly": 20}
 MAX_RECORDS = {"patent": 100, "scholarly": 500}
+MONTHLY_REQUESTS = int(os.environ.get("LENS_MONTHLY_REQUESTS", "1000"))
+# The trial ends on a date, not on a counter — the quota panel shows the days
+# left because that is what actually takes the channel away. Read off the same
+# /subscriptions/*/usage response as the rate limits, 2026-09-18.
+TRIAL_ENDS = os.environ.get("LENS_TRIAL_ENDS", "2026-10-02")
+_SUBSCRIPTION_PLAN = {"patent": "patent_api", "scholarly": "scholarly_api"}
 
 _MAX_429_RETRIES = 2
 _MAX_RETRY_WAIT = 65.0
@@ -124,6 +130,42 @@ def _gate(endpoint: str) -> MinuteGate:
     return _gates[endpoint]
 
 
+def _monthly(endpoint: str) -> MonthlyQuota:
+    return MonthlyQuota(f"lens:{endpoint}", MONTHLY_REQUESTS)
+
+
+def quota_status() -> list[dict]:
+    """What this instance has spent this month, per endpoint. A lower bound —
+    see `live_usage()` for the provider's own figure."""
+    return [{"endpoint": e, "used": _monthly(e).used(), "cap": MONTHLY_REQUESTS,
+             "per_minute": PER_MINUTE[e], "max_records_per_request": MAX_RECORDS[e]}
+            for e in PER_MINUTE]
+
+
+async def live_usage(endpoint: str) -> tuple[dict | None, str | None]:
+    """GET /subscriptions/{plan}/usage — the provider's own counters.
+
+    The response shape is not in the docs, so nothing here depends on a
+    particular one: the caller gets the raw JSON back and `quota.py` pulls out
+    whatever limit/used/remaining triples it can recognise.
+    """
+    tok = _token()
+    if not tok:
+        return None, "lens: LENS_API_TOKEN not set"
+    plan = _SUBSCRIPTION_PLAN.get(endpoint)
+    if not plan:
+        return None, f"lens: no subscription plan for {endpoint}"
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(f"{API_BASE}/subscriptions/{plan}/usage",
+                                 headers={"Authorization": f"Bearer {tok}"})
+        if r.status_code != 200:
+            return None, f"lens usage: HTTP {r.status_code}"
+        return r.json(), None
+    except Exception as exc:
+        return None, f"lens usage: {type(exc).__name__}: {exc}"
+
+
 def _cache_key(endpoint: str, body: dict) -> str:
     return f"{endpoint}:" + hashlib.sha1(json.dumps(body, sort_keys=True).encode()).hexdigest()
 
@@ -148,6 +190,12 @@ async def _post(endpoint: str, body: dict) -> tuple[dict | None, str | None]:
     t0 = time.time()
     await _gate(endpoint).wait()
     status, err, data, retries = 0, None, None, 0
+    # Count against the monthly trial allowance but never block on it: the local
+    # counter can only be a lower bound (the same token may be used elsewhere),
+    # and Lens enforces its own limit with a 429 we already handle.
+    if not _monthly(endpoint).take():
+        metering.incident(f"lens:{endpoint}", metering.EXHAUSTED,
+                          f"local counter is at the {MONTHLY_REQUESTS}/month trial allowance")
     try:
         async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             while True:

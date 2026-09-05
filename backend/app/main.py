@@ -925,6 +925,19 @@ async def get_usage(job_id: str, user: dict | None = Depends(optional_auth)):
             "note": cost.get("note") or "", "ledger": ledger}
 
 
+@app.get("/api/quota")
+async def get_quota(user: dict | None = Depends(optional_auth)):
+    """What is left on every external source, in one shape.
+
+    Not per job: these counters are shared by every job on the deployment, and
+    the reason to look at them is to find out *before* submitting that the
+    channel a run depends on is already spent. SerpAPI keys are identified by
+    the same 8-character fingerprint the recall channel logs — never the key.
+    """
+    from patent_analyzer import quota
+    return await quota.snapshot()
+
+
 @app.post("/feedback/{job_id}")
 async def submit_feedback(job_id: str, payload: dict):
     """Capture user feedback on a completed job. Used later (offline) to pair
