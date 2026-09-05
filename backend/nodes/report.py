@@ -92,9 +92,16 @@ async def report_node(state: GraphState) -> dict:
     metering.mark("report")
     phase_metrics = {**(state.get("phase_metrics") or {}), **metering.phases()}
     cost = metering.report(phase_metrics)
+    ledger = metering.ledger(phase_metrics)
     _event("info", f"Run cost estimate: ${cost['totals']['cost_usd']:.4f} over "
                    f"{cost['totals']['llm_calls']} LLM calls and "
                    f"{cost['totals']['external_calls']} external calls")
+    if most := ledger.get("most_expensive"):
+        _event("info", f"Most expensive phase: {most['phase']} at ${most['cost_usd']:.4f} "
+                       f"({most['share_of_total']:.0%} of the run), driven by {most['driver']}")
+    if ledger["totals"]["failures"] or ledger["totals"]["degradations"]:
+        _event("warn", f"{ledger['totals']['failures']} failed and "
+                       f"{ledger['totals']['degradations']} degraded calls — see results.json `ledger`")
 
     results = {
         "job_id": job_id,
@@ -130,6 +137,7 @@ async def report_node(state: GraphState) -> dict:
         "user_edits": state.get("user_edits", []),           # reviewer changes at the phase gates
         "prompt_versions": {**_used_prompt_versions(), **(state.get("prompt_versions") or {})},
         "cost": cost,                                        # per-phase time / tokens / $ (patent_analyzer.metering)
+        "ledger": ledger,                                    # the same spend as flat rows + most_expensive + incidents
         "adjudication": adjudication,
         "draft_claims": draft,
         "evaluation": {

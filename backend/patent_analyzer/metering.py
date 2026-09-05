@@ -383,9 +383,11 @@ def ledger(ph: dict | None = None) -> dict:
                    "external_calls": t["external_calls"], "failures": t["failures"],
                    "degradations": t["degradations"], "retries": t["retries"]},
         "most_expensive": most,
+        # No per-phase copy here: `cost.phases` in the same results.json already
+        # carries it, and the ledger rides along on the job record, which is
+        # re-serialised to GCS on every node update.
         "rows": sorted(rows, key=lambda r: -r["cost_usd"]),
         "incidents": all_incidents,
-        "phases": ph,
         "prices": {
             "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing"
                       " and https://cloud.google.com/bigquery/pricing, read 2026-09-18",

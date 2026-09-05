@@ -128,6 +128,22 @@ def _pause_after(job: dict) -> list[str]:
     return [x for x in pa if x in PHASE_NODE]
 
 
+def _refresh_accounting(job: dict) -> None:
+    """Fold what this process has metered so far onto the job record.
+
+    Runs at every point the job is persisted, because these two blocks are the
+    only per-job view of a meter that is not per-job: app.llm.usage counts for
+    the life of the process, and patent_analyzer.metering turns it into
+    per-phase deltas by snapshotting it at each phase boundary. Merged rather
+    than replaced — after a HITL resume on a restarted server, the early phases
+    exist only on the record.
+    """
+    from patent_analyzer import metering
+    job["phase_metrics"] = {**(job.get("phase_metrics") or {}), **metering.phases()}
+    job["cost"] = metering.report(job["phase_metrics"])
+    job["ledger"] = metering.ledger(job["phase_metrics"])
+
+
 def _record_phase_failure(job: dict, graph, config: dict, exc: BaseException) -> None:
     """Turn a raised node into a job the user can see and act on.
 
@@ -895,11 +911,18 @@ async def get_usage(job_id: str, user: dict | None = Depends(optional_auth)):
             pass
     if not phases:
         raise HTTPException(404, "No usage recorded for this job yet")
+    # The ledger is the same numbers flattened into rows, plus which phase cost
+    # the most and which calls failed or degraded. Recomputed from `phases` when
+    # the record predates it, so an old job still answers the three questions.
+    ledger = job.get("ledger")
+    if not ledger:
+        from patent_analyzer import metering
+        ledger = metering.ledger(phases)
     return {"job_id": job_id, "status": job.get("status"), "phase": job.get("phase"),
             "phases": phases, "totals": cost.get("totals") or {},
             "prices_usd_per_mtok": cost.get("prices_usd_per_mtok") or {},
             "bigquery_usd_per_tib": cost.get("bigquery_usd_per_tib"),
-            "note": cost.get("note") or ""}
+            "note": cost.get("note") or "", "ledger": ledger}
 
 
 @app.post("/feedback/{job_id}")
