@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi.testclient import TestClient
 
-from nodes.report import _slim_search_stats
+from patent_analyzer.funnel import slim_search_stats as _slim_search_stats
 from patent_analyzer.report_sections import loop_html
 
 STATS = {
@@ -144,3 +144,45 @@ def test_usage_endpoint_falls_back_to_results_json(monkeypatch, tmp_path):
 def test_usage_endpoint_404s_when_nothing_was_recorded(monkeypatch, tmp_path):
     c = _client(monkeypatch, {"id": "ju3", "status": "queued"}, tmp_path)
     assert c.get("/api/jobs/ju3/usage").status_code == 404
+
+
+# ── the job record (state.json) ──
+#
+# state.json is rewritten to local disk AND to GCS on every heartbeat, so it is
+# the more expensive of the two records. Measured on job 075b99c1 before this:
+# 18.6 MB — phases.phase3 12.0 MB (the same search_stats) plus one round_done
+# event whose payload was 6.6 MB.
+
+from patent_analyzer.funnel import EVENT_PAYLOAD_MAX, slim_event  # noqa: E402
+
+BIG_EVENT = {"ts": "t", "phase": "phase3", "kind": "round_done", "message": "wide: 5 queries",
+             "payload": {"round": 1, "seeds": 14109, "pool_size": 10097, "cpc_hint": "H04N",
+                         "cited_by_seed": {f"US{i}": [f"US{j}" for j in range(20)] for i in range(300)},
+                         "seed_pubs": [f"US{i}" for i in range(4000)]}}
+
+
+def test_big_event_payloads_are_replaced_by_a_pointer():
+    out = slim_event(BIG_EVENT)
+    assert _size(out) < _size(BIG_EVENT) / 50
+    assert set(out["payload_trimmed"]) == {"cited_by_seed", "seed_pubs"}
+    # the counters a reader actually wants are untouched
+    assert out["payload"]["seeds"] == 14109 and out["payload"]["pool_size"] == 10097
+    assert out["payload"]["cpc_hint"] == "H04N" and out["message"] == BIG_EVENT["message"]
+    # and the omission says so rather than looking like an empty result
+    om = out["payload"]["cited_by_seed"]
+    assert om["_omitted"] is True and om["n"] == 300 and "funnel.json" in om["where"]
+
+
+def test_small_events_pass_through_untouched():
+    e = {"ts": "t", "kind": "channel_done", "message": "arxiv: 5",
+         "payload": {"channel": "arxiv", "n": 5, "errors": []}}
+    assert slim_event(e) is e
+    assert slim_event({"ts": "t", "kind": "info", "message": "x"}) == {"ts": "t", "kind": "info", "message": "x"}
+    assert "payload_trimmed" not in slim_event(e)
+
+
+def test_payload_limit_is_a_real_bound():
+    e = {"kind": "k", "payload": {"a": ["x" * 10] * 5}}
+    assert slim_event(e, limit=10)["payload"]["a"]["_omitted"] is True
+    assert slim_event(e, limit=10_000)["payload"]["a"] == ["x" * 10] * 5
+    assert EVENT_PAYLOAD_MAX >= 1024, "too small a cap would gut ordinary progress events"

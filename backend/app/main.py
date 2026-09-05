@@ -42,6 +42,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.auth import is_developer, optional_auth, require_auth, set_developer
+from patent_analyzer.funnel import slim_event, slim_search_stats
 
 app = FastAPI(title="Patent Analyzer", version="0.4.0")
 
@@ -317,14 +318,17 @@ async def _run_langgraph_pipeline(job_id: str):
                 if patch.get("status") and patch["status"] != "running":
                     job["status"] = patch["status"]
                 for evt in patch.get("events", []):
-                    job.setdefault("events", []).append(evt)
+                    # the job record is rewritten to disk and GCS on every
+                    # heartbeat; one round_done payload was 6.6 MB of provenance
+                    # that funnel.json already holds (patent_analyzer.funnel)
+                    job.setdefault("events", []).append(slim_event(evt))
                     if evt.get("phase"):
                         job["phase"] = evt["phase"]
                 for pk, pd in patch.get("phase_results", {}).items():
                     job.setdefault("phases", {})[pk] = pd.get("data", {})
                     job["phase"] = pk
                 if patch.get("search_stats"):
-                    job.setdefault("phases", {})["phase3"] = patch["search_stats"]
+                    job.setdefault("phases", {})["phase3"] = slim_search_stats(patch["search_stats"], job_id)
                 if patch.get("scoring_report"):
                     sr = patch["scoring_report"]
                     top = sr[0].get("similarity_score", 0) if sr else 0
@@ -335,8 +339,7 @@ async def _run_langgraph_pipeline(job_id: str):
                     job.setdefault("prompt_versions", {}).update(patch["prompt_versions"])
                 # keep the cost/timing accounting on the job record too, so it
                 # survives a pause and is readable from /status while running
-                job["phase_metrics"] = {**(job.get("phase_metrics") or {}), **metering.phases()}
-                job["cost"] = metering.report(job["phase_metrics"])
+                _refresh_accounting(job)
                 job["last_heartbeat"] = datetime.now(timezone.utc).isoformat()
                 _save_job(job)
     except Exception as exc:
@@ -345,8 +348,7 @@ async def _run_langgraph_pipeline(job_id: str):
         # in-memory dict — often nothing, leaving the job "running" forever with
         # no way back in. Record it here instead, while the graph state (which
         # names the failed node and is resumable from it) is still in hand.
-        job["phase_metrics"] = {**(job.get("phase_metrics") or {}), **metering.phases()}
-        job["cost"] = metering.report(job["phase_metrics"])
+        _refresh_accounting(job)
         _record_phase_failure(job, graph, config, exc)
         return
     finally:
@@ -365,8 +367,7 @@ async def _run_langgraph_pipeline(job_id: str):
         # reaches the loop above: refresh the accounting from the module or the
         # job shows $0 for everything it has already spent (seen live, job
         # 2f92d815 paused at idca).
-        job["phase_metrics"] = {**(job.get("phase_metrics") or {}), **metering.phases()}
-        job["cost"] = metering.report(job["phase_metrics"])
+        _refresh_accounting(job)
         job["status"] = "waiting_for_hitl"
         job["paused_at"] = phase
         # HumanInterrupt plus the legacy fields the current frontend form reads
@@ -390,8 +391,7 @@ async def _run_langgraph_pipeline(job_id: str):
     if final_state.get("error"):
         job["error"] = final_state["error"]
     job.setdefault("prompt_versions", {}).update(_prompts.used_versions())
-    job["phase_metrics"] = {**(job.get("phase_metrics") or {}), **metering.phases()}
-    job["cost"] = metering.report(job["phase_metrics"])
+    _refresh_accounting(job)
     job.pop("_hitl_saved_state", None)
     _save_job(job)
 
