@@ -175,6 +175,8 @@ async def reduce_eval(state: EvalState) -> dict:
     # (PANORAMA App. C.5.3 rule a; H2 eval: macro-F1 .413 -> .450, blocking recall .29 -> .55 on examiner labels)
     from patent_analyzer.adjudicate import adjudicate
     adjudication = adjudicate(checklist, scoring_report, single_partial_103=0.7)
+    from app.llm import _bri_enabled
+    adjudication["construction"] = "bri" if _bri_enabled() else "plain"   # how the deep read read the criteria
 
     events = [
         _event("info", f"Evaluated {len(scoring_report)} docs, top score: {top_score:.2%}, risk: {risk_level}"),

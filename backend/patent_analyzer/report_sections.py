@@ -645,6 +645,19 @@ _DETERMINATION_NOTE = ("Deterministic rule over the verified evidence: an elemen
                        "always change the picture.")
 
 
+_BRI_NOTE = ("Claims were construed under the broadest reasonable interpretation (MPEP 2111): the criteria "
+             "were read the way a US examiner reads a pending claim, so a reference satisfies one when it "
+             "discloses the same thing under a different name.")
+
+
+def construction_note(adj: dict | None) -> str:
+    """How the claims were read, when the evaluation recorded it. Absent on
+    jobs run before the construction was tracked — say nothing rather than
+    assert a construction the run did not record."""
+    c = ((adj or {}).get("construction") or "").lower()
+    return _BRI_NOTE if c == "bri" else ""
+
+
 def determination_label(adj: dict | None) -> str:
     if not adj:
         return ""
@@ -704,7 +717,7 @@ def determination_html(adj: dict | None, chart: dict | None = None, explanation:
     n = adj["n_elements"]
     label = adj.get("label")
     out = ['<div class="sec det-sec" style="border-left:3px solid ' + fg + '"><div class="sec-t sec-t-lg">Prior-Art Determination</div>',
-           f'<div class="sec-note">{_e(_DETERMINATION_NOTE)}</div>',
+           f'<div class="sec-note">{_e(" ".join(x for x in (construction_note(adj), _DETERMINATION_NOTE) if x))}</div>',
            f'<div class="sec-b det-verdict"><span class="badge" style="background:{bg};color:{fg}">{_e(adj.get("risk", ""))}</span> '
            f'<b>{_e(determination_label(adj))}</b><br><span style="font-size:.85em">Rule: {_e(adj.get("reason", ""))}</span></div>']
     out.append(claim_chart_html(chart))
@@ -754,6 +767,8 @@ def determination_md(adj: dict | None, chart: dict | None = None, explanation: s
     lines = ["## Prior-Art Determination", "",
              f"**{adj.get('risk', '')}** — {determination_label(adj)}.", "", f"_Rule: {adj.get('reason', '')}_", "",
              "_Blocking risk from the documents evaluated here only; not a prediction of grant._", ""]
+    if construction_note(adj):
+        lines += [f"_{construction_note(adj)}_", ""]
     if chart and chart.get("rows") and chart.get("docs"):
         head = "| Element | " + " | ".join(f"{(d.get('pub_num') or d.get('title') or d.get('key') or '')[:24]} ({d.get('n_covered', 0)}/{n})"
                                              for d in chart["docs"]) + " |"

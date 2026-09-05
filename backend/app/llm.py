@@ -1112,7 +1112,17 @@ CLAIM INTERPRETATION — BROADEST REASONABLE INTERPRETATION (MPEP 2111 / 2111.01
 
 
 def _bri_enabled() -> bool:
-    return os.environ.get("EVAL_BRI") == "1"
+    """MPEP 2111: "claims ... are to be given their broadest reasonable
+    interpretation consistent with the specification". That is what a US
+    examiner does, so it is the default (leader, 2026-09-18). EVAL_BRI=0 turns
+    it off.
+
+    Honest note on the evidence, because the decision went against it: L6
+    measured this prompt on the PANORAMA hold-out and found no effect — net +5
+    criteria changed, paired CI including 0. It is on because the statute says
+    how a pending claim is read, not because it scored better; nobody should
+    cite a score for it."""
+    return os.environ.get("EVAL_BRI", "1") != "0"
 
 
 def _lean_eval() -> bool:

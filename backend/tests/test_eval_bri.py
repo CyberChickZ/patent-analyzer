@@ -20,8 +20,13 @@ def _prompt_seen(monkeypatch):
     return seen["prompt"]
 
 
-def test_bri_instruction_only_with_env(monkeypatch):
+def test_bri_is_the_default_and_env_0_turns_it_off(monkeypatch):
+    """MPEP 2111 says how a pending claim is read, so this is on unless asked
+    otherwise (leader, 2026-09-18). L6 measured no effect on the PANORAMA
+    hold-out — it is on for the statute, not for a score."""
     monkeypatch.delenv("EVAL_BRI", raising=False)
+    assert "BROADEST REASONABLE INTERPRETATION" in _prompt_seen(monkeypatch)
+    monkeypatch.setenv("EVAL_BRI", "0")
     assert "BROADEST REASONABLE INTERPRETATION" not in _prompt_seen(monkeypatch)
     monkeypatch.setenv("EVAL_BRI", "1")
     p = _prompt_seen(monkeypatch)
