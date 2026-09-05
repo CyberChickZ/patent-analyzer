@@ -143,9 +143,11 @@ function paint(jobId: string): void {
     const at = job.paused_at || "";
     if (reviewFor !== at) {
       reviewFor = at;
-      const step = PAUSE_STEP[at] || "";
+      // the gate labels and the step labels are the same vocabulary now, so
+      // "paused after Draft / the gate sits after Draft" said it twice
+      const step = STEPS.find((s) => s.key === (PAUSE_STEP[at] || ""));
       slot.innerHTML = `<section class="section"><header><h2>Review — paused after ${esc(PAUSE_LABEL[at] || at)}</h2>
-        <span class="hint">the gate sits after ${esc(STEPS.find((s) => s.key === step)?.label || step)}</span></header>
+        <span class="hint">${esc(step?.blurb || "")}</span></header>
         <div id="review-host"><div class="small muted"><span class="spinner"></span> loading the paused state…</div></div></section>`;
       void mountReview(document.getElementById("review-host")!, jobId, () => {
         reviewFor = "";
