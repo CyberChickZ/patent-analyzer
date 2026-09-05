@@ -8,6 +8,10 @@ import { rememberJob } from "../main";
 let R: any = null;            // results.json
 let EVENTS: JobEvent[] = [];
 let showAllDocs = false;
+/** Which collapsible blocks the reader has opened, so a repaint (Show every
+ *  reference) does not close them again. */
+let opened = new Set<string>();
+let spy: IntersectionObserver | null = null;
 
 /** Coverage as the adjudicator counts it — score >= 1 with a verified quote
  *  (patent_analyzer/adjudicate.element_covered). Reading it back off
@@ -32,7 +36,24 @@ function isCovered(doc: any, criterion: string): boolean {
 
 export function disposeResults(): void {
   R = null; EVENTS = []; showAllDocs = false;
+  opened = new Set<string>();
+  spy?.disconnect(); spy = null;
 }
+
+/** A full run's results page runs to ~15,000px, which is not a page anyone
+ *  reads — it is a page people scroll past. Two things fix that: somewhere to
+ *  jump from, and blocks that are closed until asked for. `key` identifies a
+ *  block across repaints; `dflt` is what it does on first sight. */
+function isOpen(key: string, dflt: boolean): boolean {
+  return opened.has(key) ? true : dflt && !opened.has(`!${key}`);
+}
+
+function markOpen(key: string, open: boolean): void {
+  opened.delete(key); opened.delete(`!${key}`);
+  opened.add(open ? key : `!${key}`);
+}
+
+interface Sec { id: string; label: string; }
 
 export async function renderResults(host: HTMLElement, jobId: string): Promise<void> {
   disposeResults();
@@ -89,6 +110,7 @@ function paint(host: HTMLElement, jobId: string): void {
     </div>
   </div>
 
+  ${secNav(R.user_edits || [])}
   ${determinationSection(adj, sr)}
   ${candidatesSection(cands, checklist, sr)}
   ${searchSection()}
@@ -97,6 +119,11 @@ function paint(host: HTMLElement, jobId: string): void {
   ${editsSection(R.user_edits || [])}
   ${costSection(sr)}
   `;
+
+  wireSecNav(host);
+  host.querySelectorAll<HTMLDetailsElement>("details[data-keep]").forEach((d) => {
+    d.addEventListener("toggle", () => markOpen(d.dataset.keep!, d.open));
+  });
 
   on(host, "[data-cell]", (el) => {
     const [pub, crit] = el.dataset.cell!.split("||");
@@ -118,17 +145,65 @@ function paint(host: HTMLElement, jobId: string): void {
   on(host, "#toggle-docs", () => { showAllDocs = !showAllDocs; paint(host, jobId); });
 }
 
+// ─── Section nav ───
+//
+// Sticky under the topbar, so the page has a spine. The entries match the
+// section ids below one-for-one; Reviewer edits only exists when a reviewer
+// edited something, so it is conditional here too.
+
+function sections(edits: any[]): Sec[] {
+  return [
+    { id: "sec-verdict", label: "Verdict" },
+    { id: "sec-candidates", label: "Candidates" },
+    { id: "sec-search", label: "Search" },
+    { id: "sec-evidence", label: "Evidence" },
+    { id: "sec-draft", label: "Draft" },
+    ...(edits.length ? [{ id: "sec-edits", label: "Reviewer edits" }] : []),
+    { id: "sec-cost", label: "Cost" },
+  ];
+}
+
+function secNav(edits: any[]): string {
+  return `<nav class="secnav" aria-label="Sections of this report">
+    ${sections(edits).map((x) => `<a href="#${x.id}" data-sec="${x.id}">${esc(x.label)}</a>`).join("")}
+  </nav>`;
+}
+
+function wireSecNav(host: HTMLElement): void {
+  const links = new Map<string, HTMLElement>();
+  host.querySelectorAll<HTMLElement>(".secnav a[data-sec]").forEach((a) => {
+    links.set(a.dataset.sec!, a);
+    // the hash is the router's, so the anchor scrolls by hand
+    a.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      document.getElementById(a.dataset.sec!)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  });
+  spy?.disconnect();
+  // Mark the section whose heading last crossed the top of the reading area.
+  spy = new IntersectionObserver((entries) => {
+    for (const en of entries) {
+      if (!en.isIntersecting) continue;
+      links.forEach((el, id) => el.classList.toggle("on", id === en.target.id));
+    }
+  }, { rootMargin: "-25% 0px -70% 0px", threshold: 0 });
+  links.forEach((_, id) => {
+    const el = document.getElementById(id);
+    if (el) spy!.observe(el);
+  });
+}
+
 // ─── Determination ───
 
 function determinationSection(adj: any, sr: any[]): string {
   if (!adj || !adj.label) {
-    return `<section class="section"><header><h2>Determination</h2></header>
+    return `<section class="section" id="sec-verdict"><header><h2>Determination</h2></header>
       ${empty("No determination", "The rule adjudicator produced no verdict for this job.")}</section>`;
   }
   const chart = adj.claim_chart || {};
   const docs: any[] = chart.docs || [];
   const vclass = adj.label === "102" || adj.label === "103" ? `v-${adj.label}` : "v-allow";
-  return `<section class="section">
+  return `<section class="section" id="sec-verdict">
     <header><h2>Determination and its basis</h2><span class="hint">rule verdict from the charted evidence</span></header>
     <div class="panel"><div class="panel-body stack">
       <div class="verdict ${vclass}">
@@ -155,26 +230,28 @@ function determinationSection(adj: any, sr: any[]): string {
 
 function candidatesSection(cands: any[], checklist: any[], sr: any[]): string {
   if (!cands.length) {
-    return `<section class="section"><header><h2>Candidate inventions</h2></header>
+    return `<section class="section" id="sec-candidates"><header><h2>Candidate inventions</h2></header>
       ${empty("No candidate inventions", (R.extraction || {}).no_invention_reason || "Decomposition found nothing to chart.")}</section>`;
   }
-  return `<section class="section">
+  return `<section class="section" id="sec-candidates">
     <header><h2>Candidate inventions (${cands.length})</h2><span class="hint">each element with the verbatim text it rests on</span></header>
-    ${cands.map((c: any) => {
+    ${cands.map((c: any, i: number) => {
       const own = checklist.filter((x: any) => String(x.id || "").startsWith(`${c.id}.`));
       const els: any[] = c.elements || [];
       const best = bestDocFor(own, sr);
-      return `<div class="cand">
-        <div class="cand-head">
+      const key = `cand:${c.id}`;
+      return `<details class="cand" data-keep="${esc(key)}" ${isOpen(key, i === 0) ? "open" : ""}>
+        <summary class="cand-head">
           <div class="row">
             <span class="cid">${esc(c.id)}</span>
             <span class="pill pill-tag">${esc(c.level || "")}</span>
             ${c.primary_form ? `<span class="pill pill-tag">${esc(c.primary_form)}</span>` : ""}
             ${(c.cpc_pred || []).slice(0, 3).map((x: string) => `<span class="pill pill-tag">${esc(x)}</span>`).join("")}
             ${best ? `<span class="pill ${best.covered >= best.total ? "pill-failed" : "pill-paused"}" title="best single reference against this candidate">${best.covered}/${best.total} covered</span>` : ""}
+            <span class="small muted nowrap">${els.length} element${els.length === 1 ? "" : "s"}</span>
           </div>
           <div class="concept">${esc(c.concept || "")}</div>
-        </div>
+        </summary>
         <div class="cand-body">
           <div class="tbl-wrap"><div class="tw"><table class="tbl fixed stack-sm">
             <thead><tr><th style="width:12%">Element</th><th style="width:44%">Claim language</th><th style="width:44%">Verbatim basis in the document</th></tr></thead>
@@ -190,7 +267,7 @@ function candidatesSection(cands: any[], checklist: any[], sr: any[]): string {
           </div></details>` : ""}
           ${(c.dependent_hints || []).length ? `<details class="box"><summary>Dependent hints (${c.dependent_hints.length})</summary><div class="box-body"><ul class="prose">${c.dependent_hints.map((h: any) => `<li>${esc(typeof h === "string" ? h : h.text || JSON.stringify(h))}</li>`).join("")}</ul></div></details>` : ""}
         </div>
-      </div>`;
+      </details>`;
     }).join("")}
   </section>`;
 }
@@ -220,9 +297,9 @@ function searchSection(): string {
   const prune = s.prune || {};
   const quota: any[] = s.serpapi_quota || [];
   if (!rounds.length && !qs.length) {
-    return `<section class="section"><header><h2>Search</h2></header>${empty("No search recorded", "This job produced no recall rounds.")}</section>`;
+    return `<section class="section" id="sec-search"><header><h2>Search</h2></header>${empty("No search recorded", "This job produced no recall rounds.")}</section>`;
   }
-  return `<section class="section">
+  return `<section class="section" id="sec-search">
     <header><h2>Prior art search</h2><span class="hint">one row per move, per round</span></header>
     <div class="stack">
       <div class="budget">
@@ -263,7 +340,7 @@ const MAX_DOCS = 8;
 
 function matrixSection(cands: any[], checklist: any[], sr: any[]): string {
   if (!sr.length || !checklist.length) {
-    return `<section class="section"><header><h2>Evidence matrix</h2></header>
+    return `<section class="section" id="sec-evidence"><header><h2>Evidence matrix</h2></header>
       ${empty("Nothing to chart", "No document was evaluated against the checklist.")}</section>`;
   }
   const groups = cands.length
@@ -280,15 +357,19 @@ function matrixSection(cands: any[], checklist: any[], sr: any[]): string {
       .filter((x) => x.any > 0)
       .sort((a, b) => b.hits - a.hits || b.any - a.any);
     const docs = (showAllDocs ? scored : scored.slice(0, MAX_DOCS)).map((x) => x.doc);
+    const key = `matrix:${g.id}`;
     if (!docs.length) {
-      return `<div class="cand"><div class="cand-head"><span class="cid">${esc(g.id)}</span>
-        <div class="concept">${esc(clip(g.concept, 150))}</div></div>
-        <div class="cand-body">${empty("No reference touches this candidate", "Every evaluated document scored 0 on all of its elements.")}</div></div>`;
-    }
-    return `<div class="cand">
-      <div class="cand-head"><span class="cid">${esc(g.id)}</span>
+      return `<details class="cand" data-keep="${esc(key)}" ${isOpen(key, false) ? "open" : ""}>
+        <summary class="cand-head"><span class="cid">${esc(g.id)}</span>
         <div class="concept">${esc(clip(g.concept, 150))}</div>
-        <div class="small muted">${g.rows.length} elements × ${docs.length} of ${scored.length} references that touch it</div></div>
+        <div class="small muted">no reference touches this candidate</div></summary>
+        <div class="cand-body">${empty("No reference touches this candidate", "Every evaluated document scored 0 on all of its elements.")}</div></details>`;
+    }
+    return `<details class="cand" data-keep="${esc(key)}" ${isOpen(key, false) ? "open" : ""}>
+      <summary class="cand-head"><span class="cid">${esc(g.id)}</span>
+        <div class="concept">${esc(clip(g.concept, 150))}</div>
+        <div class="small muted">${g.rows.length} elements × ${docs.length} of ${scored.length} references that touch it${
+          (() => { const hit = scored.filter((x) => x.hits > 0).length; return hit ? ` · ${hit} cover at least one element` : ""; })()}</div></summary>
       <div class="cand-body"><div class="tbl-wrap"><div class="tw"><table class="tbl matrix fixed">
         <thead><tr><th class="el-col" style="width:44%">Element</th>
           ${docs.map((d: any, i: number) => `<th class="doc-col" title="${esc(d.pub_num || "")} — ${esc(d.title || "")}">D${i + 1}</th>`).join("")}</tr></thead>
@@ -308,12 +389,12 @@ function matrixSection(cands: any[], checklist: any[], sr: any[]): string {
           <td>${esc(clip(d.title, 150))}</td>
           <td class="right num">${d.similarity_score ?? ""}</td></tr>`).join("")}</tbody></table></div>
       </div>
-    </div>`;
+    </details>`;
   }).join("");
 
-  return `<section class="section">
+  return `<section class="section" id="sec-evidence">
     <header><h2>Evidence matrix</h2>
-      <span class="hint">the cell is the evaluator's score (2 full · 1 partial · · none); shaded means the adjudicator counted it as covered — score ≥ 1 with a verified quote. Click a cell for the quote.</span>
+      <span class="hint">one grid per candidate, closed until opened — the cell is the evaluator's score (2 full · 1 partial · · none); shaded means the adjudicator counted it as covered — score ≥ 1 with a verified quote. Click a cell for the quote.</span>
       ${sr.length > MAX_DOCS ? `<button class="icon-btn" id="toggle-docs">${showAllDocs ? "Show the top references only" : "Show every reference that touches a candidate"}</button>` : ""}
     </header>
     ${blocks}
@@ -325,11 +406,11 @@ function matrixSection(cands: any[], checklist: any[], sr: any[]): string {
 function draftSection(dc: any): string {
   const claims: any[] = dc.claims || [];
   if (!claims.length) {
-    return `<section class="section"><header><h2>Draft claims</h2></header>
+    return `<section class="section" id="sec-draft"><header><h2>Draft claims</h2></header>
       ${empty("No draft claims", `Strategy: ${esc(dc.strategy || "none")}.`)}</section>`;
   }
   const flags: any[] = ((dc.definiteness || {}).flags || []).filter((f: any) => !f.fixed);
-  return `<section class="section">
+  return `<section class="section" id="sec-draft">
     <header><h2>Draft claims (${claims.length})</h2>
       <span class="hint">strategy <code>${esc(dc.strategy || "")}</code>${dc.candidate_id ? ` · from ${esc(dc.candidate_id)}` : ""}</span>
       ${flags.length ? `<span class="pill pill-failed">${flags.length} open 112(b)</span>` : ""}
@@ -354,7 +435,7 @@ function draftSection(dc: any): string {
 
 function editsSection(edits: any[]): string {
   if (!edits.length) return "";
-  return `<section class="section">
+  return `<section class="section" id="sec-edits">
     <header><h2>Reviewer edits (${edits.length})</h2><span class="hint">changes made at the phase gates</span></header>
     <div class="tbl-wrap"><div class="tw"><table class="tbl">
       <thead><tr><th>Phase</th><th>Kind</th><th>Id</th><th>Op</th><th style="min-width:14rem">Before</th><th style="min-width:14rem">After</th></tr></thead>
@@ -390,7 +471,7 @@ function costSection(sr: any[]): string {
     ["LLM events on the timeline", num(llmEvents, "0"), "calls the event stream announced; the pipeline makes more than it announces"],
   ];
 
-  return `<section class="section">
+  return `<section class="section" id="sec-cost">
     <header><h2>Cost and call counts</h2>
       <span class="hint">counts are real; the dollar figure is an estimate — app/llm.py meters tokens per model but no endpoint exposes them</span></header>
     <div class="stack">

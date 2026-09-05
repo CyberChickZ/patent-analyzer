@@ -371,6 +371,30 @@ details.box > .box-body { padding: .6rem; }
 tr.flagged { background: var(--danger-soft); }
 .flag { color: var(--danger); font-size: .73rem; margin-top: .2rem; }
 
+/* ─── Section nav (results) ─── */
+
+.secnav {
+  position: sticky; top: var(--topbar-h, 3rem); z-index: 20;
+  display: flex; gap: .15rem; flex-wrap: wrap;
+  margin: 0 0 1rem; padding: .35rem 0;
+  background: var(--bg); border-bottom: 1px solid var(--border);
+}
+.secnav a {
+  font-size: .76rem; font-weight: 500; text-decoration: none; white-space: nowrap;
+  color: var(--text-3); padding: .22rem .55rem; border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+}
+.secnav a:hover { background: var(--surface-2); color: var(--text); }
+.secnav a.on { background: var(--accent-soft); color: var(--accent-ink); border-color: var(--accent); }
+
+/* the nav is sticky too, so an anchor must clear both it and the topbar */
+.section[id^="sec-"] { scroll-margin-top: calc(var(--topbar-h, 3rem) + 2.6rem); }
+
+@media (max-width: 640px) {
+  .secnav { gap: .1rem; padding: .3rem 0; }
+  .secnav a { font-size: .72rem; padding: .2rem .4rem; }
+}
+
 /* ─── Candidate blocks (results) ─── */
 
 .cand { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); margin-bottom: 1rem; overflow: hidden; }
@@ -378,6 +402,19 @@ tr.flagged { background: var(--danger-soft); }
 .cand > .cand-head .cid { font-family: var(--font-mono); font-size: .72rem; color: var(--accent-ink); font-weight: 500; }
 .cand > .cand-head .concept { font-family: var(--font-head); font-weight: 600; font-size: .88rem; margin-top: .1rem; }
 .cand > .cand-body { padding: .75rem; }
+
+/* .cand is a <details> now: the head is its summary, with a caret of our own
+   because the native marker sits badly next to a two-line heading. */
+details.cand > summary.cand-head { cursor: pointer; list-style: none; position: relative; padding-left: 1.65rem; }
+details.cand > summary.cand-head::-webkit-details-marker { display: none; }
+details.cand > summary.cand-head::before {
+  content: "▸"; position: absolute; left: .6rem; top: .5rem;
+  color: var(--text-2); font-size: .95rem; line-height: 1.2;
+}
+details.cand[open] > summary.cand-head::before { content: "▾"; }
+details.cand:not([open]) > summary.cand-head { border-bottom: none; }
+details.cand > summary.cand-head:hover { background: var(--neutral-soft); }
+details.cand > summary.cand-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 .cell-score { text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; }
 .cell-score[data-cell] { cursor: pointer; }

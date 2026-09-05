@@ -36,6 +36,17 @@ root.innerHTML = `
 `;
 
 const view = document.getElementById("view")!;
+const topbar = document.querySelector<HTMLElement>(".topbar")!;
+
+/** Anything else that wants to stick below the topbar needs its height, and it
+ *  is not a constant: the nav wraps onto its own row under 640px. */
+function syncTopbarHeight(): void {
+  document.documentElement.style.setProperty("--topbar-h", `${topbar.offsetHeight}px`);
+}
+syncTopbarHeight();
+window.addEventListener("resize", syncTopbarHeight);
+if (typeof ResizeObserver !== "undefined") new ResizeObserver(syncTopbarHeight).observe(topbar);
+
 const nav = document.getElementById("nav")!;
 const themeBtn = document.getElementById("theme-btn")!;
 const authSlot = document.getElementById("auth-slot")!;
