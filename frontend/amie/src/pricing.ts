@@ -6,15 +6,17 @@
  *  deciding whether to spend the money. So the figures come from
  *  `GET /api/quota` or they do not appear at all.
  *
- *  That endpoint is N1's and is not live yet. Until it is, `loadQuota()`
- *  resolves to a Quota with `available: false` and the reason, and every caller
- *  renders placeholders plus that reason. When it lands, this file is where it
- *  connects and nothing else has to change.
+ *  The endpoint is live (fb44725). It answers with `prices.models[]` —
+ *  `{model, input_usd_per_mtok, output_usd_per_mtok, note}` — plus
+ *  `prices.bigquery_usd_per_tib`, `prices.embedding_usd_per_mtok` and a
+ *  `review_by` date that says when the card was last checked against Vertex's
+ *  published prices. When it cannot be reached, `loadQuota()` resolves to
+ *  `available: false` with the reason, and every caller renders em dashes plus
+ *  that reason rather than a number nobody has checked.
  *
- *  The shape below is deliberately forgiving — snake_case or camelCase, missing
- *  sections, numbers as strings — because it is being written against an
- *  endpoint that does not exist yet and guessing its exact schema would be the
- *  same mistake as guessing the prices. */
+ *  The reader stays forgiving about key spelling because backend/quota.py and
+ *  this file are edited by different people on different days, and a renamed
+ *  key should cost one row, not the panel. */
 
 export interface Rate {
   model: string;
@@ -28,12 +30,25 @@ export interface OtherRate {
   price: string;
 }
 
+export interface QuotaSource {
+  name: string;
+  remaining: number | null;
+  limit: number | null;
+  unit: string;
+  exhausted: boolean;
+}
+
 export interface Quota {
   available: boolean;
   /** why there are no numbers, when there are none */
   reason?: string;
+  /** when the backend last checked this card against the published prices */
+  reviewBy?: string;
+  priceNote?: string;
   rates: Rate[];
   other: OtherRate[];
+  sources: QuotaSource[];
+  /** this endpoint does not answer it; see GET /api/jobs/{id}/usage */
   jobCost: { low: number; high: number } | null;
 }
 
@@ -63,28 +78,52 @@ function pick(o: any, ...keys: string[]): any {
 }
 
 function parseQuota(d: any): Quota {
-  const rates: Rate[] = (pick(d, "rates", "models", "rate_card", "rateCard") || []).map((r: any) => ({
+  const prices = pick(d, "prices", "rate_card", "rateCard") || {};
+  const rates: Rate[] = (pick(prices, "models", "rates") || pick(d, "models", "rates") || []).map((r: any) => ({
     model: String(pick(r, "model", "name") ?? ""),
-    inPerM: n(pick(r, "inPerM", "in_per_m", "input_per_m", "input", "in")),
-    outPerM: n(pick(r, "outPerM", "out_per_m", "output_per_m", "output", "out")),
+    inPerM: n(pick(r, "input_usd_per_mtok", "inPerM", "in_per_m", "input_per_m", "input")),
+    outPerM: n(pick(r, "output_usd_per_mtok", "outPerM", "out_per_m", "output_per_m", "output")),
     note: pick(r, "note", "notes"),
   })).filter((r: Rate) => r.model);
-  const other: OtherRate[] = (pick(d, "other", "other_rates", "otherRates", "services") || []).map((r: any) => ({
-    item: String(pick(r, "item", "name", "service") ?? ""),
-    price: String(pick(r, "price", "cost", "rate") ?? ""),
-  })).filter((r: OtherRate) => r.item);
-  const jc = pick(d, "jobCost", "job_cost", "per_job", "perJob");
-  const low = n(pick(jc || {}, "low", "min", "p10"));
-  const high = n(pick(jc || {}, "high", "max", "p90"));
+
+  // Everything metered per something other than a token, spelled out from the
+  // backend's numbers — formatting only, no arithmetic and no second opinion.
+  const other: OtherRate[] = [];
+  const bq = n(pick(prices, "bigquery_usd_per_tib", "bq_usd_per_tib"));
+  if (bq !== null) other.push({ item: "BigQuery", price: `$${bq.toFixed(2)} / TiB scanned` });
+  const emb = n(pick(prices, "embedding_usd_per_mtok", "embeddings_usd_per_mtok"));
+  if (emb !== null) other.push({ item: "Embeddings", price: `$${emb.toFixed(3)} / 1M tokens` });
+  for (const r of pick(d, "other", "other_rates", "services") || []) {
+    const item = String(pick(r, "item", "name", "service") ?? "");
+    if (item) other.push({ item, price: String(pick(r, "price", "cost", "rate") ?? "") });
+  }
+
+  // Not answered by this endpoint: a per-job figure is per job, and lives on
+  // GET /api/jobs/{id}/usage. Left null rather than estimated here.
+  const jc = pick(d, "jobCost", "job_cost", "per_job") || {};
+  const low = n(pick(jc, "low", "min"));
+  const high = n(pick(jc, "high", "max"));
+
+  const sources: QuotaSource[] = (pick(d, "sources") || []).map((r: any) => ({
+    name: String(pick(r, "name", "source") ?? ""),
+    remaining: n(pick(r, "remaining", "left")),
+    limit: n(pick(r, "limit", "cap")),
+    unit: String(pick(r, "unit") ?? ""),
+    exhausted: !!pick(r, "exhausted"),
+  })).filter((r: QuotaSource) => r.name);
+
   return {
-    available: rates.length > 0 || other.length > 0 || (low !== null && high !== null),
+    available: rates.length > 0 || other.length > 0,
+    reviewBy: pick(prices, "review_by", "reviewBy") || undefined,
+    priceNote: pick(prices, "note") || undefined,
     rates,
     other,
+    sources,
     jobCost: low !== null && high !== null ? { low, high } : null,
   };
 }
 
-const EMPTY = (reason: string): Quota => ({ available: false, reason, rates: [], other: [], jobCost: null });
+const EMPTY = (reason: string): Quota => ({ available: false, reason, rates: [], other: [], sources: [], jobCost: null });
 
 let cached: Promise<Quota> | null = null;
 
@@ -114,7 +153,10 @@ export function loadQuota(force = false): Promise<Quota> {
 
 /** The one line that goes under a table with nothing in it. */
 export function quotaNote(q: Quota): string {
-  return q.available
-    ? "Live from GET /api/quota."
-    : `${q.reason || "No prices available."} Nothing on this page is a hardcoded price.`;
+  if (!q.available) return `${q.reason || "No prices available."} Nothing on this page is a hardcoded price.`;
+  return [
+    "Live from GET /api/quota.",
+    q.priceNote || "",
+    q.reviewBy ? `Backend rechecks these against the published prices by ${q.reviewBy}.` : "",
+  ].filter(Boolean).join(" ");
 }

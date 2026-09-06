@@ -475,6 +475,9 @@ function editsSection(edits: any[]): string {
 
 // ─── Cost and call counts ───
 
+const emptyQuota = (): Quota => ({ available: false, rates: [], other: [], sources: [], jobCost: null });
+
+
 function costSection(sr: any[]): string {
   const s = (R.search || {}).summary || {};
   const rounds: any[] = s.loop_rounds || [];
@@ -504,7 +507,7 @@ function costSection(sr: any[]): string {
         <div><div class="k">Estimated for this job</div><div class="v">${jobCostRange(QUOTA)}</div></div>
         <div><div class="k">Documents evaluated</div><div class="v">${num((R.eval_stats || {}).evaluated ?? sr.length)}</div></div>
         <div><div class="k">Quotes verified</div><div class="v">${num(((R.eval_stats || {}).quote_stats || {}).verified)}<small> of ${num(((R.eval_stats || {}).quote_stats || {}).quotes)}</small></div></div>
-        <div><div class="k">SerpAPI spend</div><div class="v">${esc(QUOTA?.other.find((o) => /serp/i.test(o.item))?.price || EMDASH)}<small> ${QUOTA?.available ? "from /api/quota" : "no rate card"}</small></div></div>
+        <div><div class="k">BigQuery</div><div class="v">${esc(QUOTA?.other.find((o) => /bigquery/i.test(o.item))?.price || EMDASH)}<small> ${QUOTA?.available ? "from /api/quota" : "no rate card"}</small></div></div>
       </div>
       <div class="tbl-wrap"><div class="tw"><table class="tbl">
         <thead><tr><th>What was called</th><th class="right">Count</th><th>Note</th></tr></thead>
@@ -517,7 +520,7 @@ function costSection(sr: any[]): string {
             ? (QUOTA?.rates || []).map((r) => `<tr><td class="mono">${esc(r.model)}</td><td class="right num">${perM(r.inPerM)}</td><td class="right num">${perM(r.outPerM)}</td></tr>`).join("")
             : `<tr><td class="mono muted">${EMDASH}</td><td class="right num muted">${EMDASH}</td><td class="right num muted">${EMDASH}</td></tr>`}</tbody>
         </table></div>
-        <div class="small muted">${esc(quotaNote(QUOTA || { available: false, rates: [], other: [], jobCost: null }))}</div>
+        <div class="small muted">${esc(quotaNote(QUOTA || emptyQuota()))}</div>
         ${Object.keys(pv).length ? `<div class="subhead">Prompt versions used</div><div class="tw"><table class="tbl">
           <thead><tr><th>Prompt</th><th class="right">Version</th></tr></thead>
           <tbody>${Object.entries(pv).map(([k, v]) => `<tr><td class="mono tiny">${esc(k)}</td><td class="right num">${esc(v)}</td></tr>`).join("")}</tbody>

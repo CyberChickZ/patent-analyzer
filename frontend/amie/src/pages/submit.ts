@@ -1,7 +1,7 @@
 import { listJobs, submitJob, deleteJob, type JobSummary } from "../api";
 import { esc, pill, fmtDate, errorBox, empty, on } from "../ui";
 import { PAUSE_ORDER, PAUSE_LABEL } from "../phases";
-import { loadQuota, jobCostRange, perM, quotaNote, fmtUSD, EMDASH, type Quota } from "../pricing";
+import { loadQuota, jobCostRange, perM, quotaNote, EMDASH, type Quota } from "../pricing";
 import { go, rememberJob } from "../main";
 
 const INPUT_MODES = [
@@ -185,7 +185,6 @@ export function renderSubmit(host: HTMLElement): void {
 function budgetBody(q: Quota | null): string {
   const rates = q?.rates || [];
   const other = q?.other || [];
-  const mid = q?.jobCost ? fmtUSD((q.jobCost.low + q.jobCost.high) / 2) : EMDASH;
   // one placeholder row so the table is a table, not a gap
   const rows = rates.length
     ? rates.map((r) => `<tr><td class="mono">${esc(r.model)}</td>
@@ -197,10 +196,10 @@ function budgetBody(q: Quota | null): string {
        <td class="right num muted">${EMDASH}</td><td class="small muted">${q ? "no rate card" : "asking the backend…"}</td></tr>`;
   return `
     <div class="budget">
-      <div><div class="k">Estimated per job</div><div class="v" id="budget-job">${jobCostRange(q)}</div></div>
-      <div><div class="k">Midpoint</div><div class="v">${mid}</div></div>
+      <div><div class="k">Estimated per job</div><div class="v" id="budget-job">${jobCostRange(q)}<small> ${q?.jobCost ? "" : "per-job spend is per job: <code>/api/jobs/{id}/usage</code>"}</small></div></div>
       <div><div class="k">Reruns</div><div class="v" id="budget-rerun">${EMDASH}<small> extra</small></div></div>
       <div><div class="k">External calls</div><div class="v">${esc(other[0]?.price || EMDASH)}<small> ${esc(other[0]?.item || "")}</small></div></div>
+      <div><div class="k">Rate card</div><div class="v">${q?.reviewBy ? `checked to<small> ${esc(q.reviewBy)}</small>` : EMDASH}</div></div>
     </div>
     <div class="tbl-wrap"><div class="tw"><table class="tbl">
       <thead><tr><th>Model</th><th class="right">Input / 1M</th><th class="right">Output / 1M</th><th>Note</th></tr></thead>
