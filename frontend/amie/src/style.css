@@ -508,3 +508,14 @@ details.cand > summary.cand-head:focus-visible { outline: 2px solid var(--accent
   table.tbl th, table.tbl td { padding: .35rem .4rem; }
   .budget { grid-template-columns: repeat(2, 1fr); }
 }
+
+/* ─── Quota meters ─── */
+
+.meter {
+  display: block; height: .4rem; min-width: 4.5rem; border-radius: 999px;
+  background: var(--neutral-soft); border: 1px solid var(--border); overflow: hidden;
+}
+.meter > span { display: block; height: 100%; background: var(--accent); }
+.meter.m-warn > span { background: var(--warn); }
+.meter.m-danger > span { background: var(--danger); }
+tr.is-spent > td:first-child { box-shadow: inset 2px 0 0 var(--danger); }

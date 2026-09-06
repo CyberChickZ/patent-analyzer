@@ -190,6 +190,84 @@ export const patchPhaseState = (id: string, edits: Record<string, unknown>) =>
 export const resumeJob = (id: string, action: "continue" | "rerun_phase", comment = "") =>
   sendJson<any>(`/api/jobs/${encodeURIComponent(id)}/resume`, "POST", { action, comment });
 
+// ─── Ledger & quota ───
+
+export interface LedgerRow {
+  phase: string;
+  kind: "model" | "embedding" | "bigquery" | "external";
+  name: string;
+  calls: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  thought_tokens?: number;
+  gib_billed?: number;
+  seconds: number;
+  cost_usd: number;
+  retries: number;
+  failures: number;
+  degradations: number;
+  note?: string;
+}
+
+export interface Ledger {
+  job_id: string;
+  generated_at: string;
+  totals: {
+    cost_usd: number; seconds: number; llm_calls: number; external_calls: number;
+    failures: number; degradations: number; retries: number;
+  };
+  most_expensive: { phase: string; cost_usd: number; share_of_total: number; seconds: number; driver: string } | null;
+  rows: LedgerRow[];
+  incidents: { phase: string; source: string; kind: string; detail: string }[];
+  prices: Record<string, any>;
+  caveats: string[];
+}
+
+export const getLedger = (id: string) =>
+  json<{ job_id: string; ledger: Ledger }>(`/api/jobs/${encodeURIComponent(id)}/usage`);
+
+/** One external source's headroom. Nulls are real: a source with no counter
+ *  (a rate limit rather than an allowance) reports none rather than a zero. */
+export interface QuotaRow {
+  source: string;
+  name: string;
+  used: number | null;
+  cap: number | null;
+  remaining: number | null;
+  unit: string;
+  period: "month" | "week" | "minute" | "none";
+  resets_at: string | null;
+  resets_in_hours: number | null;
+  exhausted: boolean;
+  limits: string[];
+  note: string;
+  error: string;
+  expires_on: string | null;
+  expires_in_days: number | null;
+}
+
+export interface RateCard {
+  source: string;
+  review_by: string;
+  models: { model: string; input_usd_per_mtok: number; output_usd_per_mtok: number; note?: string }[];
+  embedding_usd_per_mtok: number;
+  bigquery_usd_per_tib: number;
+  note: string;
+}
+
+export interface QuotaSnapshot {
+  generated_at: string;
+  month: string;
+  week: string;
+  sources: QuotaRow[];
+  prices: RateCard;
+  exhausted: string[];
+  expiring_soon: string[];
+  note: string;
+}
+
+export const getQuota = () => json<QuotaSnapshot>("/api/quota");
+
 // ─── Prompt registry ───
 
 export const listPrompts = () => json<PromptSummary[]>("/api/prompts");
