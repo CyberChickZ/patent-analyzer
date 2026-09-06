@@ -151,6 +151,22 @@ async def _get(path: str, params: dict | None = None, kind: str = "metadata",
     return payload, None
 
 
+_KIND = __import__("re").compile(r"^([A-Z]{2})?(\d+)([A-Z]\d?)?$")
+
+
+def pub_digits(x) -> str:
+    r"""The number part of a publication or patent number, WITHOUT the kind
+    code's digit. Stripping every non-digit turns "US10963506B2" into
+    "109635062" and it then matches nothing in ODP, which spells that patent
+    "10963506" — so the file wrapper, the SRNT search record, the 892/1449
+    citation lists and the drawings were unreachable for every number in the
+    pool carrying a B2 / B1 / A1 suffix (found by the N4 probe, 2026-09-18:
+    'US10963506B2' -> [], 'US10963506' -> ['US10963506'])."""
+    t = "".join(ch for ch in str(x or "").upper() if ch.isalnum())
+    m = _KIND.match(t)
+    return m.group(2) if m else "".join(ch for ch in t if ch.isdigit())
+
+
 def _cpc_prefix(cpc: str) -> str:
     r"""CPC symbols are stored right-padded ("H04N   7/15", "H04N  70/00"), so a
     main group is a prefix match on the padded string with every space escaped.
@@ -273,9 +289,7 @@ async def find_many_by_publication(pub_nums: list[str], limit: int = 100) -> dic
     Lucene OR query — the per-number form costs two calls each, which at
     60 req/min is a minute for twenty seeds. Keys are the input spellings that
     matched. Non-US numbers are skipped: ODP only holds US applications."""
-    def _d(x) -> str:
-        return "".join(ch for ch in str(x or "") if ch.isdigit())
-
+    _d = pub_digits
     us = [p for p in dict.fromkeys(pub_nums) if p and p.upper().startswith("US")][:limit]
     if not us:
         return {}
@@ -323,8 +337,7 @@ async def find_by_publication(pub_num: str) -> tuple[dict | None, str | None]:
     n = n[2:] if n.startswith("US") else n
     n = n.rstrip("AB").rstrip("0123456789") and n or n
     for field in ("applicationMetaData.earliestPublicationNumber", "applicationMetaData.patentNumber"):
-        digits = "".join(ch for ch in pub_num if ch.isdigit())
-        value = pub_num.upper() if field.endswith("PublicationNumber") else digits
+        value = pub_num.upper() if field.endswith("PublicationNumber") else pub_digits(pub_num)
         data, err = await _get("/patent/applications/search", {"q": f'{field}:"{value}"', "limit": 1})
         if isinstance(data, dict) and (data.get("patentFileWrapperDataBag") or []):
             return data["patentFileWrapperDataBag"][0], None
