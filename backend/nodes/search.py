@@ -25,6 +25,7 @@ _CHANNEL_TIMEOUT_OVERRIDES = {
     "bigquery_patents": 900.0,   # dry-run + SEARCH-indexed scan
     "serpapi_patents": 900.0,    # 4 retries × 60 s + backoff [10,30,60,90] per query
     "serpapi_scholar": 900.0,
+    "fulltext_bq": 900.0,        # ceil(delivered/300) bucket-pruned claims lookups
 }
 
 # Total time allowed for the prior-art PDF downloads, all documents together.
@@ -495,7 +496,42 @@ async def search_node(state: GraphState) -> dict:
         filled = sum(1 for d in need_abs if (d.get("abstract") or "").strip())
         _event("info", f"OpenAlex abstract enrichment: {filled}/{len(need_abs)} filled")
 
-    # Download top PDFs
+    # ── Deep-read text ──
+    # Our own BigQuery copy first. A prior-art PDF download succeeded 0-6 times
+    # out of 30 on the M2 e2e runs (mostly HTTP 503), and every document it
+    # missed reached Phase 4 as `no_content` — counted as "checked" while
+    # nothing had been read. The patents in `amie_patents` do not depend on a
+    # third party being up: title + abstract from `pubs`, claims_text from
+    # `claims` (US only — there is no description column anywhere in the
+    # dataset, see bigquery_patents.hydrate_full_text).
+    ft_t0 = _time.monotonic()
+    ft_stats: dict = {}
+    try:
+        from patent_analyzer.recall.bigquery_patents import hydrate_full_text
+        ft_stats = await asyncio.wait_for(hydrate_full_text(ranked),
+                                          timeout=_channel_timeout("fulltext_bq"))
+    except asyncio.TimeoutError:
+        ft_stats = {"errors": [f"no result within {_channel_timeout('fulltext_bq'):.0f}s"]}
+        _event("channel_timeout", "fulltext_bq: timed out — the deep read falls back to PDFs and abstracts")
+    except Exception as exc:
+        ft_stats = {"errors": [f"{type(exc).__name__}: {exc}"[:200]]}
+        _event("channel_crashed", f"fulltext_bq: {type(exc).__name__}: {exc}")
+    ft_stats["seconds"] = round(_time.monotonic() - ft_t0, 1)
+    n_claims = int(ft_stats.get("with_claims", 0))
+    _event("info", f"BigQuery full text: claims for {n_claims}/{ft_stats.get('asked', 0)} patent candidates "
+                   f"in {ft_stats.get('chunks', 0)} chunk(s), {ft_stats['seconds']:.0f}s")
+    channel_health.append({
+        "channel": "fulltext_bq",
+        "status": "errored" if ft_stats.get("errors") and not n_claims else ("ok" if n_claims else "empty"),
+        "n": n_claims, "seconds": ft_stats["seconds"],
+        "detail": (ft_stats.get("errors") or [""])[0][:200] if ft_stats.get("errors") else
+                  f"claims for {n_claims} of {ft_stats.get('asked', 0)} patent candidates "
+                  f"(amie_patents.claims is US-only and has no description column)",
+        "errors": [str(e)[:160] for e in (ft_stats.get("errors") or [])[:5]]})
+
+    # PDFs for what BigQuery cannot serve: papers, and patents with no claims
+    # text. Downloading a PDF for a patent whose claims we already hold buys
+    # nothing and costs up to 60 s of the shared budget.
     job_dir = Path(output_dir)
     job_dir.mkdir(parents=True, exist_ok=True)
     MAX_DOWNLOADS = 30
@@ -505,9 +541,19 @@ async def search_node(state: GraphState) -> dict:
     # back to the abstract), so they get a shared budget and stop when it runs out.
     dl_t0 = _time.monotonic()
     dl_skipped = 0
-    for i, doc in enumerate(ranked[:MAX_DOWNLOADS]):
+    dl_not_needed = 0
+    dl_no_url = 0
+    dl_failed = 0
+    need_pdf = []
+    for i, doc in enumerate(ranked):
+        if (doc.get("claims_text") or "").strip():
+            dl_not_needed += 1
+            continue
+        need_pdf.append((i, doc))
+    for i, doc in need_pdf[:MAX_DOWNLOADS]:
         pdf_url = recall_pool.resolve_pdf_url(doc)
         if not pdf_url:
+            dl_no_url += 1
             continue
         if _time.monotonic() - dl_t0 > _PDF_DOWNLOAD_BUDGET_S:
             dl_skipped += 1
@@ -518,9 +564,13 @@ async def search_node(state: GraphState) -> dict:
             if local:
                 doc["local_pdf"] = local
                 download_count += 1
+            else:
+                dl_failed += 1
         except Exception:
-            pass
-    _event("info", f"Downloaded {download_count}/{min(len(ranked), MAX_DOWNLOADS)} PDFs")
+            dl_failed += 1
+    _event("info", f"Downloaded {download_count}/{min(len(need_pdf), MAX_DOWNLOADS)} PDFs "
+                   f"({dl_not_needed} documents already had BigQuery claims, {dl_no_url} offered no URL, "
+                   f"{dl_failed} failed)")
     if dl_skipped:
         _event("channel_limited", f"pdf_download: {_PDF_DOWNLOAD_BUDGET_S:.0f}s budget spent, "
                                   f"{dl_skipped} PDFs not fetched (those documents are evaluated from their abstract)")
@@ -528,6 +578,14 @@ async def search_node(state: GraphState) -> dict:
                                "seconds": round(_time.monotonic() - dl_t0, 1),
                                "detail": f"{dl_skipped} downloads skipped after the "
                                          f"{_PDF_DOWNLOAD_BUDGET_S:.0f}s budget", "errors": []})
+    elif need_pdf and not download_count:
+        # Silence here used to read exactly like a clean run. It is not one:
+        # every one of these documents reaches Phase 4 with an abstract at best.
+        channel_health.append({"channel": "pdf_download", "status": "errored", "n": 0,
+                               "seconds": round(_time.monotonic() - dl_t0, 1),
+                               "detail": f"0 of {min(len(need_pdf), MAX_DOWNLOADS)} PDF downloads succeeded "
+                                         f"({dl_failed} failed, {dl_no_url} offered no URL) — those documents "
+                                         f"are evaluated from their abstract or not at all", "errors": []})
 
     patent_count = sum(1 for d in all_docs if d.get("match_type") == "Patent")
     paper_count = sum(1 for d in all_docs if d.get("match_type") != "Patent")
@@ -543,6 +601,24 @@ async def search_node(state: GraphState) -> dict:
             "total_unique": len(all_docs),
             "active_channels": len([v for v in channel_results.values() if v]),
             "downloaded": download_count,
+            "delivered": len(ranked),
+            # what the deep read will actually have to read, per document
+            "text_source": {
+                "bq_claims": sum(1 for d in ranked if (d.get("claims_text") or "").strip()),
+                "pdf": download_count,
+                "abstract_only": sum(1 for d in ranked
+                                     if not (d.get("claims_text") or "").strip()
+                                     and not d.get("local_pdf")
+                                     and len((d.get("abstract") or d.get("snippet") or "").strip()) >= 120),
+                "nothing": sum(1 for d in ranked
+                               if not (d.get("claims_text") or "").strip()
+                               and not d.get("local_pdf")
+                               and len((d.get("abstract") or d.get("snippet") or "").strip()) < 120),
+            },
+            "fulltext_bq": ft_stats,
+            "pdf_download": {"attempted": min(len(need_pdf), MAX_DOWNLOADS), "ok": download_count,
+                             "failed": dl_failed, "no_url": dl_no_url,
+                             "skipped_budget": dl_skipped, "not_needed": dl_not_needed},
             "pool": [{"pub_num": d.get("pub_num", ""), "sources": d.get("sources", []),
                       "match_type": d.get("match_type", "")} for d in all_docs],
             "loop_rounds": loop_stats.get("rounds", []) if loop_stats.get("mode") != "moves" else [],

@@ -673,3 +673,82 @@ async def fetch_cited_papers(patent_pubs: list[str], max_gib: float = 5.0) -> di
             "oa_id": r.oa_id, "reftype": r.reftype or "", "confscore": int(r.confscore or 0),
             "wherefound": r.wherefound or ""})
     return out
+
+
+# ── Deep-read text source ──────────────────────────────────────────────────
+#
+# What we actually have. Measured on amie_patents, 2026-09-18:
+#
+#   pubs       150,176,247 rows / 130.7 GiB — bucket, publication_number,
+#              family_id, country_code, priority_date, publication_date,
+#              filing_date, kind_code, title, abstract, cpc_codes
+#   claims      17,792,253 rows / 111.9 GiB — bucket, publication_number,
+#              claims_text.  `SELECT SUBSTR(publication_number,1,2), COUNT(*)`
+#              returns exactly one row: US.  17,792,253 of the 17,797,011 US
+#              publications in `pubs` (99.97%); zero for CN/JP/EP/KR/WO/DE/…
+#
+# There is **no description / specification column in any table of the
+# dataset**.  So the best text this pipeline can put in front of the evaluator,
+# without leaving our own data, is:
+#
+#   US publication      -> title + abstract + claims_text
+#   non-US publication  -> title + abstract only
+#
+# That is a real limit on §102/§103 reasoning: an element disclosed only in the
+# spec and not claimed will not be found this way.  It is written into the
+# report rather than papered over (report_sections.read_coverage_*).
+FULLTEXT_CHUNK = int(os.getenv("BQ_FULLTEXT_CHUNK", "300"))
+
+
+def _is_patent_doc(doc: dict) -> bool:
+    import re
+    if doc.get("match_type") == "Patent":
+        return True
+    return bool(re.match(r"^[A-Z]{2}[-\s]?\d", (doc.get("pub_num") or "").upper()))
+
+
+async def hydrate_full_text(docs: list[dict], chunk: int | None = None) -> dict:
+    """Fill `claims_text` (and any missing abstract) on patent docs from our own
+    bucketed copy, so the deep read does not depend on a PDF download.
+
+    Chunked at `FULLTEXT_CHUNK` publications per query: 300 claims rows measured
+    17.4 GiB, and the single-query ceiling is 30 GiB.  Every chunk still goes
+    through `guarded_query`, so a chunk that would blow the budget is refused
+    rather than billed.
+
+    Returns counts, never raises: a chunk that fails leaves those docs as they
+    were and is reported in `errors`, because the caller's fallback (PDF, then
+    abstract, then nothing) is still valid.
+    """
+    chunk = chunk or FULLTEXT_CHUNK
+    stats = {"asked": 0, "chunks": 0, "hit": 0, "with_claims": 0, "errors": []}
+    want = [d for d in docs if _is_patent_doc(d)
+            and (d.get("pub_num") or "").strip()
+            and not (d.get("claims_text") or "").strip()]
+    if not want:
+        return stats
+    by_pub: dict[str, list[dict]] = {}
+    for d in want:
+        by_pub.setdefault(_canon_pub(d["pub_num"]), []).append(d)
+    pubs = list(by_pub)
+    stats["asked"] = len(pubs)
+    for i in range(0, len(pubs), chunk):
+        batch = pubs[i:i + chunk]
+        stats["chunks"] += 1
+        try:
+            got = await fetch_by_pub_nums(batch, with_claims=True)
+        except Exception as exc:
+            stats["errors"].append(f"{type(exc).__name__}: {exc}"[:200])
+            continue
+        for key, row in got.items():
+            for d in by_pub.get(key, []):
+                stats["hit"] += 1
+                claims = (row.get("claims_text") or "").strip()
+                if claims:
+                    d["claims_text"] = claims
+                    stats["with_claims"] += 1
+                if not (d.get("abstract") or "").strip() and row.get("abstract"):
+                    d["abstract"] = row["abstract"]
+                if not (d.get("title") or "").strip() and row.get("title"):
+                    d["title"] = row["title"]
+    return stats
