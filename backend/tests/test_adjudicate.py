@@ -249,3 +249,53 @@ def test_matrix_and_determination_cannot_disagree():
     green = h.count("#dcfce7")
     assert adj["per_doc_coverage"][0]["n_covered"] == 1
     assert green == 1, f"matrix painted {green} cells green; the determination counts 1"
+
+
+def test_rule_trace_names_the_mpep_section_and_admits_what_it_cannot_find():
+    """The §103 branches are screening flags, and the trace has to say so
+    requirement by requirement: coverage cannot establish a motivation to
+    combine (MPEP 2143.01) or a reasonable expectation of success (2143.02)."""
+    docs = [_doc("US-1", E[:2]), _doc("US-2", E[2:])]
+    adj = adjudicate(E, docs, single_partial_103=0.7)
+    by = {t["id"]: t for t in adj["rule_trace"]}
+    assert adj["label"] == "103" and adj["prima_facie"] is False
+    assert by["graham_a"]["mpep"] == "2141 II (A)" and by["graham_a"]["status"] == "met"
+    assert by["graham_b"]["mpep"] == "2141 II (B)" and by["graham_b"]["status"] == "met"
+    assert by["graham_c"]["status"] == "not_determined"          # level of ordinary skill
+    assert by["graham_objective"]["status"] == "not_determined"  # secondary considerations
+    assert by["rationale_a_1"]["mpep"] == "2143 I.A (1)" and by["rationale_a_1"]["status"] == "met"
+    for k in ("rationale_a_2", "rationale_a_3", "motivation", "expectation"):
+        assert by[k]["status"] == "not_determined", k
+    assert by["motivation"]["mpep"] == "2143.01" and by["expectation"]["mpep"] == "2143.02 I"
+    assert by["hindsight"]["mpep"] == "2142" and by["hindsight"]["status"] == "met"
+
+
+def test_a_102_trace_does_not_ask_for_analogous_art():
+    """MPEP 2131.05: non-analogous art is not germane to anticipation."""
+    adj = adjudicate(E, [_doc("US-1", E)])
+    by = {t["id"]: t for t in adj["rule_trace"]}
+    assert adj["label"] == "102"
+    assert by["anticipation"]["mpep"] == "2131" and by["analogous_not_required"]["mpep"] == "2131.05"
+    assert not any(t["id"].startswith("analogous:") for t in adj["rule_trace"])
+
+
+def test_analogous_art_proxy_never_says_not_analogous():
+    """A shared CPC subclass is a proxy for one of the two independent tests in
+    MPEP 2141.01(a) I. Failing it is not a finding that a reference is
+    non-analogous — "reasonably pertinent to the problem" is a separate test
+    that a classification cannot answer."""
+    from patent_analyzer.adjudicate import analogous_art
+    assert analogous_art({"cpc_codes": ["H04N   7/15"]}, ["H04N   7/14"])[0] == "met"
+    assert analogous_art({"cpc_codes": ["G06T   7/00"]}, ["H04N   7/14"])[0] == "not_determined"
+    assert analogous_art({}, ["H04N   7/14"])[0] == "not_determined"
+    assert analogous_art({"cpc_codes": ["G06T   7/00"]}, None)[0] == "not_determined"
+
+
+def test_a_103_trace_carries_one_analogous_row_per_reference_relied_on():
+    docs = [_doc("US-1", E[:2]), _doc("US-2", E[2:])]
+    docs[0]["cpc_codes"] = ["H04N   7/15"]
+    adj = adjudicate(E, docs, single_partial_103=0.7, invention_cpc=["H04N   7/14"])
+    rows = [t for t in adj["rule_trace"] if t["id"].startswith("analogous:")]
+    assert {t["id"] for t in rows} == {"analogous:US-1", "analogous:US-2"}
+    assert all(t["mpep"] == "2141.01(a) I" for t in rows)
+    assert next(t for t in rows if t["id"] == "analogous:US-1")["status"] == "met"

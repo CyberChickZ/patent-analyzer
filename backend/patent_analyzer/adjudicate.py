@@ -147,7 +147,8 @@ def greedy_cover(elements: list[str], doc_sets: list[tuple[str, set[str]]], need
 
 def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
                allow_missing: int = 0, max_combo: int = 3, min_score: int = 1,
-               require_quotes: bool = True, single_partial_103: float | None = None) -> dict:
+               require_quotes: bool = True, single_partial_103: float | None = None,
+               invention_cpc=None) -> dict:
     """Return {label, basis, risk, reason, n_elements, needed, per_doc_coverage, combo, params}.
     basis: "single" (102) | "combination" (103, union) | "primary_partial" (103, one reference >= single_partial_103) | "none".
 
@@ -167,7 +168,8 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
     if n == 0:
         return {"label": "ALLOW", "basis": "none", "risk": "related", "reason": "no elements to compare",
                 "n_elements": 0, "needed": 0, "best_single": "", "best_coverage": 0.0,
-                "per_doc_coverage": [], "combo": None, "params": params}
+                "per_doc_coverage": [], "combo": None, "params": params, "rule_trace": [],
+                "prima_facie": False}
 
     slack = max(allow_missing, int(math.floor(n * (1.0 - min_cover) + 1e-9)))
     needed = max(1, n - slack)
@@ -236,9 +238,146 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
     else:
         risk = "related"
 
-    return {"label": label, "basis": basis, "risk": risk, "reason": reason, "n_elements": n, "needed": needed,
-            "best_single": _key(best) if best else "", "best_coverage": best_cov,
-            "per_doc_coverage": per_doc, "combo": combo, "params": params}
+    adj = {"label": label, "basis": basis, "risk": risk, "reason": reason, "n_elements": n, "needed": needed,
+           "best_single": _key(best) if best else "", "best_coverage": best_cov,
+           "per_doc_coverage": per_doc, "combo": combo, "params": params}
+    adj["rule_trace"] = rule_trace(adj, elements, docs_results, invention_cpc)
+    adj["prima_facie"] = prima_facie(adj["rule_trace"])
+    return adj
+
+
+# ── MPEP rule trace ──────────────────────────────────────────────────────────
+# Every requirement an obviousness rejection has to satisfy, with the section
+# that imposes it and what this deterministic rule can actually say about it.
+# Three statuses, and "not_determined" is the honest one for most of §103:
+# the rule reads element coverage, and coverage cannot tell you whether a
+# person of ordinary skill would have combined two references.
+#
+# Quotations are from MPEP [R-01.2024] / [R-08.2017], extracted verbatim and
+# recorded with their section numbers in outputs/playbook/mpep.md.
+
+MET, NOT_MET, UNDET = "met", "not_met", "not_determined"
+
+
+def _subclasses(codes) -> set[str]:
+    return {str(c).replace(" ", "")[:4].upper() for c in (codes or []) if len(str(c).replace(" ", "")) >= 4}
+
+
+def analogous_art(doc: dict, invention_cpc) -> tuple[str, str]:
+    """MPEP 2141.01(a) I: a reference may support a §103 rejection only if it is
+    analogous art — "(1) ... from the same field of endeavor ... or (2) ...
+    reasonably pertinent to the problem faced by the inventor".
+
+    Only the first test has a deterministic proxy here: a shared CPC subclass.
+    That is a proxy for "same field of endeavor", not the test itself, and the
+    second test needs a judgment about the problem that no classification
+    carries. So a shared subclass answers `met` and everything else answers
+    `not_determined` — never `not_met`, because failing a proxy for one of two
+    independent tests is not a finding that a reference is non-analogous.
+    """
+    want = _subclasses(invention_cpc)
+    have = _subclasses(doc.get("cpc_codes") or (doc.get("raw") or {}).get("cpc"))
+    if not want or not have:
+        return UNDET, "no classification on the record for one side"
+    shared = sorted(want & have)
+    if shared:
+        return MET, f"same CPC subclass {', '.join(shared)} — a proxy for the same field of endeavor"
+    return UNDET, (f"no shared CPC subclass ({', '.join(sorted(have))} vs {', '.join(sorted(want))}); "
+                   "whether it is reasonably pertinent to the problem is not decided by classification")
+
+
+def _t(rid: str, mpep: str, requirement: str, status: str, finding: str) -> dict:
+    return {"id": rid, "mpep": mpep, "requirement": requirement, "status": status, "finding": finding}
+
+
+def rule_trace(adj: dict, elements: list, docs_results: list[dict] | None = None,
+               invention_cpc=None) -> list[dict]:
+    """What the determination rests on, requirement by requirement, with the
+    MPEP section for each — and, for the findings this rule cannot make, that
+    they were not made. `prima_facie` in the returned adjudication is False
+    whenever any required finding is missing, which for §103 is always: no set
+    of coverage numbers establishes a motivation to combine."""
+    n = int(adj.get("n_elements") or 0)
+    label = adj.get("label")
+    combo = adj.get("combo") or {}
+    per = adj.get("per_doc_coverage") or []
+    by_key = {(d.get("pub_num") or d.get("publication_number") or d.get("title") or ""): d
+              for d in (docs_results or []) if isinstance(d, dict)}
+    relied = list(combo.get("docs") or []) if label == "103" and adj.get("basis") == "combination" else \
+        ([adj["best_single"]] if adj.get("best_single") else [])
+    missing = [c for c in (combo.get("missing") if combo else None) or []]
+
+    out = [
+        _t("graham_a", "2141 II (A)", "Determining the scope and content of the prior art", MET,
+           f"{len(per)} references evaluated; each element counted as disclosed only where a verbatim "
+           f"quote was located in that reference's text"),
+        _t("graham_b", "2141 II (B)", "Ascertaining the differences between the claimed invention and the prior art",
+           MET, (f"{len(missing)} of {n} elements have no verified disclosure: " + "; ".join(m[:60] for m in missing[:4]))
+           if missing else f"all {n} elements are disclosed across the references relied on"),
+        _t("graham_c", "2141 II (C)", "Resolving the level of ordinary skill in the pertinent art", UNDET,
+           "no level of ordinary skill was resolved — nothing on this record establishes one"),
+        _t("graham_objective", "2141 II", "Evaluating objective evidence (commercial success, long-felt need, "
+           "failure of others, unexpected results)", UNDET,
+           "no objective evidence is before the system; an unfiled invention has no prosecution record"),
+        _t("hindsight", "2142", "Knowledge of applicant's disclosure must be put aside; the conclusion rests on "
+           "facts gleaned from the prior art", MET,
+           "the rule reads only each reference's own coverage and quotes; it never reads the invention back into them"),
+    ]
+
+    if label == "102":
+        out.append(_t("anticipation", "2131", "A single reference discloses each and every element of the claim",
+                      MET, str(adj.get("reason", ""))))
+        out.append(_t("analogous_not_required", "2131.05", "Non-analogous art is not germane to a §102 rejection",
+                      MET, "no analogous-art finding is needed for anticipation"))
+        return out
+
+    if label != "103":
+        out.append(_t("no_rejection", "2142", "A prima facie case must be supported by evidence", NOT_MET,
+                      str(adj.get("reason", ""))))
+        return out
+
+    for k in relied:
+        st, why = analogous_art(by_key.get(k) or {}, invention_cpc)
+        out.append(_t(f"analogous:{k}", "2141.01(a) I",
+                      f"{k} must be analogous art: same field of endeavor, or reasonably pertinent to the "
+                      f"problem faced by the inventor", st, why))
+    covered_all = not missing
+    out += [
+        _t("rationale_a_1", "2143 I.A (1)",
+           "A finding that the prior art included each element claimed, though not necessarily in a single "
+           "reference, the only difference being the lack of actual combination",
+           MET if covered_all else NOT_MET,
+           f"{combo.get('n_covered', adj.get('best_coverage', 0) and '')}/{n} elements disclosed across "
+           f"{len(relied)} reference(s)" if covered_all else
+           f"{len(missing)} element(s) are disclosed by no reference, so finding (1) is not made"),
+        _t("rationale_a_2", "2143 I.A (2)",
+           "A finding that one of ordinary skill could have combined the elements by known methods, each "
+           "element merely performing the same function as it does separately", UNDET,
+           "element coverage does not show how the references would be combined"),
+        _t("rationale_a_3", "2143 I.A (3)",
+           "A finding that one of ordinary skill would have recognised the results of the combination were "
+           "predictable", UNDET, "predictability of the combined result is not a coverage question"),
+        _t("motivation", "2143.01",
+           "A motivation to combine, explicit or implicit: market forces, design incentives, the interrelated "
+           "teachings of the references, a known need or problem, or the skilled person's background knowledge",
+           UNDET, "no reason to combine was found on this record"),
+        _t("expectation", "2143.02 I",
+           "A reasonable expectation of success, in addition to a reason to combine", UNDET,
+           "not established"),
+        _t("articulation", "2143",
+           "Clear articulation of the reason why the claimed invention would have been obvious; \"absent some "
+           "articulated rationale\" a combination being obvious is not a reason", UNDET,
+           "the report's §103 paragraph is written from this rule's output and states the same gaps"),
+    ]
+    return out
+
+
+def prima_facie(trace: list[dict]) -> bool:
+    """MPEP 2142: the rejection must be a prima facie case supported by
+    evidence. Every requirement has to be `met` — an undetermined finding is
+    not a finding, and 2143 I.E says in terms that if any of a rationale's
+    findings "cannot be made, then this rationale cannot be used"."""
+    return bool(trace) and all(t["status"] == MET for t in trace)
 
 
 def chart_columns(adj: dict, max_docs: int = 3) -> list[str]:
