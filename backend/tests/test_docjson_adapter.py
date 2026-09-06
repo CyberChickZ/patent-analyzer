@@ -67,14 +67,27 @@ def test_clean_doc_json_coerces_model_output():
     assert d["equations"] == [{"label": "1", "latex": "x=y"}] and d["references_count"] == 7
 
 
-def test_strip_related_work_json_drops_section_and_its_subsections():
-    from patent_analyzer.adapters.docjson import strip_related_work_json
+def test_cut_flat_drops_section_and_its_subsections():
+    import asyncio
+
+    import app.llm as llm
+    from patent_analyzer.adapters.manuscript import cut_flat
     doc = {**DOC, "sections": DOC["sections"][:1] + [
         {"heading": "2 Related Work", "level": 1, "paragraphs": ["Smith aligned by hand."]},
         {"heading": "2.1 Prior widgets", "level": 2, "paragraphs": ["Old widgets."]},
     ] + DOC["sections"][2:]}
-    out = strip_related_work_json(doc)
+
+    async def fake(title, sections):
+        assert [s["id"] for s in sections] == ["S1", "S2", "S2.1", "S3"]
+        return {"S2": {"verdict": "prior_art", "reason": "Smith's work", "prior_art_paragraphs": []}}
+
+    real, llm.classify_prior_art_sections = llm.classify_prior_art_sections, fake
+    try:
+        out, verdicts = asyncio.run(cut_flat(doc))
+    finally:
+        llm.classify_prior_art_sections = real
     assert [s["heading"] for s in out["sections"]] == ["1 Introduction", "3 Method"]
     assert out["dropped_sections"] == ["2 Related Work", "2.1 Prior widgets"]
+    assert verdicts["S2"]["verdict"] == "prior_art"
     assert doc["sections"][1]["heading"] == "2 Related Work"   # input untouched
     assert "Smith" not in render_doc_json(out)

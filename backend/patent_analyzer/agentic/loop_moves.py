@@ -77,7 +77,8 @@ async def run_moves(state: dict, serpapi_left, serpapi_take, event) -> tuple[lis
             rnd = (wide_stats.get("rounds") or [{}])[0]
             r.calls = len(rnd.get("queries") or [])
             r.note = (f"wide loop: {len(wide_cands)} candidates, {r.calls} queries; read {sel['read']} "
-                      f"({sel['must_read']} must-read, cut cos {sel['cut_cos']})")
+                      f"of {sel['in']} — {sel['read_per_tier']} from tiers {sel['tiers']} "
+                      f"(query top-{R.MUST_READ_QUERY_RANK} / must-read source / rest), cut cos {sel['cut_cos']}")
             r.select = sel
             results.append(r)
             cands0 += list(wide_cands)

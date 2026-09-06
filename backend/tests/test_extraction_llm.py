@@ -123,3 +123,39 @@ def test_extract_elements_feedback_and_parse_failure(monkeypatch):
     assert out["candidate_inventions"] == [] and "parsed" in out["error"]
     assert "FEEDBACK FROM YOUR PREVIOUS ATTEMPT" in seen["user"] and "quote not in doc" in seen["user"]
     assert asyncio.run(llm.extract_elements("DOC", [])) == {"candidate_inventions": []}
+
+
+def _patch_json(monkeypatch, reply, seen: dict):
+    async def fake_call_llm(system, user, max_tokens=llm.MAX_TOKENS, thinking_budget=0,
+                            response_schema=None, model=None):
+        seen["system"], seen["user"], seen["schema"] = system, user, response_schema
+        return reply if isinstance(reply, str) else json.dumps(reply)
+    monkeypatch.setattr(llm, "call_llm", fake_call_llm)
+
+
+SECTIONS = [{"id": "S1", "heading": "Introduction", "paragraphs": ["x" * 9000, "Here we introduce the widget."]},
+            {"id": "S2", "heading": "Method", "paragraphs": ["The offset network."]}]
+
+
+def test_classify_prior_art_sections_one_call_and_cleanup(monkeypatch):
+    seen = {}
+    _patch_json(monkeypatch, {"sections": [
+        {"id": "S1", "verdict": "mixed", "reason": "  opens   with citations ", "prior_art_paragraphs": [1, 1, 99]},
+        {"id": "S2", "verdict": "own_work", "reason": "the authors' network", "prior_art_paragraphs": [3]},
+        {"id": "S9", "verdict": "prior_art", "reason": "not a section we asked about", "prior_art_paragraphs": []},
+        {"id": "S1", "verdict": "nonsense", "reason": "", "prior_art_paragraphs": []},
+    ]}, seen)
+    out = asyncio.run(llm.classify_prior_art_sections("Widgets", SECTIONS))
+    assert set(out) == {"S1", "S2"}                       # unknown ids dropped
+    assert out["S1"] == {"verdict": "mixed", "reason": "opens with citations", "prior_art_paragraphs": [1, 99]}
+    assert out["S2"]["prior_art_paragraphs"] == []        # only 'mixed' carries paragraph indices
+    assert seen["schema"] is llm.PRIOR_ART_SECTIONS_SCHEMA
+    assert "[S1] Introduction" in seen["user"] and "P2: Here we introduce the widget." in seen["user"]
+    assert "chars…]" in seen["user"]                      # only a pathological paragraph is elided
+    assert "x" * 2000 in seen["user"] and "x" * 9000 not in seen["user"]
+
+
+def test_classify_prior_art_sections_empty_and_unparsable(monkeypatch):
+    _patch_json(monkeypatch, "not json at all", {})
+    assert asyncio.run(llm.classify_prior_art_sections("T", SECTIONS)) == {}
+    assert asyncio.run(llm.classify_prior_art_sections("T", [])) == {}

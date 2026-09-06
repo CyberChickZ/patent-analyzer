@@ -4,7 +4,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from patent_analyzer.adapters.disclosure import doc_from_fields
-from patent_analyzer.adapters.manuscript import strip_related_work
+from patent_analyzer.adapters.manuscript import (
+    apply_flat, apply_nested, outline_flat, outline_nested, verdict_lines,
+)
 from patent_analyzer.adapters.paper import (
     doc_from_sections, doc_from_text, iter_paragraphs, locate_marker, render_doc,
 )
@@ -89,17 +91,64 @@ def test_doc_from_sections_roundtrip():
     assert "[S1.1.P1] c" in render_doc(doc)
 
 
-def test_strip_related_work():
+def _v(verdict, reason="r", paras=()):
+    return {"verdict": verdict, "reason": reason, "prior_art_paragraphs": list(paras)}
+
+
+def test_outline_nested_ids_match_render_markers():
+    doc = doc_from_text(PAPER)
+    items = outline_nested(doc)
+    assert [(i["id"], i["heading"]) for i in items] == [
+        ("S1", "1 Introduction"), ("S1.1", "1.1 Contributions"), ("S2", "2 Related Work"),
+        ("S3", "3 Method"), ("S4", "RESULTS")]
+    text = render_doc(doc)
+    for it in items:
+        for j in range(1, len(it["paragraphs"]) + 1):
+            assert f"[{it['id']}.P{j}] " in text
+
+
+def test_apply_nested_drops_sections_and_background_paragraphs():
     doc = doc_from_text(PAPER)
     doc["sections"][2]["subsections"].append(
         {"title": "3.1 Background and Related Work", "paragraphs": ["x"], "subsections": []})
-    out = strip_related_work(doc)
+    verdicts = {"S1": _v("mixed", "background then contribution", [2]), "S2": _v("prior_art"),
+                "S3.1": _v("prior_art"), "S3": _v("own_work"), "S4": _v("own_work")}
+    out = apply_nested(doc, verdicts)
     assert [s["title"] for s in out["sections"]] == ["1 Introduction", "3 Method", "RESULTS"]
+    assert out["sections"][0]["paragraphs"] == ["Widgets drift. This is bad."]   # P2 was the prior-art one
+    assert out["sections"][0]["subsections"][0]["title"] == "1.1 Contributions"  # mixed keeps its subsections
     assert out["sections"][1]["subsections"] == []
-    assert out["abstract"] == "" and out["kind"] == "manuscript"
+    assert out["abstract"] == doc["abstract"] and out["kind"] == "manuscript"    # v2 keeps the abstract
     assert out["dropped_sections"] == ["2 Related Work", "3.1 Background and Related Work"]
-    assert doc["abstract"]  # original untouched
-    assert len(doc["sections"]) == 4
+    assert out["dropped_paragraphs"] == [["S1", 2]]
+    assert len(doc["sections"]) == 4 and len(doc["sections"][0]["paragraphs"]) == 2   # original untouched
+
+
+def test_apply_nested_unjudged_section_is_kept():
+    doc = doc_from_text(PAPER)
+    out = apply_nested(doc, {})
+    assert [s["title"] for s in out["sections"]] == [s["title"] for s in doc["sections"]]
+    assert out["dropped_sections"] == [] and out["dropped_paragraphs"] == []
+
+
+def test_apply_flat_cascades_into_subsections():
+    doc = {"title": "T", "abstract": "a",
+           "sections": [{"heading": "Background", "level": 1, "paragraphs": ["b1", "b2"]},
+                        {"heading": "Gaze", "level": 2, "paragraphs": ["g"]},
+                        {"heading": "Method", "level": 1, "paragraphs": ["m1", "m2"]}]}
+    assert [i["id"] for i in outline_flat(doc)] == ["S1", "S1.1", "S2"]   # paths come from the levels
+    out = apply_flat(doc, {"S1": _v("prior_art"), "S1.1": _v("own_work"), "S2": _v("mixed", "r", [1])})
+    assert [s["heading"] for s in out["sections"]] == ["Method"]
+    assert out["sections"][0]["paragraphs"] == ["m2"]
+    assert out["dropped_sections"] == ["Background", "Gaze"]      # the level-2 entry went with its parent
+    assert out["dropped_paragraphs"] == [["S2", 1]]
+    assert out["abstract"] == "a"
+
+
+def test_verdict_lines_only_reports_judged_sections():
+    items = [{"id": "S1", "heading": "Intro", "paragraphs": ["a"]}, {"id": "S2", "heading": "M", "paragraphs": ["b"]}]
+    lines = verdict_lines(items, {"S1": _v("mixed", "opens with citations", [1])})
+    assert lines == ["S1 Intro -> mixed P[1]: opens with citations"]
 
 
 def test_doc_from_fields():

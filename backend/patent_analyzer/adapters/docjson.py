@@ -88,22 +88,5 @@ def doc_json_stats(doc: dict | None) -> dict:
             "references_count": int(doc.get("references_count") or 0), "chars": sum(len(p) for p in paras)}
 
 
-def strip_related_work_json(doc: dict) -> dict:
-    """Manuscript mode: drop Related Work / Background / Prior Art sections (and
-    their subsections, i.e. the following deeper-level entries) from a Doc JSON
-    copy; `dropped_sections` lists the headings removed."""
-    from patent_analyzer.adapters.manuscript import is_related_work_title
-    out = {**doc, "sections": [], "dropped_sections": []}
-    skip_below: int | None = None
-    for sec in doc.get("sections") or []:
-        level = max(1, int(sec.get("level") or 1))
-        if skip_below is not None and level > skip_below:
-            out["dropped_sections"].append(sec.get("heading") or "")
-            continue
-        skip_below = None
-        if is_related_work_title(sec.get("heading") or ""):
-            out["dropped_sections"].append(sec.get("heading") or "")
-            skip_below = level
-            continue
-        out["sections"].append(sec)
-    return out
+# Manuscript mode's cut lives in patent_analyzer.adapters.manuscript (cut_flat):
+# it needs an LLM call over the outline, which does not belong in a renderer.

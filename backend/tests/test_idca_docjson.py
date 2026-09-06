@@ -47,8 +47,14 @@ def _patch(monkeypatch, doc=DOC, detect=DETECT, calls=None):
             raise doc
         return doc
 
+    async def fake_classify(title, sections):
+        calls.append(("classify", len(sections)))
+        return {s["id"]: {"verdict": "prior_art" if "Related Work" in s["heading"] else "own_work",
+                          "reason": "r", "prior_art_paragraphs": []} for s in sections}
+
     monkeypatch.setattr(llm, "detect_and_summarize_invention", fake_detect)
     monkeypatch.setattr(llm, "build_doc_json", fake_docjson)
+    monkeypatch.setattr(llm, "classify_prior_art_sections", fake_classify)
     return calls
 
 
@@ -74,12 +80,16 @@ def test_doc_json_is_the_text_layer(tmp_path, monkeypatch):
     assert any(e["kind"] == "doc_json" for e in out["events"])
 
 
-def test_explicit_input_mode_wins_and_manuscript_strips_related_work(tmp_path, monkeypatch):
-    out, _ = _run(tmp_path, monkeypatch, state_extra={"input_mode": "manuscript"})
+def test_explicit_input_mode_wins_and_manuscript_cuts_prior_art(tmp_path, monkeypatch):
+    out, calls = _run(tmp_path, monkeypatch, state_extra={"input_mode": "manuscript"})
     assert out["input_mode"] == "manuscript"
+    assert [c[0] for c in calls] == ["detect", "docjson", "classify"]   # exactly one classify call
     assert "Smith aligned" not in out["document_text"]
     assert out["doc_json"]["dropped_sections"] == ["2 Related Work"]
     assert "[S2.P1] The offset network predicts" in out["document_text"]
+    assert out["doc_json"]["abstract"] == DOC["abstract"]               # v2 keeps the abstract
+    evt = next(e for e in out["events"] if e["kind"] == "prior_art_cut")
+    assert "2 Related Work -> prior_art" in " | ".join(evt["payload"]["verdicts"])
     out2, _ = _run(tmp_path, monkeypatch, state_extra={"input_mode": "bogus"})
     assert out2["input_mode"] == "academic_paper"   # unknown -> detection result
 

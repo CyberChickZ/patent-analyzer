@@ -48,10 +48,12 @@ async def _text_layer(input_path: str, plain_text: str, input_mode: str, _event)
     """(document_text, doc_json, doc_json_stats). Gemini's Doc JSON rendered with
     [S<path>.P<n>] markers is the text layer extraction / self_check read; when
     the call fails (or IDCA_DOC_JSON=0) it is the fitz / plain text. Manuscript
-    mode drops Related Work sections before rendering. fallback_paragraphs =
+    mode drops the prior-art passages before rendering (one extra LLM call, see
+    adapters.manuscript). fallback_paragraphs =
     what the deterministic splitter finds in the plain text, for comparison."""
     from app.llm import build_doc_json
-    from patent_analyzer.adapters.docjson import doc_json_stats, render_doc_json, strip_related_work_json
+    from patent_analyzer.adapters.docjson import doc_json_stats, render_doc_json
+    from patent_analyzer.adapters.manuscript import cut_flat, outline_flat, verdict_lines
     from patent_analyzer.adapters.paper import doc_from_text, iter_paragraphs
 
     if input_path.endswith(".pdf") and not plain_text:
@@ -70,10 +72,12 @@ async def _text_layer(input_path: str, plain_text: str, input_mode: str, _event)
         _event("doc_json", f"No Doc JSON — text layer is the plain/fitz text ({n_plain} paragraphs)")
         return plain_text, None, stats
     if input_mode == "manuscript":
-        doc = strip_related_work_json(doc)
-        if doc.get("dropped_sections"):
-            _event("info", f"Manuscript: dropped {len(doc['dropped_sections'])} related-work sections: "
-                   + "; ".join(doc["dropped_sections"])[:200])
+        items = outline_flat(doc)
+        doc, verdicts = await cut_flat(doc)
+        _event("prior_art_cut", f"Manuscript: dropped {len(doc.get('dropped_sections') or [])} prior-art sections "
+               f"and {len(doc.get('dropped_paragraphs') or [])} background paragraphs"
+               + (" — " + "; ".join(doc["dropped_sections"])[:200] if doc.get("dropped_sections") else ""),
+               {"verdicts": verdict_lines(items, verdicts)})
     stats = {**doc_json_stats(doc), "source": "gemini", "fallback_paragraphs": n_plain}
     _event("doc_json", f"Doc JSON: {stats['sections']} sections · {stats['paragraphs']} paragraphs · "
            f"{stats['figures']} figures · {stats['equations']} equations · {stats['references_count']} refs "

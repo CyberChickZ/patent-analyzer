@@ -747,6 +747,119 @@ async def build_doc_json(document_text: str, source_pdf_path: str | None = None)
     return doc
 
 
+PRIOR_ART_SECTIONS_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {"sections": {"type": "ARRAY", "items": {
+        "type": "OBJECT",
+        "properties": {"id": {"type": "STRING"},
+                       "verdict": {"type": "STRING", "enum": ["prior_art", "mixed", "own_work"]},
+                       "reason": {"type": "STRING"},
+                       "prior_art_paragraphs": {"type": "ARRAY", "items": {"type": "INTEGER"}}},
+        "required": ["id", "verdict", "reason", "prior_art_paragraphs"]}}},
+    "required": ["sections"],
+}
+
+PRIOR_ART_SECTIONS_PROMPT = prompts.register_default("idca.prior_art_sections", """════ TASK ════
+The document below is an unpublished manuscript. Decide, for EVERY section listed, whether its
+text is a review of OTHER people's work (prior art / background / literature) or a description of
+what THESE authors themselves built, did or found.
+
+Verdicts:
+- "prior_art"  every paragraph in the section reviews other people's work, the state of the art,
+               or general field background. Nothing in it is this team's own contribution.
+- "mixed"      the section does both — typically an Introduction that opens with background and
+               citations and ends with "Here we introduce ...", "In this paper we propose ...",
+               "we therefore developed ...". List in prior_art_paragraphs the 1-based indices of
+               the paragraphs that are PURELY other people's work or general background.
+- "own_work"   the section describes this team's own method, apparatus, materials, experiments,
+               results, discussion or conclusions.
+
+Rules:
+- Judge every listed id exactly once. Use the id strings as given.
+- A paragraph that says what the authors built, how it works, what it is made of, or why it is
+  better is NEVER prior art — keep it, even inside a background section.
+- A paragraph in which the authors speak for themselves — "we propose", "we hypothesized", "we
+  tested", "we chose", "here we introduce", "in this paper", "this study" — states their own
+  contribution however many citations surround it. A section holding one such paragraph is at
+  most "mixed"; it is never "prior_art".
+- Method / Materials / Implementation / Design / Results / Discussion / Conclusion sections are
+  own_work; citing a reagent, an instrument or a published protocol there does not make them
+  prior art.
+- A section that only sets up the problem the authors solve, with no citations to others'
+  solutions, is own_work (motivation is not prior art).
+- prior_art_paragraphs is [] unless the verdict is "mixed".
+- reason: ONE short sentence, naming the evidence (e.g. the phrase that turns the section).
+
+════ MANUSCRIPT OUTLINE ════
+{outline}""")
+
+_SECTION_PREVIEW_HEAD = 2000
+_SECTION_PREVIEW_TAIL = 1200
+
+
+def _preview(p: str) -> str:
+    """Head and tail of a paragraph, only for paragraphs longer than both together.
+
+    A short preview is what got this wrong the first time: in two of the eight
+    §H1.7.1 papers the authors' "we hypothesized" / "we tested" sentence sat in the
+    middle of a ~1.2k-char paragraph, the model never saw it, and it dropped the
+    paragraph that held the invention. Whole paragraphs, with head+tail only as a
+    guard against a pathological one."""
+    if len(p) <= _SECTION_PREVIEW_HEAD + _SECTION_PREVIEW_TAIL:
+        return p
+    cut = len(p) - _SECTION_PREVIEW_HEAD - _SECTION_PREVIEW_TAIL
+    return f"{p[:_SECTION_PREVIEW_HEAD]} […{cut} chars…] {p[-_SECTION_PREVIEW_TAIL:]}"
+
+
+def _outline_block(title: str, sections: list[dict]) -> str:
+    parts = [f"Title: {title}"] if title else []
+    for sec in sections:
+        parts.append(f"\n[{sec['id']}] {sec.get('heading') or '(no heading)'}")
+        paras = sec.get("paragraphs") or []
+        if not paras:
+            parts.append("  (no body paragraphs)")
+        for i, p in enumerate(paras, 1):
+            parts.append(f"  P{i}: {_preview(p)}")
+    return "\n".join(parts)
+
+
+async def classify_prior_art_sections(title: str, sections: list[dict]) -> dict:
+    """ONE LLM CALL: which sections of a manuscript are somebody else's work.
+
+    `sections` = [{"id", "heading", "paragraphs": [str]}] in reading order (the
+    adapters build it from either Doc shape). Returns {id: {"verdict", "reason",
+    "prior_art_paragraphs"}} — ids the model skipped are absent, and the caller
+    keeps those sections (fail-open: a manuscript that loses nothing is a paper,
+    a manuscript that loses its Method is nothing)."""
+    if not sections:
+        return {}
+    system = ("You are a patent analyst triaging an unpublished manuscript: you separate what the "
+              "authors cite from what the authors built. Output JSON only.")
+    prompt = prompts.render("idca.prior_art_sections", outline=_outline_block(title, sections))
+    resp = await call_llm(system, prompt, max_tokens=8192, response_schema=PRIOR_ART_SECTIONS_SCHEMA)
+    data = _extraction_json(resp) or {}
+    known = {s["id"] for s in sections}
+    out = {}
+    for row in data.get("sections") or []:
+        if not isinstance(row, dict):
+            continue
+        sid = str(row.get("id") or "").strip()
+        verdict = str(row.get("verdict") or "").strip()
+        if sid not in known or verdict not in ("prior_art", "mixed", "own_work"):
+            continue
+        paras = []
+        if verdict == "mixed":
+            for n in row.get("prior_art_paragraphs") or []:
+                try:
+                    paras.append(int(n))
+                except (TypeError, ValueError):
+                    continue
+        out[sid] = {"verdict": verdict, "reason": " ".join(str(row.get("reason") or "").split())[:300],
+                    "prior_art_paragraphs": sorted(set(paras))}
+    return out
+
+
+
 # ════════════════════════════════════════════════════════════
 # Phase 2: Expert-driven innovation analysis
 # ════════════════════════════════════════════════════════════
@@ -1840,8 +1953,9 @@ _FACET_BANNED = frozenset("device member element portion means unit system metho
 _DOC_KIND_GUIDANCE = {
     "paper": ("Look for the invention in the Method / Approach / System / Implementation sections, "
               "not in the Introduction or Related Work: what the authors built, not what they cite."),
-    "manuscript": ("Related-work sections have been removed. Look for the invention in the Method / "
-                   "Results / Discussion sections: what the authors built themselves."),
+    "manuscript": ("The prior-art passages have been removed — every section and paragraph left is "
+                   "the authors' own. Read the abstract and the Method / Results / Discussion for "
+                   "what they built themselves."),
     "disclosure": ("The Core Idea and Novelty fields state what the inventor considers new; "
                    "the How It Works field gives the mechanism. Use them in that order."),
     "patent_draft": ("Each independent claim (or claim-like paragraph) is one candidate; keep its scope. "
