@@ -74,24 +74,46 @@ def select_for_reading(elements: list[dict], cands: list[Candidate], n: int,
                        summary: str = "") -> tuple[list[Candidate], dict]:
     """Which of a round-0 channel's candidates the claims budget reads.
 
-    m1a and m1b both took the first `n` in channel order — 300 of 2,140 — and
+    m1a and m1b took the first `n` in channel order — 300 of 2,140 — and
     everything past the cut never entered the pool either, so the run could not
     even be compared with h1h/h1i, whose pool reach counted what the channels
-    returned. Here the whole list stays in the pool and only the READING is
-    selected: the must-read set first (see MUST_READ_SOURCES and every query's
-    top MUST_READ_QUERY_RANK), then the rest by cosine.
+    returned. The whole list stays in the pool now and only the READING is
+    selected.
+
+    m1c then showed that "must-read" alone does not select anything: 2,227 of
+    3,229 candidates matched it (Lens alone returns hundreds), so `must[:300]`
+    was again an arbitrary cut — and it dropped US20090147070A1, a gold family
+    that came in through lens_search. So the must-read set is ordered too, in
+    three tiers, each ranked by cosine inside itself:
+
+      1. every query's top MUST_READ_QUERY_RANK — bounded by the query count,
+         and where h1i reached two of its four gold families directly;
+      2. the sources that reach gold without going through a text ranking
+         (Lens, the Reliance bridge, the citation graph, Google similar,
+         examiner citations);
+      3. everything else.
     """
     cos = _cos_of(elements, cands, summary)
-    must, rest = [], []
+    tiers: list[list[tuple[int, Candidate]]] = [[], [], []]
     for i, c in enumerate(cands):
         rank = ((c.raw or {}).get("loop") or {}).get("rank")
-        hit = bool(set(c.sources or []) & MUST_READ_SOURCES) or \
-            (isinstance(rank, int) and rank < MUST_READ_QUERY_RANK)
-        (must if hit else rest).append((i, c))
-    rest.sort(key=lambda ic: -cos[ic[0]])
-    picked = [c for _, c in must][:n] + [c for _, c in rest][:max(0, n - len(must))]
-    info = {"in": len(cands), "must_read": len(must), "read": len(picked),
-            "cut_cos": round(cos[rest[max(0, n - len(must)) - 1][0]], 4) if rest and n > len(must) else None}
+        if isinstance(rank, int) and rank < MUST_READ_QUERY_RANK:
+            tiers[0].append((i, c))
+        elif set(c.sources or []) & MUST_READ_SOURCES:
+            tiers[1].append((i, c))
+        else:
+            tiers[2].append((i, c))
+    for t in tiers:
+        t.sort(key=lambda ic: -cos[ic[0]])
+    picked: list[Candidate] = []
+    for t in tiers:
+        picked += [c for _, c in t[:max(0, n - len(picked))]]
+    read = {id(c) for c in picked}
+    left = [cos[i] for i, c in enumerate(cands) if id(c) not in read]
+    info = {"in": len(cands), "read": len(picked),
+            "tiers": [len(t) for t in tiers],
+            "read_per_tier": [sum(1 for _, c in t if id(c) in read) for t in tiers],
+            "cut_cos": round(max(left), 4) if left else None}
     return picked, info
 
 
@@ -181,7 +203,7 @@ async def run_rounds(elements: list[dict], cpc_groups: list[str], title_terms: l
             all_rows.append(r.row())
             for c in r.candidates:
                 pool.setdefault((c.pub_num or c.title).upper(), c)
-        batch = M.round_budget(results, cap=M.ROUND_CLAIMS_CAP)
+        batch = M.round_budget(results, cap=M.ROUND0_CLAIMS_CAP if round_no == 0 else M.ROUND_CLAIMS_CAP)
         claims, bq_calls = await _claims_for(batch)
         docs = [{"pub_num": c.pub_num, "title": c.title, "sources": c.sources,
                  "abstract": c.abstract, "raw": c.raw} for c in batch]

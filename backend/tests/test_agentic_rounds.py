@@ -150,24 +150,26 @@ def test_later_rounds_aim_their_moves_at_the_uncovered_elements(monkeypatch):
     assert all("aimed at 1 uncovered: e2" in r.note for r in res)
 
 
-def test_select_for_reading_keeps_the_must_read_sources_and_every_query_top_ten(monkeypatch):
+def test_select_for_reading_ranks_inside_the_must_read_set_too(monkeypatch):
     """m1a/m1b read the first 300 of 2,140 in channel order and dropped the
-    rest from the pool entirely. Now the pool keeps everything and only the
-    reading is selected."""
+    rest from the pool entirely. m1c kept the pool but 2,227 of 3,229
+    candidates were "must-read", so must[:300] was an arbitrary cut again —
+    and it dropped US20090147070A1, a gold family that arrived via lens_search.
+    Each tier is cosine-ranked inside itself now."""
     def fake_embed(elements, rows, topk=1, cap=1, **kw):
-        for i, r in enumerate(rows):
-            r["prune_cos"] = 1.0 - i / 100.0                      # earlier = closer
+        for r in rows:
+            r["prune_cos"] = 0.95 if r["title"] == "gold" else (0.2 if r["title"].startswith("l") else 0.4)
         return list(range(len(rows))), {}
     import patent_analyzer.agentic.prune as P
     monkeypatch.setattr(P, "stage1_embed", fake_embed)
-    cands = []
-    for i in range(20):
-        cands.append(Candidate(pub_num=f"C{i}", title=f"t{i}", match_type="Patent",
-                               sources=["google_patents"], raw={"loop": {"rank": i}}))
-    far = Candidate(pub_num="LENS", title="lens hit", match_type="Patent", sources=["lens_bridge"])
-    cands.append(far)                                             # worst cosine, must still be read
-    picked, info = R.select_for_reading([{"id": "e1", "text": "a camera"}], cands, 12)
+    cands = [Candidate(pub_num=f"Q{i}", title=f"q{i}", match_type="Patent",
+                       sources=["google_patents"], raw={"loop": {"rank": i}}) for i in range(5)]
+    cands += [Candidate(pub_num=f"L{i}", title=f"l{i}", match_type="Patent",
+                        sources=["lens_search"]) for i in range(800)]
+    cands.append(Candidate(pub_num="GOLD", title="gold", match_type="Patent", sources=["lens_search"]))
+    picked, info = R.select_for_reading([{"id": "e1", "text": "a camera"}], cands, 20)
     got = [c.pub_num for c in picked]
-    assert "LENS" in got                                          # a Lens hit is never ranked out
-    assert all(f"C{i}" in got for i in range(10))                 # every query's top 10
-    assert info["in"] == 21 and info["must_read"] == 11 and info["read"] == 12
+    assert all(f"Q{i}" in got for i in range(5))      # every query's top ten is reserved
+    assert "GOLD" in got                              # and the best of 801 Lens hits beats the rest
+    assert info["in"] == 806 and info["read"] == 20
+    assert info["tiers"] == [5, 801, 0] and info["read_per_tier"] == [5, 15, 0]

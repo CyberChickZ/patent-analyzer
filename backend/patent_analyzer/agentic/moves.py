@@ -39,11 +39,16 @@ CAPS = {
     "A3_paper_graph": int(os.environ.get("M1_A3", "80")),
     "S1_input_authors": int(os.environ.get("M1_S1", "50")),
     "S2_predicted_cpc": int(os.environ.get("M1_S2", "300")),
-    "S3_react": int(os.environ.get("M1_S3", "300")),
+    # m1c round 0: S2's 300 ODP records produced 0 GOOD and first reached no gold family on
+    # US20120194631A1 across m1a/m1b/m1c, while both gold families that reached the pool at all
+    # came through the wide loop. Round 0 therefore reads more of the wide loop than of the
+    # enumeration, and gets its own larger claims budget — 300 more claims is about $0.08.
+    "S3_react": int(os.environ.get("M1_S3", "600")),
     "W1_citations": int(os.environ.get("M1_W1", "400")),
     "W4_similar": int(os.environ.get("M1_W4", "200")),
 }
 ROUND_CLAIMS_CAP = int(os.environ.get("M1_ROUND_CLAIMS", "600"))
+ROUND0_CLAIMS_CAP = int(os.environ.get("M1_ROUND0_CLAIMS", "900"))
 SEEDS_PER_ROUND = int(os.environ.get("M1_SEEDS", "50"))
 WIDE_SEEDS = int(os.environ.get("M1_WIDE_SEEDS", "300"))  # round 1 expands from these, GOOD or not
 MAX_ROUNDS = int(os.environ.get("M1_ROUNDS", "4"))
