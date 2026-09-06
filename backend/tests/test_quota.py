@@ -93,6 +93,36 @@ def test_unknown_usage_shapes_are_parsed_or_left_alone():
     assert quota._walk_usage({"something": "else"}) == []
 
 
+def test_the_monthly_row_wins_over_the_per_minute_one():
+    """What Lens actually returns, verbatim (2026-09-18). The per-minute entry
+    sits in the same flat list and reads 10/10; taking it would report a
+    thousand-request allowance as ten."""
+    live = [{"remaining": 676, "allowed": 1000, "frequency": "1 MONTH", "type": "REQUEST",
+             "resetDate": "2026-10-18T17:53:06.903Z", "maxRecordsPerRequest": 100},
+            {"remaining": 71493, "allowed": 100000, "frequency": "1 MONTH", "type": "RECORD",
+             "resetDate": "2026-10-18T17:53:06.903Z", "maxRecordsPerRequest": 100},
+            {"remaining": 10, "allowed": 10, "frequency": "1 MINUTE", "type": "REQUEST",
+             "maxRecordsPerRequest": 100}]
+    monthly = [u for u in quota._walk_usage(live)
+               if "month" in u["period"] and u["resource"].lower().startswith("request")]
+    assert monthly and monthly[0]["cap"] == 1000 and monthly[0]["used"] == 324
+    assert monthly[0]["resets_at"].startswith("2026-10-18")
+
+
+def test_lens_takes_the_providers_figures_and_its_anniversary_reset(monkeypatch):
+    from patent_analyzer.recall import lens
+
+    async def fake(endpoint):
+        return ([{"remaining": 676, "allowed": 1000, "frequency": "1 MONTH", "type": "REQUEST",
+                  "resetDate": "2026-10-18T17:53:06.903Z"}], None)
+    monkeypatch.setattr(lens, "live_usage", fake)
+    rows = [s for s in asyncio.run(quota.snapshot())["sources"] if s["source"] == "lens"]
+    assert all(r["cap"] == 1000 and r["used"] == 324 for r in rows)
+    assert all(r["resets_at"].startswith("2026-10-18") for r in rows), \
+        "Lens counts a month from the subscription date, not the 1st"
+    assert all("from the provider" in r["note"] for r in rows)
+
+
 def test_bigquery_reports_what_is_left_of_the_free_tibibyte():
     from patent_analyzer import metering
     metering.count_bq(64 * 2 ** 20)                          # 64 MiB

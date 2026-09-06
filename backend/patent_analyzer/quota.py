@@ -76,12 +76,14 @@ def _serpapi() -> list[dict]:
     keys = sp.quota_status()
     if not keys:
         return [_row("serpapi", "SerpAPI", error="SERPAPI_KEYS not set")]
+    # The note goes on the first key only: it is true of the account, not of one
+    # key, and repeating it down the table buries the numbers.
     return [_row("serpapi", f"SerpAPI key {k['key']}", used=k["used"], cap=k["cap"],
                  unit="searches", period="month", resets_at=_next_month(),
                  limits=[f"{k['cap']}/key/month (free tier)"],
-                 note="SerpAPI bills a search that returns no results, so this counter "
-                      "moves even on a query that found nothing")
-            for k in keys]
+                 note=("SerpAPI bills a search that returns no results, so these counters "
+                       "move even on a query that found nothing" if i == 0 else ""))
+            for i, k in enumerate(keys)]
 
 
 def _uspto_odp() -> list[dict]:
@@ -89,8 +91,9 @@ def _uspto_odp() -> list[dict]:
     rows = [_row("uspto_odp", f"USPTO ODP {q['kind']}", used=q["used"], cap=q["cap"],
                  unit="requests", period="week", resets_at=_next_week(),
                  limits=[f"{odp.PER_MINUTE} req/min", "concurrency 1"],
-                 note=f"ISO week {q['week']}; the weekly caps come from the key's registration")
-            for q in odp.quota_status()]
+                 note=(f"ISO week {q['week']}; the weekly caps come from the key's registration"
+                       if i == 0 else ""))
+            for i, q in enumerate(odp.quota_status())]
     if not os.environ.get("USPTO_ODP_API_KEY"):
         for r in rows:
             r["error"] = "USPTO_ODP_API_KEY not set"
@@ -106,13 +109,21 @@ def _pick(d: dict, *names):
 
 def _walk_usage(payload) -> list[dict]:
     """Pull every limit/used triple out of a response whose shape is not
-    documented. Returns [] rather than guessing when nothing matches."""
+    documented. Returns [] rather than guessing when nothing matches.
+
+    What Lens actually answers (2026-09-18) is a flat list of
+    {"remaining": 676, "allowed": 1000, "frequency": "1 MONTH", "type":
+    "REQUEST", "resetDate": "..."} — note that the period reads "1 MONTH", not
+    "month", and that the reset is the subscription's own anniversary rather
+    than the first of the calendar month. Breadth-first so the entries come
+    back in the order the provider listed them.
+    """
     out = []
-    stack = [payload]
-    while stack:
-        node = stack.pop()
+    queue = [payload]
+    while queue:
+        node = queue.pop(0)
         if isinstance(node, list):
-            stack.extend(node)
+            queue.extend(node)
         elif isinstance(node, dict):
             cap = _pick(node, "limit", "max", "quota", "allowed")
             used = _pick(node, "used", "usage", "consumed", "count")
@@ -122,8 +133,9 @@ def _walk_usage(payload) -> list[dict]:
                     used = cap - left
                 out.append({"cap": int(cap), "used": int(used),
                             "resource": str(_pick(node, "resource", "type", "name") or "requests"),
-                            "period": str(_pick(node, "period", "interval", "per") or "month").lower()})
-            stack.extend(node.values())
+                            "period": str(_pick(node, "period", "frequency", "interval", "per") or "month").lower(),
+                            "resets_at": _pick(node, "resetDate", "reset_date", "resets_at")})
+            queue.extend(node.values())
     return out
 
 
@@ -133,21 +145,30 @@ async def _lens() -> list[dict]:
     for q in lens.quota_status():
         ep = q["endpoint"]
         used, cap, note, err = q["used"], q["cap"], "", ""
+        resets = _next_month()
         live, live_err = await lens.live_usage(ep)
         if live_err:
             err = live_err
             note = "counted locally — the provider's own usage endpoint did not answer"
         else:
-            found = [u for u in _walk_usage(live) if u["period"].startswith("month")
+            found = [u for u in _walk_usage(live) if "month" in u["period"]
                      and u["resource"].lower().startswith("request")]
             if found:
                 used, cap = found[0]["used"], found[0]["cap"]
                 note = "from the provider's /subscriptions/*/usage"
+                # Lens counts a month from the day the subscription started, not
+                # from the first: taking the calendar month would be wrong by
+                # up to a fortnight.
+                try:
+                    resets = datetime.fromisoformat(
+                        str(found[0]["resets_at"]).replace("Z", "+00:00"))
+                except (TypeError, ValueError):
+                    pass
             else:
                 note = ("the usage endpoint answered in a shape this code does not recognise; "
                         "the figure is this instance's own count")
         rows.append(_row("lens", f"Lens {ep} API", used=used, cap=cap,
-                         unit="requests", period="month", resets_at=_next_month(),
+                         unit="requests", period="month", resets_at=resets,
                          limits=[f"{q['per_minute']} req/min",
                                  f"max {q['max_records_per_request']} records/request"],
                          note=note, error=err, expires_on=lens.TRIAL_ENDS))
@@ -173,7 +194,10 @@ def _bigquery() -> list[dict]:
                  unit="MiB scanned", period="month", resets_at=_next_month(),
                  limits=[f"${metering.BQ_USD_PER_TIB}/TiB above the free tier"],
                  note="not a hard limit — past this the project is billed rather than blocked, "
-                      "which is why it is the one BigQuery number worth watching")]
+                      "which is why it is the one BigQuery number worth watching. Counted from "
+                      "the bytes this deployment's own queries were billed for, starting when "
+                      "the tally was added: bytes spent before that, or by anything else on the "
+                      "project, are not in it.")]
 
 
 _FREE = [("openalex", "OpenAlex", "polite pool; no key, no counter"),
@@ -184,6 +208,22 @@ _FREE = [("openalex", "OpenAlex", "polite pool; no key, no counter"),
 
 def _uncapped() -> list[dict]:
     return [_row(s, n, unit="requests", period="none", note=note) for s, n, note in _FREE]
+
+
+def _prices() -> dict:
+    """The rate card as the backend holds it — the UI should never carry its own
+    copy, which is how a price ends up quoted for the wrong model."""
+    from . import metering
+    return {
+        "source": "https://cloud.google.com/vertex-ai/generative-ai/pricing"
+                  " and https://cloud.google.com/bigquery/pricing, read 2026-09-18",
+        "review_by": metering.PRICE_REVIEW_DATE,
+        "models": [{"model": m, "input_usd_per_mtok": p[0], "output_usd_per_mtok": p[1],
+                    "note": "thought tokens bill as output"} for m, p in metering.PRICES.items()],
+        "embedding_usd_per_mtok": metering.EMBED_USD_PER_MTOK,
+        "bigquery_usd_per_tib": metering.BQ_USD_PER_TIB,
+        "note": "Vertex Standard tier, Global region. Estimates from list prices, not a bill.",
+    }
 
 
 async def snapshot() -> dict:
@@ -209,6 +249,10 @@ async def snapshot() -> dict:
         "generated_at": _now().isoformat(),
         "month": month_key(), "week": week_key(),
         "sources": sources,
+        # The rate card travels with the panel because it is the same question
+        # asked forwards: what a call costs, and how many are left. One source
+        # for both means the UI never has to keep its own copy of a price.
+        "prices": _prices(),
         "exhausted": exhausted,
         "expiring_soon": expiring,
         "note": "Counters are this deployment's own unless a row says otherwise; a source "
