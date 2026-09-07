@@ -37,11 +37,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 from common import model_tag
 from extraction_errors import classify_errors
 from extraction_eval import embed, greedy_match
+from patent_analyzer.adapters.manuscript import ADAPTER_VERSION
 
 PAP2PAT_ROOT = Path(os.environ.get("PAP2PAT_ROOT", "/tmp/pap2pat"))
 RUN_DIR = Path(__file__).parent.parent / "eval_data" / "runs" / "p2p_extract"
 TAU = 0.7
 NS = (1, 2, 3)
+_TEXTS: dict[tuple[str, str], tuple[str, str, dict]] = {}   # the manuscript cut is an LLM call; do it once per pair
 _DEPENDENT = re.compile(r"\b(?:of|according to|as claimed in|as recited in|as defined in|as in)\s+"
                         r"(?:any\s+(?:one\s+)?of\s+)?claims?\s+\d", re.I)
 
@@ -104,24 +106,33 @@ def gold_claims(patent: dict) -> list[dict]:
     return out
 
 
-def paper_texts(pair_id: str, data: Path, input_mode: str = "academic_paper") -> tuple[str, str]:
-    """(IDCA text = openworld_eval.render_paper, marker text via adapters.paper).
+async def paper_texts(pair_id: str, data: Path, input_mode: str = "academic_paper") -> tuple[str, str, dict]:
+    """(IDCA text = openworld_eval.render_paper, marker text via adapters.paper,
+    audit = {verdicts: [...]}).
 
-    input_mode='manuscript' is the submission-draft scenario: the marker text
-    is cut by the production adapter (patent_analyzer.adapters.manuscript
-    .strip_related_work — drops Related Work / Background / Prior Art at any
-    depth and clears the abstract), exactly what nodes/idca.py:72 does to the
-    Doc JSON in manuscript mode. The IDCA text stays whole, because IDCA is
+    input_mode='manuscript' is the submission-draft scenario: the marker text is
+    cut by the production adapter (patent_analyzer.adapters.manuscript.cut_nested
+    — one LLM call labels every section prior_art / mixed / own_work and names the
+    background paragraphs inside a mixed one), the same cut nodes/idca.py applies
+    to the Doc JSON in manuscript mode. The IDCA text stays whole, because IDCA is
     what does that cut in production.
     """
+    if (pair_id, input_mode) in _TEXTS:
+        return _TEXTS[(pair_id, input_mode)]
     from openworld_eval import render_paper
+    from patent_analyzer.adapters.manuscript import cut_nested, outline_nested, verdict_lines
     from patent_analyzer.adapters.paper import doc_from_sections, render_doc
     paper = json.loads((data / pair_id / "paper.json").read_text())
     doc = doc_from_sections(paper.get("title", ""), paper.get("abstract", ""), paper.get("sections"))
+    audit = {}
     if input_mode == "manuscript":
-        from patent_analyzer.adapters.manuscript import strip_related_work
-        doc = strip_related_work(doc)
-    return render_paper(pair_id), render_doc(doc)
+        items = outline_nested(doc)
+        doc, verdicts = await cut_nested(doc)
+        audit = {"verdicts": verdict_lines(items, verdicts),
+                 "dropped_sections": doc.get("dropped_sections") or [],
+                 "dropped_paragraphs": doc.get("dropped_paragraphs") or []}
+    _TEXTS[(pair_id, input_mode)] = (render_paper(pair_id), render_doc(doc), audit)
+    return _TEXTS[(pair_id, input_mode)]
 
 
 async def run_pair(pair: dict, extractor: str, data: Path, input_mode: str = "academic_paper",
@@ -130,11 +141,14 @@ async def run_pair(pair: dict, extractor: str, data: Path, input_mode: str = "ac
     import llm_cache
 
     key = pair["pair_id"]
-    mode_tag = "" if input_mode == "academic_paper" else f"_{input_mode}"
+    # the adapter version is part of the manuscript tag: model_tag() names models and
+    # switches, so a rewritten adapter would otherwise replay the old adapter's run file
+    # without calling the model once (the "0 live, 0 cached" false pass of 2026-09-18)
+    mode_tag = "" if input_mode == "academic_paper" else f"_{input_mode}{ADAPTER_VERSION}"
     out_path = RUN_DIR / f"{key}_{extractor}{mode_tag}{model_tag()}{('_' + run_tag) if run_tag else ''}.json"
     if out_path.exists():
         return json.loads(out_path.read_text())
-    idca_text, marker_text = paper_texts(key, data, input_mode)
+    idca_text, marker_text, audit = await paper_texts(key, data, input_mode)
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as f:
         f.write(idca_text)
         tmp = f.name
@@ -142,7 +156,10 @@ async def run_pair(pair: dict, extractor: str, data: Path, input_mode: str = "ac
     p1 = await idca_node({"input_local_path": tmp, "input_mode": input_mode})
     rec = {"pair_id": key, "extractor": extractor, "status_determination": p1.get("status_determination"),
            "input_mode": p1.get("input_mode"), "summary": p1.get("summary", ""),
-           "checklist": [], "extraction": None, "errors": None, "llm_calls": None}
+           "checklist": [], "extraction": None, "errors": None, "llm_calls": None,
+           "adapter_version": ADAPTER_VERSION, "marker_chars": len(marker_text), "cut": audit,
+           "idca_cut": next(({"message": e["message"], **(e.get("payload") or {})}
+                             for e in (p1.get("events") or []) if e.get("kind") == "prior_art_cut"), None)}
     if p1.get("status_determination") == "Present":
         if extractor == "new":
             from graph.extraction_subgraph import build_extraction_subgraph
@@ -195,7 +212,8 @@ async def main():
     ap.add_argument("--limit", type=int, default=5, help="first k of the 50 seed-42 pairs")
     ap.add_argument("--pairs", default="", help="comma-separated pair_ids (or the US pub prefix) instead of --limit")
     ap.add_argument("--input-mode", default="academic_paper", choices=["academic_paper", "manuscript"],
-                    help="manuscript = submission draft: Related Work / Background dropped, abstract cleared")
+                    help="manuscript = submission draft: the prior-art passages are cut by adapters.manuscript "
+                         "(one LLM call per document), the abstract is kept")
     ap.add_argument("--run-tag", default="", help="suffix on the run files; model_tag() only names a stage "
                     "override, so a run under a new *global* model would otherwise replay an old model's record")
     ap.add_argument("--max-live-calls", type=int, default=40)
@@ -230,6 +248,18 @@ async def main():
             except Exception as exc:
                 print(f"[{pair['pair_id']}/{extractor}] FAILED {type(exc).__name__}: {exc}")
         rows.append(row)
+
+    if args.input_mode == "manuscript":
+        print("\n== manuscript cut (marker text) — every section the classifier did not call own_work")
+        for row in rows:
+            rec = row["new"] or {}
+            cut = rec.get("cut") or {}
+            print(f"\n[{row['pair_id']}]  marker {rec.get('marker_chars')} chars  "
+                  f"(paper {len((await paper_texts(row['pair_id'], data))[1])})  "
+                  f"idca: {(rec.get('idca_cut') or {}).get('message', 'n/a')}")
+            for line in cut.get("verdicts") or []:
+                if "-> own_work" not in line:
+                    print("   " + line)
 
     print(f"\n== Pap2Pat extraction  pairs={len(rows)}  seed=42  tau={TAU}  input_mode={args.input_mode}")
     hdr = f"{'pair':<28}{'#claims':>8}{'#gold':>6}" + "".join(f"{'cov@' + str(n):>8}" for n in NS) + \
@@ -269,7 +299,7 @@ async def main():
         print(line)
         if not args.no_errors:
             gold = [e for c in claims for e in c["elements"]]
-            _, marker_text = paper_texts(row["pair_id"], data, args.input_mode)
+            _, marker_text, _audit = await paper_texts(row["pair_id"], data, args.input_mode)
             for k, rec, preds, rq in (("new", new, candidate_elements(new, None, supported_only=False) if new else [], True),
                                       ("ssr", ssr, checklist_elements(ssr) if ssr else [], False)):
                 if not preds:
