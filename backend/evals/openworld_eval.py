@@ -32,6 +32,21 @@ PAP2PAT = Path(os.environ.get("PAP2PAT_DIR", "/tmp/pap2pat/Pap2Pat/data"))
 RUN_DIR = Path(os.environ.get("E4_RUN_DIR", str(Path(__file__).parent.parent / "eval_data" / "runs" / "e4")))
 GOLD_PATH = RUN_DIR / "gold.json"
 
+# Which citation categories count as "a searcher found this". The gold used to be SEA alone,
+# which silently threw away every PCT international search report and every JP/EP/TW examination
+# citation: measured on amie_patents.citations (buckets 0-19, 2026-09-18) the live distribution is
+# SEA 1,398,746 · APP 1,166,166 · PRS 284,710 · ISR 130,316 · EXA 54,282, plus mixed codes such as
+# "EXA,SEA" and "APP,ISR". Over E4's 50 questions, adding ISR and EXA takes the cited families from
+# 123 to 172 (+40%, 24 of 50 questions affected) — so every reach ratio computed on SEA alone had
+# a denominator that was too small (N3, 2026-09-18).
+#
+# APP is the applicant's own IDS, which is not a search result and stays out. PRS / OPP / TPO / FOP
+# are left out too, but for a weaker reason: I could not verify their definitions against a primary
+# source in this session (the EPO DOCDB documentation and the Google Patents BigQuery schema pages
+# both returned 404). Revisit them with the DOCDB spec in hand rather than by inference.
+GOLD_CATEGORIES = tuple(c.strip().upper() for c in
+                        os.environ.get("E4_GOLD_CATEGORIES", "SEA,ISR,EXA").split(",") if c.strip())
+
 
 def gcs_bundle_pull(uri: str):
     """Download bundle.tar.gz (gold.json + papers/<pair_id>/paper.json +
@@ -139,11 +154,13 @@ async def build_gold(pairs: list[dict]) -> dict:
             for c in cits.get(m["publication_number"], {}).get("cits", []):
                 if not c["cited"] or c["npl_text"]:
                     continue
-                if "SEA" in c["category"]:
+                cat = c["category"] or ""
+                if any(g in cat for g in GOLD_CATEGORIES):
                     sea.add(c["cited"])
-                elif "APP" in c["category"]:
+                elif "APP" in cat:
                     app_only.add(c["cited"])
         gold[key] = {"pair_id": p["pair_id"], "family_id": fam, "priority_date": prio,
+                     "gold_categories": list(GOLD_CATEGORIES),
                      "n_members": len(members), "sea_cited": sorted(sea),
                      "app_only_cited": sorted(app_only - sea)}
 
@@ -344,11 +361,18 @@ async def main():
         return
 
     pairs = sample_pairs(args.n)
-    if GOLD_PATH.exists():
-        gold = json.loads(GOLD_PATH.read_text())
-    else:
+    gold = json.loads(GOLD_PATH.read_text()) if GOLD_PATH.exists() else {}
+    have = tuple((next(iter(gold.values()), {}) or {}).get("gold_categories") or ("SEA",))
+    if gold and have != GOLD_CATEGORIES:
+        # the gold on disk answers a different question — keep it, name it, and rebuild
+        old = GOLD_PATH.with_name("gold_" + "-".join(have).lower() + ".json")
+        old.write_text(json.dumps(gold, indent=1))
+        print(f"gold.json was built for {have}; kept as {old.name} and rebuilding for {GOLD_CATEGORIES}")
+        gold = {}
+    if not gold:
         gold = await build_gold(pairs)
         GOLD_PATH.write_text(json.dumps(gold, indent=1))
+    print(f"gold categories: {','.join(GOLD_CATEGORIES)}")
     print_sanity(gold)
     if args.stage == "gold":
         for k, g in list(gold.items())[:5]:

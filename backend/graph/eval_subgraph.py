@@ -256,7 +256,11 @@ async def reduce_eval(state: EvalState) -> dict:
     from patent_analyzer.adjudicate import adjudicate
     adjudication = adjudicate(checklist, scoring_report, single_partial_103=0.7)
     from app.llm import _bri_enabled
+    from patent_analyzer.report_sections import determination_label
     adjudication["construction"] = "bri" if _bri_enabled() else "plain"   # how the deep read read the criteria
+    # the rendered sentence, stored once so the report, the API and the UI cannot each invent their
+    # own wording — the §103 label is a screening flag and it has to read that way everywhere
+    adjudication["label_text"] = determination_label(adjudication)
 
     read_gap = _read_gap(state.get("ranked_candidates") or [], eval_results, scoring_report)
 

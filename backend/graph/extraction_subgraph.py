@@ -32,6 +32,29 @@ _INPUT_MODE_KIND = {
 }
 
 
+class ExtractionInput(TypedDict, total=False):
+    """What the parent graph hands this subgraph — deliberately WITHOUT `events`.
+
+    A compiled subgraph used as a node receives the parent's whole state, and
+    this one declares `events` with an `operator.add` reducer, so it arrived
+    carrying the four events IDCA had already emitted and returned them in its
+    own update patch. app/main.py appends the patch wholesale, so every phase-1
+    event reached the feed twice — four duplicates with byte-identical
+    microsecond timestamps, which is what gave it away. eval_subgraph declares a
+    plain list (overwrite), which is why only phase 1 doubled. Reproduced and
+    the fix verified on langgraph 0.2.76 by the M3b agent; the internal reducer
+    stays because six nodes in here append to `events` independently.
+    """
+    summary: str
+    document_text: str
+    doc_json: dict | None
+    input_local_path: str
+    input_mode: str
+    doc_type: str
+    doc_kind: str
+    cpc_subclass: str
+
+
 class ExtractionState(TypedDict, total=False):
     # input from parent
     summary: str
@@ -314,7 +337,7 @@ def should_retry_elements(state: ExtractionState) -> str:
 
 
 def build_extraction_subgraph():
-    g = StateGraph(ExtractionState)
+    g = StateGraph(ExtractionState, input=ExtractionInput)
     g.add_node("a1_candidates", candidates_node)
     g.add_node("a2_elements", elements_node)
     g.add_node("a3_verify", verify_node)
