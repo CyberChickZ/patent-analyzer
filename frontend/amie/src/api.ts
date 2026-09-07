@@ -252,6 +252,13 @@ export interface RateCard {
   models: { model: string; input_usd_per_mtok: number; output_usd_per_mtok: number; note?: string }[];
   embedding_usd_per_mtok: number;
   bigquery_usd_per_tib: number;
+  /** Scheduled rate changes still ahead — the global model's price doubles on
+   *  2027-01-01, which is exactly the kind of fact a hard-coded card misses. */
+  upcoming_changes: {
+    model: string; effective_from: string;
+    input_usd_per_mtok: number; output_usd_per_mtok: number;
+    multiple: number | null; from_input: number; from_output: number;
+  }[];
   note: string;
 }
 
