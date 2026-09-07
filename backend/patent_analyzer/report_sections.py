@@ -11,6 +11,7 @@ unpublished for 18 months, so the record is always incomplete).
 from __future__ import annotations
 
 import html
+import re
 
 
 def _e(s) -> str:
@@ -193,6 +194,48 @@ def _evidence_mix(scoring_report: list[dict] | None) -> dict:
 
 _EV_LABEL = {"pdf": "full PDF", "full_text": "abstract + claims",
              "abstract": "abstract only", "no_content": "nothing to read"}
+
+
+_READ_GAP_NOTE = ("Every reference in that difference is an <b>unchecked</b> reference, not a cleared one. "
+                  "A determination of \u201cno blocking reference\u201d rests on what was read, not on what "
+                  "was delivered \u2014 read the row below that accounts for the difference before relying on it.")
+
+
+def read_gap_html(read_gap: dict | None) -> str:
+    """Delivered vs deep-read, itemised. Printed whenever they differ, in red,
+    above everything else the report injects."""
+    g = read_gap or {}
+    if not g.get("delivered"):
+        return ""
+    if not g.get("shortfall"):
+        return ('<div class="sec"><div class="sec-t">Reading Coverage</div>'
+                f'<div class="sec-note">All {int(g["delivered"])} delivered references were deep-read.</div></div>')
+    rows = "".join(f'<tr><td>{_e(k)}</td><td>{v}</td></tr>' for k, v in
+                   sorted((g.get("reasons") or {}).items(), key=lambda kv: -kv[1]))
+    return ('<div class="sec" style="border:2px solid #dc2626">'
+            '<div class="sec-t" style="color:#dc2626">Reading Coverage</div>'
+            f'<div class="sec-note" style="color:#dc2626"><b>Delivered {int(g["delivered"])} references, '
+            f'deep-read {int(g["read"])}. {int(g["shortfall"])} were never read.</b> {_READ_GAP_NOTE}</div>'
+            '<table class="tbl"><thead><tr><th>Why a reference was not read</th><th>References</th>'
+            f'</tr></thead><tbody>{rows}</tbody></table></div>')
+
+
+def read_gap_md(read_gap: dict | None) -> list[str]:
+    g = read_gap or {}
+    if not g.get("delivered"):
+        return []
+    if not g.get("shortfall"):
+        return ["## Reading Coverage", "",
+                f"All {int(g['delivered'])} delivered references were deep-read.", ""]
+    lines = ["## Reading Coverage", "",
+             f"**Delivered {int(g['delivered'])} references, deep-read {int(g['read'])}. "
+             f"{int(g['shortfall'])} were never read.** "
+             + re.sub(r"</?b>", "**", _READ_GAP_NOTE), "",
+             "| Why a reference was not read | References |", "|---|---|"]
+    for k, v in sorted((g.get("reasons") or {}).items(), key=lambda kv: -kv[1]):
+        lines.append(f"| {k} | {v} |")
+    lines.append("")
+    return lines
 
 
 def evidence_coverage_html(scoring_report: list[dict] | None) -> str:
@@ -902,10 +945,13 @@ def cost_md(cost: dict | None) -> list[str]:
 def inject_html(report_html: str, extraction: dict | None, search_stats: dict | None,
                 scoring_report: list[dict] | None, checklist: list[dict] | None,
                 adjudication: dict | None = None, draft: dict | None = None,
-                cost: dict | None = None) -> str:
+                cost: dict | None = None, read_gap: dict | None = None) -> str:
     anchor = '<div class="sec-t">Invention Summary</div>'
     adj_block = determination_html(adjudication) if adjudication and "Prior-Art Determination" not in report_html else ""
-    block = "\n".join(x for x in (extraction_html(extraction), channel_health_html(search_stats),
+    # read_gap first: how much of the delivered prior art was actually read
+    # qualifies every number under it.
+    block = "\n".join(x for x in (read_gap_html(read_gap), extraction_html(extraction),
+                                  channel_health_html(search_stats),
                                   evidence_coverage_html(scoring_report), loop_html(search_stats),
                                   quote_matrix_html(scoring_report, checklist, adjudication=adjudication), adj_block,
                                   draft_html(draft, extraction), cost_html(cost)) if x)
@@ -922,9 +968,9 @@ def inject_html(report_html: str, extraction: dict | None, search_stats: dict | 
 def inject_md(report_md: str, extraction: dict | None, search_stats: dict | None,
               scoring_report: list[dict] | None, checklist: list[dict] | None,
               adjudication: dict | None = None, draft: dict | None = None,
-              cost: dict | None = None) -> str:
+              cost: dict | None = None, read_gap: dict | None = None) -> str:
     adj_lines = determination_md(adjudication) if adjudication and "## Prior-Art Determination" not in report_md else []
-    lines = (extraction_md(extraction) + channel_health_md(search_stats)
+    lines = (read_gap_md(read_gap) + extraction_md(extraction) + channel_health_md(search_stats)
              + evidence_coverage_md(scoring_report) + loop_md(search_stats)
              + quote_matrix_md(scoring_report, checklist, adjudication=adjudication) + adj_lines
              + draft_md(draft, extraction) + cost_md(cost))

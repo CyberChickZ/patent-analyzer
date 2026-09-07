@@ -5,11 +5,23 @@ Reduce: merge all results, compute scores, generate summary.
 """
 
 import operator
+import os
 from pathlib import Path
 from typing import Annotated, TypedDict
 
 from langgraph.constants import Send
 from langgraph.graph import END, StateGraph
+
+# How many of the delivered candidates are fanned out for a deep read. The gap
+# between this and what Phase 3 delivered is not a detail: at the defaults the
+# search delivers 60 (RERANK_LIMIT) or 120 (M1_DELIVER) and only this many are
+# read. It is reported per job rather than left to be inferred — see
+# `read_gap` below and report_sections.read_coverage_*.
+MAX_EVAL = int(os.environ.get("EVAL_MAX_DOCS", "25"))
+
+# `source` values that mean no text reached a model, or text reached one and
+# nothing came back. Either way the reference is unchecked, not cleared.
+NOT_READ_SOURCES = {"no_content", "abstract_failed", "abstract_noparse"}
 
 
 class EvalState(TypedDict, total=False):
@@ -62,7 +74,6 @@ def fan_out_docs(state: EvalState) -> list[Send]:
     # Ensure patents get evaluated even if ranked lower than papers
     candidates = state.get("ranked_candidates", [])
     patents_first = sorted(candidates, key=lambda d: (0 if d.get("match_type") == "Patent" or d.get("pub_num", "").startswith("US-") else 1))
-    MAX_EVAL = 25
     sends = []
     for doc in patents_first[:MAX_EVAL]:
         sends.append(Send("eval_single_doc", SingleDocInput(
@@ -73,6 +84,12 @@ def fan_out_docs(state: EvalState) -> list[Send]:
             source_title=source_title,
         )))
     return sends
+
+
+def _is_patentish(doc: dict) -> bool:
+    import re
+    return (doc.get("match_type") == "Patent"
+            or bool(re.match(r"^[A-Z]{2}[-\s]?\d", (doc.get("pub_num") or "").upper())))
 
 
 async def eval_single_doc(input: SingleDocInput) -> dict:
@@ -93,7 +110,16 @@ async def eval_single_doc(input: SingleDocInput) -> dict:
             source_pdf_path=input["source_pdf_path"],
             source_title=input["source_title"],
         )
-        result["source"] = "pdf"
+        # `source = "pdf"` used to be stamped on unconditionally, including on
+        # the two paths evaluate_single_document takes when it read nothing (an
+        # exception, or a reply it could not parse: both return an empty
+        # checklist_results). Those rows then counted as full-PDF reads.
+        if result.get("checklist_results"):
+            result["source"] = "pdf"
+        else:
+            result["source"] = "no_content"
+            result["no_content_reason"] = ("PDF downloaded but the read returned nothing"
+                                           + (f": {str(result['error'])[:100]}" if result.get("error") else ""))
         full_text = _pdf_text(pdf)
         if full_text:
             result["quote_verification"] = verify_checklist_results(result.get("checklist_results", {}), full_text)
@@ -113,12 +139,66 @@ async def eval_single_doc(input: SingleDocInput) -> dict:
             )
             if mode == "full_text":
                 result["quote_verification"] = verify_checklist_results(result.get("checklist_results", {}), text)
+            result.setdefault("source", mode)
+            result["text_chars"] = len(text)
+            if not result.get("checklist_results"):
+                # abstract_failed / abstract_noparse: text went in, nothing came back
+                result["no_content_reason"] = f"the {mode} read returned nothing ({result.get('source')})"
         else:
+            # Nothing was read. Say which of the two suppliers came up empty,
+            # because the answers are different: no claims in our own copy
+            # (non-US publication, or not in amie_patents) versus a prior-art
+            # PDF download that failed.
+            if _is_patentish(doc):
+                why = ("no claims in amie_patents (non-US publication or not in our copy) "
+                       "and no PDF" if not doc.get("local_pdf") else "PDF unreadable")
+            else:
+                why = "no PDF and no abstract" if not doc.get("local_pdf") else "PDF unreadable"
             result = {"title": title, "match_type": match_type,
-                      "checklist_results": {}, "source": "no_content"}
+                      "checklist_results": {}, "source": "no_content",
+                      "no_content_reason": why, "text_chars": len(text)}
 
     result["pub_num"] = pub_num
     return {"eval_results": [result]}
+
+
+def _read_gap(delivered: list[dict], fanned: list[dict], scoring_report: list[dict]) -> dict:
+    """Delivered vs actually read, with the difference itemised.
+
+    The report has been saying how many references were *evaluated* while a
+    reference with nothing to read counted the same as one whose claims were
+    read end to end. Three different numbers were being conflated:
+
+      delivered   what Phase 3 handed over (60 at RERANK_LIMIT, 120 at M1_DELIVER)
+      fanned_out  what Phase 4 sent to a model at all (EVAL_MAX_DOCS, 25)
+      read        those a model saw text for (source != no_content)
+
+    Every document in a gap is an *unchecked* reference, not a cleared one, so
+    a determination of "no blocking reference" rests on `read`, not on
+    `delivered`. This dict is what report_sections.read_coverage_* prints and
+    what the caller asserts on.
+    """
+    by_source: dict[str, int] = {}
+    for r in fanned:
+        by_source[r.get("source") or "unknown"] = by_source.get(r.get("source") or "unknown", 0) + 1
+    read = [r for r in scoring_report if (r.get("source") or "") not in NOT_READ_SOURCES]
+    n_delivered, n_fanned, n_read = len(delivered), len(fanned), len(read)
+    reasons: dict[str, int] = {}
+    if n_delivered > n_fanned:
+        reasons[f"never sent to a model (EVAL_MAX_DOCS={MAX_EVAL})"] = n_delivered - n_fanned
+    dupes = len(fanned) - len(scoring_report)
+    if dupes > 0:
+        reasons["dropped as a duplicate of the source document"] = dupes
+    for r in scoring_report:
+        if (r.get("source") or "") in NOT_READ_SOURCES:
+            why = r.get("no_content_reason") or "nothing to read"
+            reasons[why] = reasons.get(why, 0) + 1
+    shortfall = n_delivered - n_read
+    headline = (f"Delivered {n_delivered} references, deep-read {n_read}"
+                + (f" — {shortfall} were never read" if shortfall else " — all of them"))
+    return {"delivered": n_delivered, "fanned_out": n_fanned, "read": n_read,
+            "shortfall": shortfall, "reasons": reasons, "by_source": by_source,
+            "headline": headline, "eval_cap": MAX_EVAL}
 
 
 async def reduce_eval(state: EvalState) -> dict:
@@ -178,8 +258,11 @@ async def reduce_eval(state: EvalState) -> dict:
     from app.llm import _bri_enabled
     adjudication["construction"] = "bri" if _bri_enabled() else "plain"   # how the deep read read the criteria
 
+    read_gap = _read_gap(state.get("ranked_candidates") or [], eval_results, scoring_report)
+
     events = [
         _event("info", f"Evaluated {len(scoring_report)} docs, top score: {top_score:.2%}, risk: {risk_level}"),
+        _event("warn" if read_gap["shortfall"] else "info", read_gap["headline"]),
         _event("info", f"Quote verification: {quote_stats['verified']}/{quote_stats['quotes']} quotes verified "
                        f"across {quote_stats['docs_verified']} docs, {quote_stats['downgraded']} criteria downgraded"),
         _event("info", f"Determination: {adjudication['risk']} ({adjudication['label']}) — {adjudication['reason']}"),
@@ -193,7 +276,8 @@ async def reduce_eval(state: EvalState) -> dict:
         "risk_level": risk_level,
         "adjudication": adjudication,
         # GraphState has no `adjudication` channel yet (state.py untouched here); eval_stats carries it to the report
-        "eval_stats": {"quote_stats": quote_stats, "evaluated": len(scoring_report), "adjudication": adjudication},
+        "eval_stats": {"quote_stats": quote_stats, "evaluated": len(scoring_report),
+                       "read_gap": read_gap, "adjudication": adjudication},
         "events": events,
         "phase_results": {"phase4": {
             "status": "completed",

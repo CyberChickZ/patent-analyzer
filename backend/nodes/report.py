@@ -176,15 +176,21 @@ async def report_node(state: GraphState) -> dict:
             upload_errors["user_edits.json"] = err
 
     from patent_analyzer.report_sections import inject_html, inject_md
+    read_gap = (state.get("eval_stats") or {}).get("read_gap") or {}
+    if read_gap.get("shortfall"):
+        _event("warn", read_gap.get("headline", "") + " — " +
+                       "; ".join(f"{k}: {v}" for k, v in (read_gap.get("reasons") or {}).items()))
     # generate_html/markdown render the determination themselves (top of the report); inject_* add the other sections
     html = inject_html(generate_html(results), results["extraction"], results["search"]["summary"],
-                       scoring_report, checklist, adjudication=adjudication, draft=draft, cost=cost)
+                       scoring_report, checklist, adjudication=adjudication, draft=draft, cost=cost,
+                       read_gap=read_gap)
     (job_dir / "report.html").write_text(html, encoding="utf-8")
     if err := _save_to_gcs(job_id, "report.html", html, "text/html"):
         upload_errors["report.html"] = err
 
     md = inject_md(generate_markdown(results), results["extraction"], results["search"]["summary"],
-                   scoring_report, checklist, adjudication=adjudication, draft=draft, cost=cost)
+                   scoring_report, checklist, adjudication=adjudication, draft=draft, cost=cost,
+                   read_gap=read_gap)
     (job_dir / "report.md").write_text(md, encoding="utf-8")
     if err := _save_to_gcs(job_id, "report.md", md, "text/markdown"):
         upload_errors["report.md"] = err
