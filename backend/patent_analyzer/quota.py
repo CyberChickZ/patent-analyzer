@@ -219,11 +219,25 @@ def _prices() -> dict:
                   " and https://cloud.google.com/bigquery/pricing, read 2026-09-18",
         "review_by": metering.PRICE_REVIEW_DATE,
         "models": [{"model": m, "input_usd_per_mtok": p[0], "output_usd_per_mtok": p[1],
-                    "note": "thought tokens bill as output"} for m, p in metering.PRICES.items()],
+                    "note": _model_note(m)} for m, p in metering.PRICES.items()],
         "embedding_usd_per_mtok": metering.EMBED_USD_PER_MTOK,
         "bigquery_usd_per_tib": metering.BQ_USD_PER_TIB,
+        # A rate with an end date is not the same fact as a rate. The panel is
+        # read by whoever decides whether to spend the money, and the global
+        # model's price doubles on 2027-01-01.
+        "upcoming_changes": metering.upcoming_price_changes(),
         "note": "Vertex Standard tier, Global region. Estimates from list prices, not a bill.",
     }
+
+
+def _model_note(model: str) -> str:
+    from . import metering
+    base = "thought tokens bill as output"
+    nxt = next((c for c in metering.upcoming_price_changes() if c["model"] == model), None)
+    if not nxt:
+        return base
+    return (f"{base}; introductory — ${nxt['input_usd_per_mtok']}/"
+            f"${nxt['output_usd_per_mtok']} from {nxt['effective_from']}")
 
 
 async def snapshot() -> dict:

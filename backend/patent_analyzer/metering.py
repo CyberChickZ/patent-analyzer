@@ -38,14 +38,65 @@ import time
 # Thought tokens are not a separate line anywhere on the page: every output row
 # reads "Text output (response and reasoning)", so reasoning bills as output.
 #
-# USD per 1,000,000 tokens: (input, output).
-PRICES: dict[str, tuple[float, float]] = {
-    "gemini-3.8-flash": (0.75, 3.75),        # introductory price, ends 2026-12-31 -> (1.50, 7.50)
-    "gemini-2.5-pro": (1.25, 10.00),         # the <=200K-context tier; see _TIER_NOTE
-    "gemini-3.1-flash-lite": (0.25, 1.50),
+# A price is a schedule, not a number. gemini-3.8-flash — the global model, and
+# the one the deep read runs on — is on an introductory rate that DOUBLES on
+# 2027-01-01, so a table holding one tuple per model is a table that is silently
+# 2x wrong from New Year's Day. Each entry is (effective_from, input, output) in
+# USD per 1,000,000 tokens, oldest first; `price_of` picks the row in force.
+#
+# The far-past first entry is deliberate: it means "as far back as this table
+# claims to know", not a date anything happened.
+PRICE_SCHEDULE: dict[str, list[tuple[str, float, float]]] = {
+    # "through December 31, 2026 ... Global $0.75 / $3.75" then
+    # "Starting January 1, 2027 ... Global $1.50 / $7.50"
+    "gemini-3.8-flash": [("2000-01-01", 0.75, 3.75), ("2027-01-01", 1.50, 7.50)],
+    # Same note on the page covers 3.7 and 3.6 Flash; listed so switching the
+    # global model does not silently drop off the price table.
+    "gemini-3.7-flash": [("2000-01-01", 0.75, 3.75), ("2027-01-01", 1.50, 7.50)],
+    "gemini-3.6-flash": [("2000-01-01", 0.75, 3.75), ("2027-01-01", 1.50, 7.50)],
+    "gemini-2.5-pro": [("2000-01-01", 1.25, 10.00)],        # <=200K tier; see _TIER_NOTE
+    "gemini-3.1-flash-lite": [("2000-01-01", 0.25, 1.50)],
 }
-# When the introductory Gemini 3.x Flash price lapses, this table is wrong by 2x.
-PRICE_REVIEW_DATE = "2027-01-01"
+
+
+def price_of(model: str, on: str | None = None) -> tuple[float, float] | None:
+    """The (input, output) rate in force for `model` on `on` (ISO date, default
+    today UTC). None for a model this table does not price."""
+    rows = PRICE_SCHEDULE.get(model)
+    if not rows:
+        return None
+    from datetime import datetime, timezone
+    day = on or datetime.now(timezone.utc).date().isoformat()
+    current = None
+    for start, pin, pout in rows:
+        if start <= day:
+            current = (pin, pout)
+    return current or (rows[0][1], rows[0][2])
+
+
+def upcoming_price_changes(after: str | None = None) -> list[dict]:
+    """Every scheduled change still ahead of `after` (default today), so the
+    ledger and the quota panel can warn before the bill does."""
+    from datetime import datetime, timezone
+    day = after or datetime.now(timezone.utc).date().isoformat()
+    out = []
+    for model, rows in PRICE_SCHEDULE.items():
+        for i, (start, pin, pout) in enumerate(rows):
+            if start > day and i:
+                was_in, was_out = rows[i - 1][1], rows[i - 1][2]
+                out.append({"model": model, "effective_from": start,
+                            "input_usd_per_mtok": pin, "output_usd_per_mtok": pout,
+                            "multiple": round(pout / was_out, 2) if was_out else None,
+                            "from_input": was_in, "from_output": was_out})
+    return sorted(out, key=lambda c: (c["effective_from"], c["model"]))
+
+
+# Today's view of the schedule. Kept because the report, the evals and the quota
+# panel all read a flat {model: (in, out)}; costing goes through price_of() so a
+# process alive across a price change follows the schedule rather than this.
+PRICES: dict[str, tuple[float, float]] = {m: price_of(m) for m in PRICE_SCHEDULE}   # type: ignore[misc]
+# The date the table itself should be re-checked against the published page.
+PRICE_REVIEW_DATE = min((c["effective_from"] for c in upcoming_price_changes()), default="2027-01-01")
 _TIER_NOTE = ("gemini-2.5-pro is costed at its <=200K-context tier; the per-model meter "
               "aggregates tokens across calls, so a single >200K call cannot be told apart "
               "and is under-costed (its true rate is $2.50/$15.00 per 1M).")
@@ -144,9 +195,12 @@ def snapshot() -> dict:
             "embed": copy.deepcopy(embed), "incidents": len(incidents)}
 
 
-def cost_usd(model: str, prompt_tokens: int, output_tokens: int, thought_tokens: int) -> float:
-    """Thought tokens bill as output."""
-    price = PRICES.get(model)
+def cost_usd(model: str, prompt_tokens: int, output_tokens: int, thought_tokens: int,
+             on: str | None = None) -> float:
+    """Thought tokens bill as output. `on` (ISO date, default today) selects the
+    rate from the schedule — the tokens were spent on a day, and the price the
+    model carried that day is the one that gets billed."""
+    price = price_of(model, on)
     if price is None:
         return 0.0
     pin, pout = price
@@ -164,7 +218,7 @@ def _delta(before: dict, after: dict) -> dict:
         if d["calls"] <= 0 and d["prompt_tokens"] <= 0:
             continue
         d["cost_usd"] = round(cost_usd(model, d["prompt_tokens"], d["output_tokens"], d["thought_tokens"]), 4)
-        if model not in PRICES:
+        if price_of(model) is None:
             d["note"] = _UNPRICED_NOTE
         models[model] = d
 
@@ -323,6 +377,15 @@ def _attach(row: dict, counts: dict[str, dict]) -> dict:
     return row
 
 
+def _change_caveat(c: dict) -> str:
+    """One scheduled price change, spelled out. A run costed on or after the
+    date is costed at the new rate; one costed before it is not."""
+    mult = f" ({c['multiple']}x output)" if c.get("multiple") else ""
+    return (f"{c['model']} goes from ${c['from_input']}/${c['from_output']} to "
+            f"${c['input_usd_per_mtok']}/${c['output_usd_per_mtok']} per 1M tokens on "
+            f"{c['effective_from']}{mult} — costs before and after that date are not comparable.")
+
+
 def ledger(ph: dict | None = None) -> dict:
     """Every line of spend on one job, flat enough to sort and total.
 
@@ -375,6 +438,7 @@ def ledger(ph: dict | None = None) -> dict:
             }, counts))
 
     t = totals(ph)
+    priced_models = {r["name"] for r in rows if r["kind"] == "model"}
     by_phase = sorted(((p, m.get("cost_usd", 0.0)) for p, m in ph.items()), key=lambda x: -x[1])
     most = None
     if by_phase and by_phase[0][1] > 0:
@@ -404,6 +468,7 @@ def ledger(ph: dict | None = None) -> dict:
             "bigquery_usd_per_tib": BQ_USD_PER_TIB,
             "embedding_usd_per_mtok": EMBED_USD_PER_MTOK,
             "review_by": PRICE_REVIEW_DATE,
+            "upcoming_changes": upcoming_price_changes(),
         },
         "caveats": [
             "Estimated from list prices, not a bill: no Vertex committed-use discount,"
@@ -413,6 +478,8 @@ def ledger(ph: dict | None = None) -> dict:
             " A regional deployment pays ~10% more.",
             "A call whose response carried no usage_metadata contributes its call count"
             " but no tokens, so its cost is missing rather than wrong.",
-            f"The Gemini 3.x Flash rate is introductory and lapses on {PRICE_REVIEW_DATE}.",
-        ],
+        ] + [_change_caveat(c) for c in upcoming_price_changes()
+             # only the models this run actually spent on: a scheduled change to
+             # something nobody called is reference, not a caveat on this bill
+             if not priced_models or c["model"] in priced_models],
     }

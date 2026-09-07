@@ -140,3 +140,46 @@ def test_a_new_job_clears_the_incidents_of_the_last_one():
     metering.mark("search")
     metering.start_run("some-other-job")
     assert metering.incidents == [] and metering.embed == {}
+
+
+# ── the price schedule ────────────────────────────────────────────────────────
+
+def test_a_price_is_a_schedule_not_a_number():
+    """gemini-3.8-flash is the global model and its introductory rate doubles on
+    2027-01-01. A table with one tuple per model is silently 2x wrong that day."""
+    assert metering.price_of("gemini-3.8-flash", "2026-12-31") == (0.75, 3.75)
+    assert metering.price_of("gemini-3.8-flash", "2027-01-01") == (1.50, 7.50)
+    assert metering.price_of("gemini-3.8-flash", "2030-06-15") == (1.50, 7.50)
+    assert metering.price_of("gemini-2.5-pro", "2027-06-01") == (1.25, 10.00), \
+        "2.5-pro has no scheduled change"
+    assert metering.price_of("gemini-99-imaginary") is None
+
+
+def test_a_run_is_costed_at_the_rate_in_force_on_its_day():
+    same = dict(prompt_tokens=1_000_000, output_tokens=1_000_000, thought_tokens=0)
+    before = metering.cost_usd("gemini-3.8-flash", on="2026-12-31", **same)
+    after = metering.cost_usd("gemini-3.8-flash", on="2027-01-01", **same)
+    assert before == 0.75 + 3.75
+    assert after == 1.50 + 7.50 == before * 2
+
+
+def test_the_schedule_is_announced_before_it_bites():
+    changes = metering.upcoming_price_changes(after="2026-09-18")
+    by_model = {c["model"]: c for c in changes}
+    c = by_model["gemini-3.8-flash"]
+    assert c["effective_from"] == "2027-01-01" and c["multiple"] == 2.0
+    assert c["from_output"] == 3.75 and c["output_usd_per_mtok"] == 7.50
+    assert metering.upcoming_price_changes(after="2027-01-01") == [], \
+        "nothing is 'upcoming' once it has taken effect"
+    assert metering.PRICE_REVIEW_DATE == "2027-01-01"
+
+
+def test_the_caveat_names_only_the_models_the_run_actually_used():
+    _spend("gemini-3.8-flash", 1000, 100)
+    metering.mark("idca")
+    caveats = metering.ledger()["caveats"]
+    assert any("gemini-3.8-flash goes from" in c for c in caveats)
+    assert not any("gemini-3.7-flash" in c for c in caveats), \
+        "a change to a model nobody called is reference, not a caveat on this bill"
+    # the full schedule is still carried, for anyone planning rather than reading a bill
+    assert len(metering.ledger()["prices"]["upcoming_changes"]) == 3
