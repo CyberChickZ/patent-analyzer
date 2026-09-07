@@ -8,7 +8,6 @@ Phase 3 recall stays as asyncio.gather in a single node (channels are not homoge
 import asyncio
 import json
 import os
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,8 +22,6 @@ _CHANNEL_TIMEOUT_DEFAULT = 600.0
 _CHANNEL_TIMEOUT_OVERRIDES = {
     "agentic_loop": 2400.0,      # many rounds × (LLM + boolean search + BQ expansion)
     "bigquery_patents": 900.0,   # dry-run + SEARCH-indexed scan
-    "serpapi_patents": 900.0,    # 4 retries × 60 s + backoff [10,30,60,90] per query
-    "serpapi_scholar": 900.0,
     "fulltext_bq": 900.0,        # ceil(delivered/300) bucket-pruned claims lookups
 }
 
@@ -53,7 +50,6 @@ async def search_node(state: GraphState) -> dict:
     source_title = state.get("source_title", "")
     source_arxiv_id = state.get("source_arxiv_id", "")
     source_doi = state.get("source_doi", "")
-    delegation = state.get("delegation", {})
     checklist = state.get("checklist", [])
     input_path = state.get("input_local_path", "")
     output_dir = state.get("output_dir", "/tmp/outputs/default")
@@ -69,10 +65,6 @@ async def search_node(state: GraphState) -> dict:
 
     _event("start", "Multi-channel prior art recall")
 
-    queries = delegation
-    n_query_groups = len(queries.get("groups", []))
-    _event("info", f"Built queries for {n_query_groups} groups")
-
     # Short/long queries for different channels
     def _short_query() -> str:
         if source_title and len(source_title) > 8:
@@ -82,9 +74,8 @@ async def search_node(state: GraphState) -> dict:
 
     recall_query_short = _short_query()
 
-    # SerpAPI throttling + per-job budget (free tier is 250 searches/month)
-    serpapi_lock = asyncio.Semaphore(1)
-    SERPAPI_COOLDOWN = 1.5
+    # SerpAPI per-job budget (free tier is 250 searches/month). The agentic
+    # loop is the only spender left and does its own serialisation.
     serpapi_budget = {"left": int(os.environ.get("SERPAPI_MAX_CALLS_PER_JOB", "8"))}
 
     def _serpapi_take() -> bool:
@@ -98,71 +89,6 @@ async def search_node(state: GraphState) -> dict:
             return ch_serpapi.quota_status()
         except Exception:
             return []
-
-    async def _serpapi_throttled_patent(q: str):
-        async with serpapi_lock:
-            res = await ch_serpapi.search_patents(q, max_pages=1)
-            await asyncio.sleep(SERPAPI_COOLDOWN)
-            return res
-
-    async def _serpapi_throttled_scholar(q: str):
-        async with serpapi_lock:
-            res = await ch_serpapi.search_scholar(q, max_pages=1)
-            await asyncio.sleep(SERPAPI_COOLDOWN)
-            return res
-
-    patent_queries = [q for g in queries.get("groups", [])
-                      for q in (g.get("patent_queries") or [])[:2]]
-    gp_failed: list[str] = []
-    gp_done = asyncio.Event()
-
-    async def run_google_patents():
-        """Direct Google Patents XHR (free). Queries it cannot serve (blocked
-        or errored) are handed to the SerpAPI channel via gp_failed."""
-        from patent_analyzer.recall import google_patents as ch_gp
-        out, errs = [], []
-        try:
-            for q in patent_queries:
-                if ch_gp.is_blocked():
-                    errs.append({"query": q, "error": "google_patents: blocked"})
-                    gp_failed.append(q)
-                    continue
-                cands, err = await ch_gp.search(q, num=20)
-                if err or not cands:
-                    errs.append({"query": q, "error": err or "no results"})
-                    gp_failed.append(q)
-                out.extend(cands)
-        finally:
-            gp_done.set()
-        return out, errs
-
-    async def run_serpapi_patents():
-        """SerpAPI patents, budgeted; spends calls only on queries the direct
-        channel could not serve."""
-        await gp_done.wait()
-        out, errs = [], []
-        for q in gp_failed:
-            if not _serpapi_take():
-                errs.append({"query": q, "error": "serpapi budget exhausted"})
-                return out, errs
-            cands, err = await _serpapi_throttled_patent(q)
-            if err:
-                errs.append({"query": q, "error": err})
-            out.extend(cands)
-        return out, errs
-
-    async def run_serpapi_scholar():
-        out, errs = [], []
-        for group in queries.get("groups", []):
-            for q in (group.get("paper_queries") or [])[:2]:
-                if not _serpapi_take():
-                    errs.append({"query": q, "error": "serpapi budget exhausted"})
-                    return out, errs
-                cands, err = await _serpapi_throttled_scholar(q)
-                if err:
-                    errs.append({"query": q, "error": err})
-                out.extend(cands)
-        return out, errs
 
     def _paper_queries() -> list[str]:
         """Plain-keyword queries for the paper APIs (free, unlimited): the
@@ -225,15 +151,11 @@ async def search_node(state: GraphState) -> dict:
         import traceback
         try:
             from patent_analyzer.recall.bigquery_patents import search_abstracts
-            # one ranked call per job (each call reads 20-90 GiB); terms = the
-            # anchor phrases across groups, longest first as a rarity proxy
-            terms = []
-            for group in queries.get("groups", []):
-                for q in (group.get("patent_queries") or [])[:1]:
-                    terms += re.findall(r'"([^"]{3,60})"', q)
-            terms = sorted(dict.fromkeys(t.strip().rstrip("*") for t in terms if t.strip()), key=len, reverse=True)[:10]
-            if not terms:
-                terms = [w for w in recall_query_short.split() if len(w) > 4][:8]
+            # one ranked call per job (each call reads 20-90 GiB). The terms used
+            # to come from the delegation groups; nothing has written delegation
+            # since the extraction subgraph replaced generate_search_queries, so
+            # only the fallback ever ran.
+            terms = [w for w in recall_query_short.split() if len(w) > 4][:8]
             cands, err = await search_abstracts(terms, limit=40, before=state.get("date_cutoff"))
             return cands, ([{"query": " | ".join(terms), "error": err}] if err else [])
         except Exception as exc:
@@ -263,12 +185,9 @@ async def search_node(state: GraphState) -> dict:
     async def run_agentic_loop():
         return loop_cands, []
 
-    # Launch all channels in parallel (7 channels)
+    # Launch all channels in parallel
     channel_specs = [
         ("agentic_loop", run_agentic_loop),
-        ("google_patents", run_google_patents),
-        ("serpapi_patents", run_serpapi_patents),
-        ("serpapi_scholar", run_serpapi_scholar),
         ("semantic_scholar", run_semantic_scholar),
         ("openalex", run_openalex),
         ("arxiv", run_arxiv),
