@@ -4,6 +4,7 @@ Fan-out: one eval_single_doc node per candidate document.
 Reduce: merge all results, compute scores, generate summary.
 """
 
+import asyncio
 import operator
 import os
 from pathlib import Path
@@ -22,6 +23,11 @@ MAX_EVAL = int(os.environ.get("EVAL_MAX_DOCS", "25"))
 # `source` values that mean no text reached a model, or text reached one and
 # nothing came back. Either way the reference is unchecked, not cleared.
 NOT_READ_SOURCES = {"no_content", "abstract_failed", "abstract_noparse"}
+
+# The Send fan-out starts every document at once: MAX_EVAL documents means
+# MAX_EVAL concurrent Vertex calls, each with a PDF or a full claims text
+# attached. LLM_RPM smooths the arrival rate but bounds nothing in flight.
+_EVAL_SEM = asyncio.Semaphore(int(os.environ.get("EVAL_CONCURRENCY", "4")))
 
 
 class EvalState(TypedDict, total=False):
@@ -94,6 +100,11 @@ def _is_patentish(doc: dict) -> bool:
 
 async def eval_single_doc(input: SingleDocInput) -> dict:
     """Evaluate one document against the checklist. Returns partial state."""
+    async with _EVAL_SEM:
+        return await _eval_one(input)
+
+
+async def _eval_one(input: SingleDocInput) -> dict:
     from app.llm import evaluate_single_document, evaluate_single_document_text
 
     doc = input["doc"]
