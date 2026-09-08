@@ -23,7 +23,19 @@ from __future__ import annotations
 import os
 import re
 
-MAX_DEPENDENTS = 8
+# 9, so that the mirror-form pair comes to exactly 20 claims. 37 CFR 1.16(i) charges an
+# excess-claims fee "in excess of 20" — the node writes the same dependents onto the mirror
+# independent claim, so N per parent is 2 + 2N in total: N=9 is 20 and free, N=10 is 22 and $400
+# (undiscounted). The previous 8 came from a commit message that said only "dedupe, cap 8" and
+# left a free slot unused. Real practice sits higher still: 244,179 US B1/B2 grants from 2010 on
+# have a median of 14 dependents and only 23.3% have 8 or fewer, while 83.3% keep the total at 20
+# or under — which matches USPTO's own FY2023 figure that 83% of applications contained no excess
+# claims (N2, outputs/leader_dependent_count.md; leader 2026-09-18).
+#
+# The cap belongs on the TOTAL, not on the count per parent: 2 + 2N <= 20 only holds while there
+# are exactly two independent claims. Once a candidate emits three forms it is 3 + 3N <= 20, i.e.
+# N <= 5, and a hard-coded 9 would walk through the fee threshold without saying anything.
+MAX_DEPENDENTS = 9
 FURTHER_TAU = 0.85
 
 
