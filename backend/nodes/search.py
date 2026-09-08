@@ -45,6 +45,7 @@ async def search_node(state: GraphState) -> dict:
     from patent_analyzer.recall import semantic_scholar as ch_ss
     from patent_analyzer.recall import serpapi as ch_serpapi
     from patent_analyzer.searcher import download_pdf
+    from patent_analyzer import fulltext as ft_oa
 
     summary = state["summary"]
     source_title = state.get("source_title", "")
@@ -463,14 +464,53 @@ async def search_node(state: GraphState) -> dict:
     dl_not_needed = 0
     dl_no_url = 0
     dl_failed = 0
+    dl_cached = 0
     need_pdf = []
     for i, doc in enumerate(ranked):
         if (doc.get("claims_text") or "").strip():
             dl_not_needed += 1
             continue
         need_pdf.append((i, doc))
+
+    # Papers get an open-access resolution pass first. `resolve_pdf_url` only
+    # repeats what a channel happened to put on the document; this walks the
+    # tiers (arXiv, the OpenAlex/S2 OA fields, then Unpaywall) and records which
+    # one answered, so the report can say per document where its text came from
+    # instead of leaving a title-only evaluation looking like a read one. There
+    # is no paywalled tier on purpose — see patent_analyzer/fulltext.py.
+    papers = [(i, doc) for i, doc in need_pdf[:MAX_DOWNLOADS] if doc.get("match_type") != "Patent"]
+    ft_oa_t0 = _time.monotonic()
+    oa_patches: list[dict] = []
+    try:
+        oa_patches = await ft_oa.resolve_many([d for _, d in papers])
+        for (_, doc), patch in zip(papers, oa_patches):
+            doc.update(patch)
+    except Exception as exc:
+        _event("channel_crashed", f"fulltext_oa: {type(exc).__name__}: {exc}")
+    if papers:
+        tiers = ft_oa.tier_counts(oa_patches)
+        n_reachable = tiers.get("arxiv", 0) + tiers.get("oa", 0)
+        _event("info", f"Open-access full text: {n_reachable}/{len(papers)} papers have a "
+                       f"fetchable copy (arXiv {tiers.get('arxiv', 0)}, OA {tiers.get('oa', 0)}, "
+                       f"abstract-only {tiers.get('abstract_only', 0)})")
+        channel_health.append({
+            "channel": "fulltext_oa",
+            "status": "ok" if n_reachable else ("empty" if oa_patches else "errored"),
+            "n": n_reachable, "seconds": round(_time.monotonic() - ft_oa_t0, 1),
+            "detail": f"arXiv {tiers.get('arxiv', 0)}, open access {tiers.get('oa', 0)}, "
+                      f"abstract-only {tiers.get('abstract_only', 0)} of {len(papers)} papers. "
+                      f"Paywalled copies are not fetched: OSU Libraries' Responsible Use policy "
+                      f"forbids programmatic downloading of licensed content, so those papers are "
+                      f"listed for manual download instead.", "errors": []})
+        rows = ft_oa.manifest_rows([d for _, d in papers], oa_patches)
+        if rows:
+            try:
+                (job_dir / "manual_fulltext_manifest.md").write_text(ft_oa.manifest_markdown(rows))
+            except Exception:
+                pass
+
     for i, doc in need_pdf[:MAX_DOWNLOADS]:
-        pdf_url = recall_pool.resolve_pdf_url(doc)
+        pdf_url = doc.get("fulltext_url") or recall_pool.resolve_pdf_url(doc)
         if not pdf_url:
             dl_no_url += 1
             continue
@@ -479,7 +519,20 @@ async def search_node(state: GraphState) -> dict:
             continue
         try:
             fname = f"prior_art_{i:03d}.pdf"
-            local = await asyncio.to_thread(download_pdf, pdf_url, job_dir, fname)
+            # GCS, keyed by DOI, is shared across jobs: the same examiner-cited
+            # paper comes back run after run, and the second run should not ask
+            # the publisher again.
+            doi = doc.get("doi") or ft_oa.normalise_doi(doc.get("pub_num") or "")
+            local = None
+            cached = await asyncio.to_thread(ft_oa.cache_get, doi) if doi else None
+            if cached:
+                (job_dir / fname).write_bytes(cached)
+                local = str(job_dir / fname)
+                dl_cached += 1
+            else:
+                local = await asyncio.to_thread(download_pdf, pdf_url, job_dir, fname)
+                if local and doi:
+                    await asyncio.to_thread(ft_oa.cache_put, doi, Path(local).read_bytes())
             if local:
                 doc["local_pdf"] = local
                 download_count += 1
@@ -488,8 +541,8 @@ async def search_node(state: GraphState) -> dict:
         except Exception:
             dl_failed += 1
     _event("info", f"Downloaded {download_count}/{min(len(need_pdf), MAX_DOWNLOADS)} PDFs "
-                   f"({dl_not_needed} documents already had BigQuery claims, {dl_no_url} offered no URL, "
-                   f"{dl_failed} failed)")
+                   f"({dl_cached} served from the GCS cache, {dl_not_needed} documents already had "
+                   f"BigQuery claims, {dl_no_url} offered no URL, {dl_failed} failed)")
     if dl_skipped:
         _event("channel_limited", f"pdf_download: {_PDF_DOWNLOAD_BUDGET_S:.0f}s budget spent, "
                                   f"{dl_skipped} PDFs not fetched (those documents are evaluated from their abstract)")
@@ -536,8 +589,10 @@ async def search_node(state: GraphState) -> dict:
             },
             "fulltext_bq": ft_stats,
             "pdf_download": {"attempted": min(len(need_pdf), MAX_DOWNLOADS), "ok": download_count,
-                             "failed": dl_failed, "no_url": dl_no_url,
+                             "failed": dl_failed, "no_url": dl_no_url, "from_cache": dl_cached,
                              "skipped_budget": dl_skipped, "not_needed": dl_not_needed},
+            "fulltext_oa": {"papers": len(papers), **ft_oa.tier_counts(oa_patches),
+                            "manifest": ft_oa.manifest_rows([d for _, d in papers], oa_patches)},
             "pool": [{"pub_num": d.get("pub_num", ""), "sources": d.get("sources", []),
                       "match_type": d.get("match_type", "")} for d in all_docs],
             "loop_rounds": loop_stats.get("rounds", []) if loop_stats.get("mode") != "moves" else [],

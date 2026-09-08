@@ -268,6 +268,84 @@ def evidence_coverage_md(scoring_report: list[dict] | None) -> list[str]:
     return lines
 
 
+# ── 2d. paper full text ──
+#
+# Where each paper's text came from, and — the part that matters — which papers
+# have no reachable copy at all. Those are not failures to hide: a paper behind
+# a publisher paywall is deliberately not fetched, because OSU Libraries'
+# Responsible Use policy forbids programmatic downloading of licensed content
+# and a violation can suspend access for the whole university. The section ends
+# with the list to open by hand instead. See patent_analyzer/fulltext.py.
+
+_FT_LABEL = {"arxiv": "arXiv", "oa": "open access", "abstract_only": "no open-access copy"}
+
+_FT_NOTE = ("Papers with no open-access copy are evaluated from their abstract. Their full text is not "
+            "fetched through the university subscription on purpose: OSU Libraries' Responsible Use of "
+            "Licensed Electronic Resources forbids “using scripts, spiders, crawlers, or other computer "
+            "programs to automatically download content”, and states that a violation “may suspend "
+            "access for the entire OSU community”. Open the pages below yourself if you need them read.")
+
+_FT_POLICY_URL = "https://library.oregonstate.edu/responsible-use-licensed-electronic-resources"
+
+
+def _ft_stats(search_stats: dict | None) -> dict:
+    ft = (search_stats or {}).get("fulltext_oa") or {}
+    return ft if ft.get("papers") else {}
+
+
+def fulltext_tier_html(search_stats: dict | None) -> str:
+    ft = _ft_stats(search_stats)
+    if not ft:
+        return ""
+    total = int(ft.get("papers", 0))
+    out = ['<div class="sec"><div class="sec-t">Paper Full Text</div>',
+           f'<div class="sec-note">{_e(_FT_NOTE)} '
+           f'<a href="{_FT_POLICY_URL}">Policy</a>.</div>',
+           '<table class="tbl"><thead><tr><th>Source</th><th>Papers</th><th>Share</th></tr></thead><tbody>']
+    for k in ("arxiv", "oa", "abstract_only"):
+        n = int(ft.get(k, 0))
+        hl = ' style="background:#fef3c7"' if k == "abstract_only" and n else ""
+        out.append(f'<tr{hl}><td>{_e(_FT_LABEL[k])}</td><td>{n}</td>'
+                   f'<td>{100 * n / total:.0f}%</td></tr>')
+    out.append("</tbody></table>")
+    rows = ft.get("manifest") or []
+    if rows:
+        out.append(f'<div class="sec-note"><b>{len(rows)} paper(s) to open by hand.</b></div>')
+        out.append('<table class="tbl"><thead><tr><th>#</th><th>DOI</th><th>Title</th>'
+                   '<th>Landing page</th><th>Why not automatic</th></tr></thead><tbody>')
+        for i, r in enumerate(rows, 1):
+            lp = r.get("landing_page") or ""
+            link = f'<a href="{_e(lp)}">{_e(lp[:60])}</a>' if lp else "&mdash;"
+            out.append(f'<tr><td>{i}</td><td>{_e(r.get("doi") or "—")}</td>'
+                       f'<td>{_e((r.get("title") or "")[:90])}</td><td>{link}</td>'
+                       f'<td>{_e(r.get("reason") or "")}</td></tr>')
+        out.append("</tbody></table>")
+    out.append("</div>")
+    return "\n".join(out)
+
+
+def fulltext_tier_md(search_stats: dict | None) -> list[str]:
+    ft = _ft_stats(search_stats)
+    if not ft:
+        return []
+    total = int(ft.get("papers", 0))
+    lines = ["## Paper Full Text", "", f"{_FT_NOTE} <{_FT_POLICY_URL}>", "",
+             "| Source | Papers | Share |", "|---|---|---|"]
+    for k in ("arxiv", "oa", "abstract_only"):
+        n = int(ft.get(k, 0))
+        lines.append(f"| {_FT_LABEL[k]} | {n} | {100 * n / total:.0f}% |")
+    lines.append("")
+    rows = ft.get("manifest") or []
+    if rows:
+        lines += [f"**{len(rows)} paper(s) to open by hand.**", "",
+                  "| # | DOI | Title | Landing page | Why not automatic |", "|---|---|---|---|---|"]
+        for i, r in enumerate(rows, 1):
+            lines.append(f"| {i} | {r.get('doi') or '-'} | {(r.get('title') or '-')[:90]} | "
+                         f"{r.get('landing_page') or '-'} | {r.get('reason') or ''} |")
+        lines.append("")
+    return lines
+
+
 def lens_attribution_html(search_stats: dict | None) -> str:
     """Lens trial terms: results sourced from Lens carry "Data Sourced from The Lens"
     with a link and the logo (Lens.org attribution requirement, trial to 2026-10-02)."""
@@ -952,7 +1030,8 @@ def inject_html(report_html: str, extraction: dict | None, search_stats: dict | 
     # qualifies every number under it.
     block = "\n".join(x for x in (read_gap_html(read_gap), extraction_html(extraction),
                                   channel_health_html(search_stats),
-                                  evidence_coverage_html(scoring_report), loop_html(search_stats),
+                                  evidence_coverage_html(scoring_report),
+                                  fulltext_tier_html(search_stats), loop_html(search_stats),
                                   quote_matrix_html(scoring_report, checklist, adjudication=adjudication), adj_block,
                                   draft_html(draft, extraction), cost_html(cost)) if x)
     if not block:
@@ -971,7 +1050,8 @@ def inject_md(report_md: str, extraction: dict | None, search_stats: dict | None
               cost: dict | None = None, read_gap: dict | None = None) -> str:
     adj_lines = determination_md(adjudication) if adjudication and "## Prior-Art Determination" not in report_md else []
     lines = (read_gap_md(read_gap) + extraction_md(extraction) + channel_health_md(search_stats)
-             + evidence_coverage_md(scoring_report) + loop_md(search_stats)
+             + evidence_coverage_md(scoring_report) + fulltext_tier_md(search_stats)
+             + loop_md(search_stats)
              + quote_matrix_md(scoring_report, checklist, adjudication=adjudication) + adj_lines
              + draft_md(draft, extraction) + cost_md(cost))
     if not lines:
