@@ -78,12 +78,22 @@ def _serpapi() -> list[dict]:
         return [_row("serpapi", "SerpAPI", error="SERPAPI_KEYS not set")]
     # The note goes on the first key only: it is true of the account, not of one
     # key, and repeating it down the table buries the numbers.
-    return [_row("serpapi", f"SerpAPI key {k['key']}", used=k["used"], cap=k["cap"],
-                 unit="searches", period="month", resets_at=_next_month(),
-                 limits=[f"{k['cap']}/key/month (free tier)"],
-                 note=("SerpAPI bills a search that returns no results, so these counters "
-                       "move even on a query that found nothing" if i == 0 else ""))
-            for i, k in enumerate(keys)]
+    rows = []
+    for i, k in enumerate(keys):
+        # A reserved key is held back for demos and production jobs; evals never rotate onto it
+        # (Harry, 2026-09-18). It has to be visible and labelled — a key being kept back must not
+        # read the same as a key that is missing, or the panel says "one key left" either way.
+        note = ("SerpAPI bills a search that returns no results, so these counters "
+                "move even on a query that found nothing" if i == 0 else "")
+        if k.get("reserved"):
+            note = ("Reserved for demos and production jobs — evaluation runs never rotate onto "
+                    "this key. " + note).strip()
+        row = _row("serpapi", f"SerpAPI key {k['key']}" + (" (reserved)" if k.get("reserved") else ""),
+                   used=k["used"], cap=k["cap"], unit="searches", period="month",
+                   resets_at=_next_month(), limits=[f"{k['cap']}/key/month (free tier)"], note=note)
+        row["reserved"] = bool(k.get("reserved"))
+        rows.append(row)
+    return rows
 
 
 def _uspto_odp() -> list[dict]:
