@@ -172,8 +172,15 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
     for st in steps:
         hits = st.pop("_hits", [])
         new_keys = []
-        for c in hits:
-            c.raw.setdefault("loop", {})["candidate"] = core.get("id")
+        for rank, c in enumerate(hits):
+            loop_meta = c.raw.setdefault("loop", {})
+            loop_meta["candidate"] = core.get("id")
+            # Where this hit sat in its query's results, so M1's claims budget can reserve every
+            # query's top ten. The same three lines exist in _run above, but _run serves the
+            # template queries — THIS is the path ReAct actually takes, and m1d's selection came
+            # back with an empty top-ten tier because only _run had been given them.
+            loop_meta.setdefault("q", str(st.get("query") or "")[:160])
+            loop_meta.setdefault("rank", rank)
             key = (c.pub_num or c.title).upper()
             if key not in pool:
                 pool[key] = c

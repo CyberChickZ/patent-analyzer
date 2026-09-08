@@ -42,9 +42,28 @@ def _to_candidate(m: dict, match_type: str) -> Candidate:
     )
 
 
-def _keys() -> list[str]:
+def _all_keys() -> list[str]:
     raw = os.environ.get("SERPAPI_KEYS") or os.environ.get("SERPAPI_KEY", "")
     return [k.strip() for k in raw.split(",") if k.strip()]
+
+
+def _reserved() -> set[str]:
+    """Keys held back from the rotation. Harry, 2026-09-18: "起码得留一个 key
+    给 boss 用" — with two of the four free keys already spent for the month, an
+    eval run that rotates freely can take the last one and there is nothing left
+    to show anybody. A reserved key is spent only by a caller that asks for it
+    (SERPAPI_USE_RESERVED=1), which the eval harness never does."""
+    raw = os.environ.get("SERPAPI_RESERVED_KEYS", "")
+    return {k.strip() for k in raw.split(",") if k.strip()}
+
+
+def _keys() -> list[str]:
+    """The rotation. Reserved keys are out unless this process asked for them."""
+    keys = _all_keys()
+    if os.environ.get("SERPAPI_USE_RESERVED") == "1":
+        return keys
+    res = _reserved()
+    return [k for k in keys if k not in res] or keys
 
 
 def _fp(key: str) -> str:
@@ -56,7 +75,11 @@ def _quota(key: str) -> MonthlyQuota:
 
 
 def quota_status() -> list[dict]:
-    return [{"key": _fp(k), "used": _quota(k).used(), "cap": FREE_TIER_PER_KEY} for k in _keys()]
+    """Every key, including the reserved ones — the panel has to show the key
+    that is being kept back, or "reserved" looks the same as "missing"."""
+    res = _reserved()
+    return [{"key": _fp(k), "used": _quota(k).used(), "cap": FREE_TIER_PER_KEY,
+             "reserved": k in res} for k in _all_keys()]
 
 
 def sync_account() -> list[dict]:
@@ -66,7 +89,7 @@ def sync_account() -> list[dict]:
     import json
     import urllib.request
     out = []
-    for k in _keys():
+    for k in _all_keys():
         try:
             with urllib.request.urlopen(f"https://serpapi.com/account?api_key={k}", timeout=15) as r:
                 d = json.loads(r.read().decode())
