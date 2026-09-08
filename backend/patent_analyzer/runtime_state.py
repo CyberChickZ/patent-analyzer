@@ -52,6 +52,11 @@ def week_key(now: datetime | None = None) -> str:
     return f"{y}-W{w:02d}"
 
 
+def day_key(now: datetime | None = None) -> str:
+    """UTC calendar day, for quotas a provider states per day (Unpaywall)."""
+    return (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+
+
 class MonthlyQuota:
     """Per-(name, month) counter, e.g. SerpAPI calls per key."""
 
