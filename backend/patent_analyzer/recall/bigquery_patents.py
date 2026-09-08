@@ -376,24 +376,13 @@ async def fetch_by_pub_nums(pub_nums: list[str], with_claims: bool = True) -> di
     if not norm:
         return {}
 
-    def _bq_form(p: str) -> str:
-        m = re.match(r"^([A-Z]{2})(\d+)([A-Z]\d?)?$", p)
-        if not m:
-            return p
-        cc, digits, kind = m.group(1), m.group(2), m.group(3) or ""
-        # BigQuery spells US pre-grant numbers year+6 digits (US-2012287933-A1),
-        # USPTO/FiNE spell them year+7 with a leading zero (US20120287933A1)
-        if cc == "US" and len(digits) == 11 and digits[4] == "0":
-            digits = digits[:4] + digits[5:]
-        return f"{cc}-{digits}-{kind}".rstrip("-")
-
-    def _canon(p: str) -> str:
-        p = re.sub(r"[\s\-]", "", p.upper())
-        m = re.match(r"^US(\d{10})([A-Z]\d?)?$", p)
-        if m and m.group(1)[:2] in ("19", "20"):
-            return f"US{m.group(1)[:4]}0{m.group(1)[4:]}{m.group(2) or ''}"
-        return p
-
+    # The module-level _bq_form / _canon_pub, not local copies. The copies that
+    # used to live here had drifted: their number pattern was a bare `\d+`, so
+    # every reissue, design and plant publication (US-RE41525-E, US-D712191-S,
+    # US-PP20104-P2) was spelled back wrong and silently found nothing.
+    # Measured on 300 publications drawn from amie_patents.claims itself:
+    # 125 hits before, 300 after.
+    _canon = _canon_pub
     wanted = [_bq_form(p) for p in norm]
     client = bigquery.Client(project=GC_PROJECT)
     pubs_param = bigquery.ArrayQueryParameter("pubs", "STRING", wanted)

@@ -153,3 +153,22 @@ def test_an_unreadable_pdf_is_not_counted_as_a_full_pdf_read(monkeypatch, tmp_pa
 
     g = ev._read_gap([{"pub_num": "US-1-A1"}], [r], [r])
     assert g["read"] == 0 and g["shortfall"] == 1
+
+
+def test_reissue_design_and_plant_numbers_are_spelled_back_correctly(monkeypatch):
+    """fetch_by_pub_nums carried local copies of _bq_form/_canon_pub whose number
+    pattern was a bare \\d+, so US-RE41525-E and friends were passed through
+    unchanged, hashed to the wrong bucket and never found. 125/300 hits became
+    300/300 on publications drawn from amie_patents.claims itself."""
+    asked = {}
+
+    async def fake_fetch(pubs, with_claims=True):
+        asked["pubs"] = list(pubs)
+        return {}
+
+    monkeypatch.setattr(bq, "fetch_by_pub_nums", fake_fetch)
+    asyncio.run(bq.hydrate_full_text(
+        [{"pub_num": p, "match_type": "Patent"} for p in
+         ("US-RE41525-E", "US-D712191-S", "US-PP20104-P2", "US9075557B2", "US20120194631A1")]))
+    assert [bq._bq_form(p) for p in asked["pubs"]] == [
+        "US-RE41525-E", "US-D712191-S", "US-PP20104-P2", "US-9075557-B2", "US-2012194631-A1"]
