@@ -120,19 +120,32 @@ def test_resolve_without_a_doi_never_asks_unpaywall(monkeypatch):
     assert p["landing_page"] == ""
 
 
-def test_manifest_lists_only_the_unreachable_and_carries_the_policy():
-    docs = [{"title": "A"}, {"title": "B"}, {"title": "C"}]
+def test_manifest_lists_every_paper_without_a_pdf_and_carries_the_policy():
+    """Membership is decided on local_pdf, not on the tier: a paper can resolve
+    to an open-access URL and still arrive with nothing (measured: 6 of the 17
+    NPL gold resolved, 0 returned a PDF). A tier-only list would omit those."""
+    docs = [{"title": "A", "local_pdf": "/tmp/a.pdf"},
+            {"title": "B"},
+            {"title": "C", "fulltext_download": "failed"}]
     patches = [{"fulltext_tier": "arxiv"},
                {"fulltext_tier": "abstract_only", "doi": "10.1/x",
                 "landing_page": "https://p.example/x", "fulltext_detail": "Unpaywall: not open access"},
-               {"fulltext_tier": "oa"}]
+               {"fulltext_tier": "oa", "doi": "10.1/c", "landing_page": "https://p.example/c",
+                "fulltext_detail": "Unpaywall (publisher)"}]
     rows = ft.manifest_rows(docs, patches)
-    assert [r["title"] for r in rows] == ["B"]
+    assert [r["title"] for r in rows] == ["B", "C"]
+    assert "returned no readable PDF" in rows[1]["reason"]
     md = ft.manifest_markdown(rows)
     assert "10.1/x" in md and "https://p.example/x" in md
     # The reason the proxied tier does not exist travels with the list.
     assert "scripts, spiders, crawlers" in md
     assert "entire OSU community" in md
+
+
+def test_read_counts_only_counts_documents_that_hold_a_pdf():
+    docs = [{"local_pdf": "/tmp/a.pdf"}, {}, {"local_pdf": "/tmp/c.pdf"}]
+    patches = [{"fulltext_tier": "arxiv"}, {"fulltext_tier": "oa"}, {"fulltext_tier": "oa"}]
+    assert ft.read_counts(docs, patches) == {"arxiv": 1, "oa": 1, "abstract_only": 0}
 
 
 def test_tier_counts_covers_every_tier():
@@ -162,12 +175,15 @@ def test_report_section_is_silent_without_papers():
 
 def test_report_section_states_the_tiers_and_the_policy():
     ss = {"fulltext_oa": {"papers": 4, "arxiv": 1, "oa": 1, "abstract_only": 2,
+                          "read": {"arxiv": 1, "oa": 0, "abstract_only": 0},
                           "manifest": [{"doi": "10.1/x", "title": "A paper",
                                         "landing_page": "https://p.example/x",
                                         "reason": "Unpaywall: not open access"}]}}
     h, m = fulltext_tier_html(ss), "\n".join(fulltext_tier_md(ss))
     for blob in (h, m):
         assert "25%" in blob and "50%" in blob
+        # resolved (2) and read (1) are different numbers and both are printed
+        assert "1 of 4 (25%)" in blob
         assert "entire OSU community" in blob
         assert "library.oregonstate.edu/responsible-use-licensed-electronic-resources" in blob
         assert "10.1/x" in blob

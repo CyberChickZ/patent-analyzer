@@ -281,19 +281,49 @@ def tier_counts(patches: list[dict]) -> dict[str, int]:
     return counts
 
 
+def read_counts(docs: list[dict], patches: list[dict]) -> dict[str, int]:
+    """Per tier, how many documents ended up with a PDF in hand. Resolving a URL
+    and holding the paper are different numbers and the report prints both:
+    counting a resolved-but-unfetchable paper as read is exactly the overstating
+    this module exists to stop."""
+    counts = {t: 0 for t in TIERS}
+    for doc, p in zip(docs, patches):
+        if doc.get("local_pdf"):
+            counts[p.get("fulltext_tier", "abstract_only")] += 1
+    return counts
+
+
 # ── manual-download manifest (the replacement for the dropped proxied tier) ──
 
+_DL_REASON = {"failed": "a URL was resolved but it returned no readable PDF",
+              "no_url": "no URL to fetch",
+              "skipped_budget": "the shared download budget ran out first"}
+
+
 def manifest_rows(docs: list[dict], patches: list[dict]) -> list[dict]:
-    """The abstract_only documents, as a list a person can work through by hand:
-    DOI, title, landing page, and why the automatic tiers gave up. Opening these
-    pages and saving the PDFs is reading, not scripted downloading."""
+    """Every paper still without a readable PDF, as a list a person can work
+    through by hand: DOI, title, landing page, and why the automatic tiers gave
+    up. Opening these pages and saving the PDFs is reading, not scripted
+    downloading.
+
+    Membership is decided on `local_pdf`, not on the tier: a document can
+    resolve to an open-access URL and still arrive with nothing, which is the
+    common case rather than the exception (measured on the 17 examiner-cited
+    NPL gold: 6 resolved to an OA URL, 0 returned a PDF — publisher hosts 403 a
+    plain HTTP client and PMC puts a proof-of-work challenge in front of the
+    file). A list built from the tier alone would quietly omit those.
+    """
     rows = []
     for doc, p in zip(docs, patches):
-        if p.get("fulltext_tier") != "abstract_only":
+        if doc.get("local_pdf"):
             continue
+        why = p.get("fulltext_detail", "")
+        dl = doc.get("fulltext_download") or ""
+        if dl in _DL_REASON:
+            why = f"{why} — {_DL_REASON[dl]}".strip(" —")
         rows.append({"doi": p.get("doi", ""), "title": (doc.get("title") or "").strip(),
                      "landing_page": p.get("landing_page", ""),
-                     "reason": p.get("fulltext_detail", "")})
+                     "tier": p.get("fulltext_tier", ""), "reason": why})
     return rows
 
 

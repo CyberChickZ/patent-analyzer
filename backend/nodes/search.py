@@ -481,41 +481,25 @@ async def search_node(state: GraphState) -> dict:
     papers = [(i, doc) for i, doc in need_pdf[:MAX_DOWNLOADS] if doc.get("match_type") != "Patent"]
     ft_oa_t0 = _time.monotonic()
     oa_patches: list[dict] = []
+    ft_rows: list[dict] = []
     try:
         oa_patches = await ft_oa.resolve_many([d for _, d in papers])
         for (_, doc), patch in zip(papers, oa_patches):
             doc.update(patch)
     except Exception as exc:
         _event("channel_crashed", f"fulltext_oa: {type(exc).__name__}: {exc}")
-    if papers:
-        tiers = ft_oa.tier_counts(oa_patches)
-        n_reachable = tiers.get("arxiv", 0) + tiers.get("oa", 0)
-        _event("info", f"Open-access full text: {n_reachable}/{len(papers)} papers have a "
-                       f"fetchable copy (arXiv {tiers.get('arxiv', 0)}, OA {tiers.get('oa', 0)}, "
-                       f"abstract-only {tiers.get('abstract_only', 0)})")
-        channel_health.append({
-            "channel": "fulltext_oa",
-            "status": "ok" if n_reachable else ("empty" if oa_patches else "errored"),
-            "n": n_reachable, "seconds": round(_time.monotonic() - ft_oa_t0, 1),
-            "detail": f"arXiv {tiers.get('arxiv', 0)}, open access {tiers.get('oa', 0)}, "
-                      f"abstract-only {tiers.get('abstract_only', 0)} of {len(papers)} papers. "
-                      f"Paywalled copies are not fetched: OSU Libraries' Responsible Use policy "
-                      f"forbids programmatic downloading of licensed content, so those papers are "
-                      f"listed for manual download instead.", "errors": []})
-        rows = ft_oa.manifest_rows([d for _, d in papers], oa_patches)
-        if rows:
-            try:
-                (job_dir / "manual_fulltext_manifest.md").write_text(ft_oa.manifest_markdown(rows))
-            except Exception:
-                pass
-
+    for i, doc in enumerate(ranked):
+        if (doc.get("claims_text") or "").strip():
+            doc["fulltext_download"] = "not_needed"
     for i, doc in need_pdf[:MAX_DOWNLOADS]:
         pdf_url = doc.get("fulltext_url") or recall_pool.resolve_pdf_url(doc)
         if not pdf_url:
             dl_no_url += 1
+            doc["fulltext_download"] = "no_url"
             continue
         if _time.monotonic() - dl_t0 > _PDF_DOWNLOAD_BUDGET_S:
             dl_skipped += 1
+            doc["fulltext_download"] = "skipped_budget"
             continue
         try:
             fname = f"prior_art_{i:03d}.pdf"
@@ -535,14 +519,49 @@ async def search_node(state: GraphState) -> dict:
                     await asyncio.to_thread(ft_oa.cache_put, doi, Path(local).read_bytes())
             if local:
                 doc["local_pdf"] = local
+                doc["fulltext_download"] = "cached" if cached else "ok"
                 download_count += 1
             else:
                 dl_failed += 1
+                doc["fulltext_download"] = "failed"
         except Exception:
             dl_failed += 1
+            doc["fulltext_download"] = "failed"
     _event("info", f"Downloaded {download_count}/{min(len(need_pdf), MAX_DOWNLOADS)} PDFs "
                    f"({dl_cached} served from the GCS cache, {dl_not_needed} documents already had "
                    f"BigQuery claims, {dl_no_url} offered no URL, {dl_failed} failed)")
+
+    # Resolution and possession are two different numbers, and the report gets
+    # both. Measured on the 17 examiner-cited NPL gold: 6 resolved to an
+    # open-access URL and 0 of them returned a PDF — publisher hosts answer a
+    # plain HTTP client with a 403 (Cloudflare) and PMC now puts a proof-of-work
+    # challenge in front of the file. `fulltext_tier` therefore keeps saying
+    # which tier answered, and `fulltext_download` says what came back, so a
+    # resolved-but-unfetchable paper cannot be counted as read.
+    if papers:
+        docs_only = [d for _, d in papers]
+        tiers = ft_oa.tier_counts(oa_patches)
+        read = ft_oa.read_counts(docs_only, oa_patches)
+        n_resolved = tiers.get("arxiv", 0) + tiers.get("oa", 0)
+        n_read = sum(read.values())
+        _event("info", f"Open-access full text: {n_resolved}/{len(papers)} papers resolved to a copy "
+                       f"(arXiv {tiers.get('arxiv', 0)}, OA {tiers.get('oa', 0)}, "
+                       f"abstract-only {tiers.get('abstract_only', 0)}); {n_read} returned a PDF")
+        channel_health.append({
+            "channel": "fulltext_oa",
+            "status": "ok" if n_read else ("limited" if n_resolved else "empty"),
+            "n": n_read, "seconds": round(_time.monotonic() - ft_oa_t0, 1),
+            "detail": f"{n_resolved} of {len(papers)} papers resolved to an open-access copy "
+                      f"(arXiv {tiers.get('arxiv', 0)}, OA {tiers.get('oa', 0)}) and {n_read} of those "
+                      f"returned a readable PDF. Paywalled copies are not fetched: OSU Libraries' "
+                      f"Responsible Use policy forbids programmatic downloading of licensed content, "
+                      f"so the rest are listed for manual download instead.", "errors": []})
+        ft_rows = ft_oa.manifest_rows(docs_only, oa_patches)
+        if ft_rows:
+            try:
+                (job_dir / "manual_fulltext_manifest.md").write_text(ft_oa.manifest_markdown(ft_rows))
+            except Exception:
+                pass
     if dl_skipped:
         _event("channel_limited", f"pdf_download: {_PDF_DOWNLOAD_BUDGET_S:.0f}s budget spent, "
                                   f"{dl_skipped} PDFs not fetched (those documents are evaluated from their abstract)")
@@ -592,7 +611,8 @@ async def search_node(state: GraphState) -> dict:
                              "failed": dl_failed, "no_url": dl_no_url, "from_cache": dl_cached,
                              "skipped_budget": dl_skipped, "not_needed": dl_not_needed},
             "fulltext_oa": {"papers": len(papers), **ft_oa.tier_counts(oa_patches),
-                            "manifest": ft_oa.manifest_rows([d for _, d in papers], oa_patches)},
+                            "read": ft_oa.read_counts([d for _, d in papers], oa_patches),
+                            "manifest": ft_rows},
             "pool": [{"pub_num": d.get("pub_num", ""), "sources": d.get("sources", []),
                       "match_type": d.get("match_type", "")} for d in all_docs],
             "loop_rounds": loop_stats.get("rounds", []) if loop_stats.get("mode") != "moves" else [],

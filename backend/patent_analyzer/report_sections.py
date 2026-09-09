@@ -279,8 +279,11 @@ def evidence_coverage_md(scoring_report: list[dict] | None) -> list[str]:
 
 _FT_LABEL = {"arxiv": "arXiv", "oa": "open access", "abstract_only": "no open-access copy"}
 
-_FT_NOTE = ("Papers with no open-access copy are evaluated from their abstract. Their full text is not "
-            "fetched through the university subscription on purpose: OSU Libraries' Responsible Use of "
+_FT_NOTE = ("<b>Resolved</b> is how many papers an open-access copy was found for; <b>read</b> is how many "
+            "of those actually returned a PDF. They differ, and the second number is the one that counts: "
+            "publisher hosts answer an automated client with a 403 and PubMed Central puts a proof-of-work "
+            "challenge in front of the file. Everything not read was evaluated from its abstract. No copy is "
+            "fetched through the university subscription, on purpose: OSU Libraries' Responsible Use of "
             "Licensed Electronic Resources forbids “using scripts, spiders, crawlers, or other computer "
             "programs to automatically download content”, and states that a violation “may suspend "
             "access for the entire OSU community”. Open the pages below yourself if you need them read.")
@@ -301,12 +304,18 @@ def fulltext_tier_html(search_stats: dict | None) -> str:
     out = ['<div class="sec"><div class="sec-t">Paper Full Text</div>',
            f'<div class="sec-note">{_e(_FT_NOTE)} '
            f'<a href="{_FT_POLICY_URL}">Policy</a>.</div>',
-           '<table class="tbl"><thead><tr><th>Source</th><th>Papers</th><th>Share</th></tr></thead><tbody>']
+           '<table class="tbl"><thead><tr><th>Source</th><th>Resolved</th><th>Share</th>'
+           '<th>Read as PDF</th></tr></thead><tbody>']
+    read = ft.get("read") or {}
     for k in ("arxiv", "oa", "abstract_only"):
         n = int(ft.get(k, 0))
+        r = int(read.get(k, 0))
         hl = ' style="background:#fef3c7"' if k == "abstract_only" and n else ""
         out.append(f'<tr{hl}><td>{_e(_FT_LABEL[k])}</td><td>{n}</td>'
-                   f'<td>{100 * n / total:.0f}%</td></tr>')
+                   f'<td>{100 * n / total:.0f}%</td><td>{r if k != "abstract_only" else "&mdash;"}</td></tr>')
+    n_read = sum(int(read.get(k, 0)) for k in ("arxiv", "oa"))
+    out.append(f'<tr><td><b>read</b></td><td colspan="2"></td><td><b>{n_read} of {total} '
+               f'({100 * n_read / total:.0f}%)</b></td></tr>')
     out.append("</tbody></table>")
     rows = ft.get("manifest") or []
     if rows:
@@ -329,12 +338,16 @@ def fulltext_tier_md(search_stats: dict | None) -> list[str]:
     if not ft:
         return []
     total = int(ft.get("papers", 0))
-    lines = ["## Paper Full Text", "", f"{_FT_NOTE} <{_FT_POLICY_URL}>", "",
-             "| Source | Papers | Share |", "|---|---|---|"]
+    note = _FT_NOTE.replace("<b>", "**").replace("</b>", "**")
+    lines = ["## Paper Full Text", "", f"{note} <{_FT_POLICY_URL}>", "",
+             "| Source | Resolved | Share | Read as PDF |", "|---|---|---|---|"]
+    read = ft.get("read") or {}
     for k in ("arxiv", "oa", "abstract_only"):
         n = int(ft.get(k, 0))
-        lines.append(f"| {_FT_LABEL[k]} | {n} | {100 * n / total:.0f}% |")
-    lines.append("")
+        r = int(read.get(k, 0)) if k != "abstract_only" else "-"
+        lines.append(f"| {_FT_LABEL[k]} | {n} | {100 * n / total:.0f}% | {r} |")
+    n_read = sum(int(read.get(k, 0)) for k in ("arxiv", "oa"))
+    lines += [f"| **read** | | | **{n_read} of {total} ({100 * n_read / total:.0f}%)** |", ""]
     rows = ft.get("manifest") or []
     if rows:
         lines += [f"**{len(rows)} paper(s) to open by hand.**", "",
