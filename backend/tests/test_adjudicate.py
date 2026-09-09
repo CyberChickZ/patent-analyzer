@@ -373,3 +373,15 @@ def test_findings_never_touch_a_102():
                 "analogous": [], "level_of_ordinary_skill": {"stated": ""}}, _TEXT, ["US-1"])
     adj = adjudicate(E, [_doc("US-1", E)], findings=f)
     assert adj["label"] == "102"
+
+
+def test_a_missing_finding_is_not_blamed_for_a_missing_element():
+    """When the references never covered the claim, the reason must say so.
+    Naming the absent motivation instead would point at the wrong gap."""
+    from patent_analyzer.obviousness import verify
+    none = verify({"motivation": {"found": False}, "expectation_of_success": {"found": False},
+                   "analogous": [], "level_of_ordinary_skill": {"stated": ""}}, {}, ["US-1", "US-2"])
+    adj = adjudicate(E, [_doc("US-1", E[:1]), _doc("US-2", E[1:2])],
+                     single_partial_103=0.7, findings=none)
+    assert adj["label"] == "ALLOW" and adj["basis"] == "none"
+    assert "no verified disclosure" in adj["reason"] and "motivation" not in adj["reason"]

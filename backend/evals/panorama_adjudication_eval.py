@@ -148,17 +148,66 @@ def confusion(pairs: list[tuple[str, str]]) -> dict:
             "per_class": per, "matrix": m}
 
 
-def score_rules(stage1: dict, params: dict, drop_preamble: bool = False) -> tuple[dict, list[dict]]:
+async def run_findings(stage1: dict, docs: dict[str, dict], concurrency: int = 2,
+                       run_dir: Path = RUN_DIR, tag: str = "") -> dict[str, dict]:
+    """Stage 1.5: the four MPEP findings per instance, cached like stage 1.
+
+    One call per instance, on the references the combination would rely on.
+    The model never sees the label or the claim's own description — only the
+    elements and the references' text (see app.llm.obviousness_findings and
+    MPEP 2142 on hindsight). Every quote it returns is located before it counts.
+    """
+    from app.llm import obviousness_findings
+    from patent_analyzer.obviousness import verify
+    out_path = run_dir / f"obv_findings{tag}.json"
+    done = json.loads(out_path.read_text()) if out_path.exists() else {}
+    sem = asyncio.Semaphore(concurrency)
+
+    def _texts(r: dict) -> dict[str, str]:
+        return {d["pub_num"]: (docs.get(d["pub_num"], {}).get("text") or "")[:MAX_DOC_CHARS]
+                for d in r["docs"] if d.get("pub_num")}
+
+    async def one(key, r):
+        if key in done:
+            return
+        texts = {k: t for k, t in _texts(r).items() if len(t) >= 120}
+        if len(texts) < 1:
+            done[key] = {"skipped": "no reference text"}
+            return
+        els = [c.get("criterion") or c.get("text") or "" for c in r["checklist"]]
+        async with sem:
+            raw = await obviousness_findings(els, texts)
+        done[key] = {"raw": raw, "verified": verify(raw, texts, sorted(texts))}
+        _flush()
+
+    def _flush():
+        tmp = out_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(done, ensure_ascii=False))
+        tmp.replace(out_path)
+
+    try:
+        await asyncio.gather(*(one(k, r) for k, r in stage1.items()))
+    finally:
+        _flush()
+    return done
+
+
+def score_rules(stage1: dict, params: dict, drop_preamble: bool = False,
+                findings: dict | None = None) -> tuple[dict, list[dict]]:
     from patent_analyzer.adjudicate import adjudicate
     pairs, rows = [], []
     for key, r in stage1.items():
         checklist = [c for c in r["checklist"] if not (drop_preamble and c.get("preamble"))]
-        adj = adjudicate(checklist, r["docs"], **params)
+        f = ((findings or {}).get(key) or {}).get("verified") if findings else None
+        adj = adjudicate(checklist, r["docs"], findings=f, **params)
         pairs.append((r["label"], adj["label"]))
         rows.append({"key": key, "gold": r["label"], "pred": adj["label"], "risk": adj["risk"],
                      "is_dependent": r["is_dependent"], "n_elements": adj["n_elements"],
                      "best_coverage": adj["best_coverage"],
                      "combo_coverage": adj["combo"]["coverage"] if adj["combo"] else 0.0,
+                     "basis": adj["basis"],
+                     "findings": {k: (f or {}).get(k, {}).get("status") for k in
+                                  ("motivation", "expectation_of_success")} if f else None,
                      "text_modes": [d.get("text_mode") for d in r["docs"]]})
     return confusion(pairs), rows
 
@@ -227,6 +276,9 @@ async def main():
     ap.add_argument("--concurrency", type=int, default=3)
     ap.add_argument("--run", default="h2", help="run name under eval_data/runs/ (samples.json + docs.json)")
     ap.add_argument("--tag", default="", help="suffix for doc_results / adjudication_result (e.g. bri)")
+    ap.add_argument("--findings", action="store_true",
+                    help="stage 1.5: one call per instance for the MPEP 2143.01 / 2143.02 / 2141.01(a) findings, "
+                         "then score every variant a second time with the rule gated on them")
     args = ap.parse_args()
 
     import llm_cache
@@ -257,15 +309,26 @@ async def main():
     print(f"stage 1: {len(stage1)} instances, {sum(len(v['docs']) for v in stage1.values())} scored documents; "
           + llm_cache.summary())
 
+    findings = None
+    if args.findings:
+        findings = await run_findings(stage1, docs, concurrency=args.concurrency, run_dir=run_dir, tag=tag)
+        got = [f for f in findings.values() if f.get("verified")]
+        loc = sum(f["verified"]["quotes_located"] for f in got)
+        chk = sum(f["verified"]["quotes_checked"] for f in got)
+        print(f"stage 1.5: findings for {len(got)}/{len(findings)} instances; "
+              f"{loc}/{chk} quotes located ({loc / max(1, chk):.1%}) — an unlocated quote fails its finding")
+
     header = "| rule | acc | macro-F1 | F1 102 | F1 103 | F1 ALLOW |\n|---|---|---|---|---|---|"
     report = {"n": len(stage1), "variants": {}}
     print(header)
     for name, p in (VARIANTS if args.variants else {list(VARIANTS)[0]: {}}).items():
         p = dict(p)
         drop = p.pop("_drop_preamble", False)
-        c, rows = score_rules(stage1, p, drop_preamble=drop)
-        report["variants"][name] = {"params": p, "drop_preamble": drop, "confusion": c, "rows": rows}
-        print(fmt_table(name, c))
+        for suffix, f in (("", None),) + ((("  + MPEP findings gate", findings),) if findings else ()):
+            c, rows = score_rules(stage1, p, drop_preamble=drop, findings=f)
+            report["variants"][name + suffix] = {"params": p, "drop_preamble": drop,
+                                                 "findings_gate": bool(f), "confusion": c, "rows": rows}
+            print(fmt_table(name + suffix, c))
     base = list(report["variants"].values())[0]
     print(fmt_matrix(base["confusion"]))
     dep = Counter((r["is_dependent"], r["gold"] == r["pred"]) for r in base["rows"])

@@ -238,7 +238,12 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
     else:
         label, basis = "ALLOW", "none"
         missing = combo["missing"] if combo else names
-        gaps = _blocked_103(combo_docs or ([_key(best)] if best else []))
+        # only call it a missing finding when the coverage was actually there — otherwise the
+        # reason the label is ALLOW is that an element has no disclosure, and saying "no motivation
+        # to combine" would name the wrong gap
+        covered_enough = bool(combo and len(combo_docs) >= 2 and combo["n_covered"] >= needed) or \
+            bool(single_partial_103 is not None and best and best_cov >= single_partial_103)
+        gaps = _blocked_103(combo_docs or ([_key(best)] if best else [])) if covered_enough else ""
         if gaps:
             # the elements are all there; what is missing is a finding, and saying which one is
             # the whole point of MPEP 2143's "clear articulation" requirement
