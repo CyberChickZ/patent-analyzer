@@ -27,10 +27,14 @@ def test_neighbourhood_collects_sources_filters_cutoff_and_resolves_ids(monkeypa
     async def recs(pid, limit=100):
         return [_p("K1", "recommended", 2009, mag=555)], None
 
-    async def s2search(q, limit=50):
+    asked = {}
+
+    async def s2search(q, limit=50, before_year=""):
+        asked["s2"] = before_year
         return [_p("S1", "keyword hit", 2007, mag=666)], None
 
-    async def oasearch(q, limit=50):
+    async def oasearch(q, limit=50, before_year=""):
+        asked["oa"] = before_year
         return [Candidate(title="openalex hit", match_type="Paper", year="2006", raw={"openalex": {"id": "https://openalex.org/W777"}})], None
 
     async def ids_for_dois(dois):
@@ -50,6 +54,9 @@ def test_neighbourhood_collects_sources_filters_cutoff_and_resolves_ids(monkeypa
     ids = {c.title: (c.raw.get("neigh") or {}).get("oa_id") for c in papers}
     assert ids["old ref"] == "W111" and ids["ref with doi"] == "W888" and ids["openalex hit"] == "W777"
     assert info["with_oa_id"] == len(papers) and info["located"]["paperId"] == "P0"
+    # the date range is asked of the API, not applied after the fact: post-filtering
+    # threw away ~87% of the results (evals/scratch_n5_cutoff_probe.py)
+    assert asked == {"s2": "20110202", "oa": "20110202"}
 
 
 def test_keyword_queries_are_short_and_from_facets():
@@ -62,3 +69,16 @@ def test_keyword_queries_are_short_and_from_facets():
     assert qs[0] == "teleconferencing apparatus movable display rotation" and len(qs[0].split()) <= 7
     assert qs[1] == "telepresence system video conferencing robot"
     assert len(keyword_queries({"id": "x", "concept": "one two three four five six seven eight nine"})[0].split()) == 7
+
+
+def test_named_queries_use_the_named_facet_not_the_claim_bag():
+    from patent_analyzer.agentic.neighbourhood import named_queries
+    cand = {"id": "inv1", "elements": [
+        {"id": "e0", "facets": {"named": ["co-fish", "chromosome orientation fish"],
+                                "thing": ["detecting chromosomal inversions", "inversion detect"]}},
+        {"id": "e1", "facets": {"named": ["hoechst 33258", "flag", "kh7"], "thing": ["strand degrad"]}}]}
+    qs = named_queries(cand)
+    assert qs[0] == "co-fish" and "co-fish inversion detect" in qs
+    # too short ("kh7") and generic ("flag") names are not queries of their own
+    assert not any(q.startswith("kh7") or q.startswith("flag") for q in qs)
+    assert named_queries({"id": "inv2", "elements": [{"id": "e0", "facets": {"thing": ["x"]}}]}) == []

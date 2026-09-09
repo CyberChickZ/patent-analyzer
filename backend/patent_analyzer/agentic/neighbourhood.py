@@ -13,6 +13,7 @@ others resolved from DOI in batches of 50.
 from __future__ import annotations
 
 import os
+import re
 import time
 
 from ..recall import openalex as oa
@@ -62,6 +63,52 @@ def keyword_queries(cand: dict, max_words: int = 7) -> list[str]:
     if len(q2.split()) >= 3 and q2 not in out:
         out.append(" ".join(q2.split()[:max_words]))
     return out
+
+
+NAMED_PER_CAND = int(os.environ.get("NEIGH_NAMED_QUERIES", "6"))
+_NAMED_DROP = re.compile(r"^(fig|table|flag|site|step|method|system|device)\b|^\W*$", re.I)
+
+
+def named_queries(cand: dict, max_q: int = 0) -> list[str]:
+    """Paper-side queries built from the `named` facet.
+
+    `keyword_queries` joins the `patent`/`thing` facets into one 7-word bag —
+    claim prose ("engineered bacterium bacterial chromosome in-frame insertion
+    recombinant"). A paper is titled with the name of the assay, reagent, gene
+    or protein, which Phase 2 already extracted into `named` and which the
+    paper channel never used. Measured on the four h1h cases that have
+    examiner-cited NPL: the bag form returned 1 of the 17 gold papers in any
+    channel's top-100, the named form 7 (evals/scratch_n5_named_probe.py).
+
+    MPEP 904.02(c): "Any search query may include terminology related to the
+    general state of the relevant technology, disclosed features from
+    applicant's disclosure and claim terminology" — the disclosure's own names
+    are as legitimate a query as the claim's wording, and on the paper side
+    they are the only one that works.
+
+    Two forms per name: the name alone, and the name with the candidate's
+    domain noun (the first element's shortest `thing` form) so a short or
+    ambiguous name is still constrained.
+    """
+    els = cand.get("elements") or []
+    names: list[str] = []
+    for e in els:
+        for t in ((e.get("facets") or {}).get("named") or []):
+            t = " ".join(str(t).lower().split())
+            if len(t) < 4 or _NAMED_DROP.match(t) or t in names:
+                continue
+            names.append(t)
+    if not names:
+        return []
+    things = [" ".join(str(t).lower().split())
+              for t in ((els[0].get("facets") or {}).get("thing") or [])]
+    domain = min(things, key=len) if things else ""
+    out: list[str] = []
+    for n in names:
+        for q in (n, f"{n} {domain}".strip() if domain and domain not in n else ""):
+            if q and q not in out:
+                out.append(q)
+    return out[:(max_q or NAMED_PER_CAND)]
 
 
 async def locate(title: str, doi: str = "", arxiv_id: str = "") -> Candidate | None:
@@ -118,14 +165,18 @@ async def paper_neighbourhood(title: str, cands: list[dict], cutoff: str | None 
         _add(recs, "recommendations")
     for cand in cands[:4]:
         # short keyword queries: S2 and OpenAlex return 0 for a 200-char concept sentence
-        # (verified 2026-09-18), 15-20 hits for 5-6 words
-        for kq in keyword_queries(cand)[:KW_PER_CAND]:
-            s2, _ = await ss.search(kq, limit=50)
+        # (verified 2026-09-18), 15-20 hits for 5-6 words. The `named` forms go out
+        # alongside the claim-language bag: on the four h1h cases with examiner-cited
+        # NPL the bag returned 1 of the 17 gold papers, the named forms 7 (N5).
+        named = named_queries(cand)
+        for kq in keyword_queries(cand)[:KW_PER_CAND] + named:
+            s2, _ = await ss.search(kq, limit=100, before_year=cutoff or "")
             info["s2_calls"] += 1
             _add(s2, f"s2_search:{cand.get('id')}")
-            oa_hits, _ = await oa.search_works(kq, limit=50)
+            oa_hits, _ = await oa.search_works(kq, limit=100, before_year=cutoff or "")
             _add(oa_hits, f"openalex:{cand.get('id')}")
-        info.setdefault("keyword_queries", {})[cand.get("id")] = keyword_queries(cand)[:KW_PER_CAND]
+        info.setdefault("keyword_queries", {})[cand.get("id")] = (
+            keyword_queries(cand)[:KW_PER_CAND] + named)
     # second hop: references of the papers closest to the invention summary
     hop_src = [c for c in pool.values() if ((c.raw or {}).get("semantic_scholar") or {}).get("paperId")]
     if hop_src and summary:
