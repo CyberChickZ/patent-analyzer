@@ -122,16 +122,30 @@ async def _get(client: httpx.AsyncClient, url: str, params: dict | None = None,
     return None, last_err or "unknown error"
 
 
-async def search(query: str, limit: int = 30) -> tuple[list[Candidate], str | None]:
-    """Keyword + semantic search via /graph/v1/paper/search."""
+async def search(query: str, limit: int = 30,
+                 before_year: str = "") -> tuple[list[Candidate], str | None]:
+    """Keyword + semantic search via /graph/v1/paper/search.
+
+    `before_year` asks the API for the date range instead of fetching the
+    default ranking and throwing the post-cutoff half away: measured on the
+    26 paper queries of the four h1h cases with examiner-cited NPL, only
+    307/2325 = 13% of the unfiltered top-100 is old enough to be prior art
+    (evals/scratch_n5_cutoff_probe.py), so a caller that post-filters keeps
+    ~6 of 50. The endpoint's `year` takes an open range; "-2006" (up to and
+    including 2006) is verified against the live API, not read off the docs —
+    api.semanticscholar.org/api-docs renders its parameter table in JS.
+    """
     if not query:
         return [], "empty query"
+    params = {
+        "query": query[:300],
+        "limit": min(max(limit, 1), 100),
+        "fields": DEFAULT_FIELDS,
+    }
+    if before_year:
+        params["year"] = f"-{str(before_year)[:4]}"
     async with httpx.AsyncClient() as client:
-        data, err = await _get(client, f"{API_BASE}/paper/search", {
-            "query": query[:300],
-            "limit": min(max(limit, 1), 100),
-            "fields": DEFAULT_FIELDS,
-        })
+        data, err = await _get(client, f"{API_BASE}/paper/search", params)
     if err:
         return [], err
     if not data:

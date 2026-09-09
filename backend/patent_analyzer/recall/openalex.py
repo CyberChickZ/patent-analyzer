@@ -128,16 +128,25 @@ async def _get(client: httpx.AsyncClient, url: str, params: dict,
     return None, last_err or "unknown error after retries"
 
 
-async def search_works(query: str, limit: int = 30) -> tuple[list[Candidate], str | None]:
-    """Free-text search across OpenAlex works."""
+async def search_works(query: str, limit: int = 30,
+                       before_year: str = "") -> tuple[list[Candidate], str | None]:
+    """Free-text search across OpenAlex works.
+
+    `before_year` becomes `filter=publication_year:<YYYY+1`, so the ranking we
+    page through is already prior art — see semantic_scholar.search for why
+    post-filtering costs ~87% of the results.
+    """
     if not query:
         return [], "empty query"
+    p = {
+        "search": query[:300],
+        "per_page": min(max(limit, 1), 100),
+        "select": "id,title,abstract_inverted_index,publication_year,authorships,doi,open_access,primary_location,ids,cited_by_count,concepts",
+    }
+    if str(before_year)[:4].isdigit():
+        p["filter"] = f"publication_year:<{int(str(before_year)[:4]) + 1}"
     async with httpx.AsyncClient() as client:
-        data, err = await _get(client, f"{API_BASE}/works", _params({
-            "search": query[:300],
-            "per_page": min(max(limit, 1), 100),
-            "select": "id,title,abstract_inverted_index,publication_year,authorships,doi,open_access,primary_location,ids,cited_by_count,concepts",
-        }))
+        data, err = await _get(client, f"{API_BASE}/works", _params(p))
     if err:
         return [], err
     if not data:
