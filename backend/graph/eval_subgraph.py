@@ -170,6 +170,17 @@ async def _eval_one(input: SingleDocInput) -> dict:
                       "no_content_reason": why, "text_chars": len(text)}
 
     result["pub_num"] = pub_num
+    # Where this row's text came from, carried onto the row itself. The tiers
+    # are resolved in Phase 3 and live on `ranked_candidates`, which does not
+    # survive into results.json — so without this the finished report can say
+    # "evaluated from the abstract" but not *why* there was nothing else, and
+    # the missing-full-text list (patent_analyzer.fulltext_gap) would have had
+    # to guess it from a title match.
+    for k in ("fulltext_tier", "fulltext_detail", "fulltext_url", "fulltext_download",
+              "landing_page", "doi", "arxiv_id"):
+        if doc.get(k):
+            result[k] = doc[k]
+    result["had_bq_claims"] = bool((doc.get("claims_text") or "").strip())
     return {"eval_results": [result]}
 
 
