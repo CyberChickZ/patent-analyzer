@@ -1726,6 +1726,77 @@ ELEMENTS NO REFERENCE DISCLOSES:
 {uncovered}""")
 
 
+OBVIOUSNESS_FINDINGS_PROMPT = prompts.register_default("evaluate.obviousness_findings", """════ TASK ════
+You are a US patent examiner assembling the FACTUAL FINDINGS an obviousness rejection needs.
+You are NOT deciding anything. A deterministic rule decides the label from what you find; your
+job is to locate the evidence for four findings, or to say plainly that it is not there.
+
+Every finding you report must quote the reference it comes from, VERBATIM. Each quote is checked
+against that reference's own text; a quote that cannot be located makes the finding fail, which
+is the same as not making it. Copy exactly — do not paraphrase, do not stitch fragments, do not
+translate, do not fix the source's typos. An empty or unfound finding is a perfectly good answer
+and is much better than one you cannot support.
+
+Reason only from the references below. You have not been shown the invention's own description
+for a reason: MPEP 2142 — "Knowledge of applicant's disclosure must be put aside in reaching this
+determination ... impermissible hindsight must be avoided". The claim elements are there to tell
+you what is being compared, not to be read back into the references.
+
+1. MOTIVATION TO COMBINE (MPEP 2143.01). A reason one of ordinary skill would have combined these
+   references, found in one of: market_forces, design_incentives, interrelated_teachings (one
+   reference points at the other's subject matter), known_need_or_problem (a need or problem
+   stated in the art at the time), background_knowledge. The quote must be the place the reason
+   actually appears. "The combination would be obvious" is not a reason (MPEP 2143, In re Van Os).
+
+2. REASONABLE EXPECTATION OF SUCCESS (MPEP 2143.02 I). Evidence that the combination could be
+   expected to work — routine technique, an explicit statement of compatibility, a worked example.
+   A motivation without this is not enough; both are required.
+
+3. ANALOGOUS ART (MPEP 2141.01(a) I), one entry per reference. Either same_field_of_endeavor, or
+   reasonably_pertinent_to_the_problem faced by the inventor. The two tests are independent and a
+   reference need satisfy only one. Quote the words that establish it.
+
+4. LEVEL OF ORDINARY SKILL (MPEP 2141 II (C)). One sentence characterising the person of ordinary
+   skill in this art, drawn from the references' own background. A quote here is optional.
+
+════ CLAIM ELEMENTS BEING COMPARED ════
+{elements}
+
+════ REFERENCES ════
+{references}
+
+Answer with JSON only, in the given schema. Use the exact reference key shown in brackets as
+"doc". Where you cannot find support, set found=false and say why in "reason" — do not invent a
+quote to fill the field.""")
+
+
+async def obviousness_findings(elements: list[str], refs: dict[str, str],
+                               model: str | None = None) -> dict:
+    """One call for the findings MPEP requires but coverage cannot supply:
+    motivation (2143.01), reasonable expectation of success (2143.02 I),
+    analogous art per reference (2141.01(a) I) and the level of ordinary skill
+    (2141 II (C)). Returns the raw JSON; patent_analyzer.obviousness.verify
+    locates every quote before any of it counts, and the rule decides the label.
+
+    The model is never shown the label, the invention summary or the proposed
+    determination — only the claim elements and the references' text.
+    """
+    from patent_analyzer.obviousness import SCHEMA
+    if not refs:
+        return {}
+    body = "\n\n".join(f"[{k}]\n{(t or '')[:12000]}" for k, t in refs.items())
+    prompt = prompts.render("evaluate.obviousness_findings",
+                            elements="\n".join(f"- {e}" for e in elements[:40]) or "(none)",
+                            references=body)
+    system = "You are a US patent examiner making factual findings. Output JSON only."
+    try:
+        raw = await call_llm(system, prompt, response_schema=SCHEMA,
+                             model=model or stage_model("eval"))
+        return json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+
+
 async def explain_obviousness(adjudication: dict, chart: dict, invention_summary: str,
                               docs_results: list[dict] | None = None) -> str:
     """One call: prose reasoning for a §103 determination the rule already

@@ -299,3 +299,77 @@ def test_a_103_trace_carries_one_analogous_row_per_reference_relied_on():
     assert {t["id"] for t in rows} == {"analogous:US-1", "analogous:US-2"}
     assert all(t["mpep"] == "2141.01(a) I" for t in rows)
     assert next(t for t in rows if t["id"] == "analogous:US-1")["status"] == "met"
+
+
+_TEXT = {"US-1": "A lens and a mirror for an endoscope. It would be desirable to add a sensor "
+                 "for the same optical train.",
+         "US-2": "A sensor in a housing, used in endoscopes, readily mounted with known methods."}
+
+_RAW = {"motivation": {"found": True, "source": "known_need_or_problem", "doc": "US-1",
+                       "quote": "It would be desirable to add a sensor for the same optical train",
+                       "reason": "the primary reference names the need"},
+        "expectation_of_success": {"found": True, "doc": "US-2",
+                                   "quote": "readily mounted with known methods", "reason": "routine"},
+        "analogous": [{"doc": "US-1", "test": "same_field_of_endeavor", "quote": "for an endoscope",
+                       "reason": "same field"},
+                      {"doc": "US-2", "test": "same_field_of_endeavor", "quote": "used in endoscopes",
+                       "reason": "same field"}],
+        "level_of_ordinary_skill": {"stated": "an optical engineer with endoscope experience"}}
+
+
+def _split_docs():
+    return [_doc("US-1", E[:2]), _doc("US-2", E[2:])]
+
+
+def test_without_findings_the_103_stays_the_coverage_screening_flag():
+    adj = adjudicate(E, _split_docs(), single_partial_103=0.7)
+    assert adj["label"] == "103" and adj["basis"] == "combination"
+    assert adj["findings"] is None
+
+
+def test_located_findings_carry_the_103_and_land_in_the_trace():
+    from patent_analyzer.obviousness import verify
+    f = verify(_RAW, _TEXT, ["US-1", "US-2"])
+    assert f["quotes_checked"] == 4 and f["quotes_located"] == 4
+    adj = adjudicate(E, _split_docs(), single_partial_103=0.7, findings=f)
+    assert adj["label"] == "103" and adj["basis"] == "combination"
+    by = {t["id"]: t for t in adj["rule_trace"]}
+    assert by["motivation"]["status"] == "met" and by["expectation"]["status"] == "met"
+    assert by["analogous:US-1"]["status"] == "met" and by["analogous:US-2"]["status"] == "met"
+    assert by["graham_c"]["status"] == "met"                      # level of ordinary skill, stated
+    # still not a prima facie case: 2143 I.A (2) and (3) are not among the four findings asked for
+    assert adj["prima_facie"] is False
+    assert by["rationale_a_2"]["status"] == "not_determined"
+
+
+def test_a_quote_that_cannot_be_located_takes_the_103_away():
+    """MPEP 2143 I.E: if a finding cannot be made, the rationale cannot be used.
+    A model that asserts a motivation it cannot quote gets no rejection."""
+    from patent_analyzer.obviousness import verify
+    raw = dict(_RAW)
+    raw["motivation"] = dict(_RAW["motivation"], quote="the references plainly invite combination")
+    f = verify(raw, _TEXT, ["US-1", "US-2"])
+    adj = adjudicate(E, _split_docs(), single_partial_103=0.7, findings=f)
+    assert adj["label"] == "ALLOW" and adj["basis"] == "findings_missing"
+    assert "MPEP 2143.01" in adj["reason"] and "2143 I.E" in adj["reason"]
+    assert f["motivation"]["status"] == "not_met" and f["motivation"]["located"] is False
+
+
+def test_a_reference_with_no_analogous_finding_blocks_the_combination():
+    from patent_analyzer.obviousness import verify
+    raw = dict(_RAW)
+    raw["analogous"] = [a for a in _RAW["analogous"] if a["doc"] != "US-2"]
+    f = verify(raw, _TEXT, ["US-1", "US-2"])
+    adj = adjudicate(E, _split_docs(), single_partial_103=0.7, findings=f)
+    assert adj["label"] == "ALLOW"
+    assert "US-2 not shown to be analogous art (MPEP 2141.01(a) I)" in adj["reason"]
+
+
+def test_findings_never_touch_a_102():
+    """MPEP 2131.05: analogous art and teaching away are not germane to §102,
+    so a missing motivation cannot rescue an anticipated claim."""
+    from patent_analyzer.obviousness import verify
+    f = verify({"motivation": {"found": False}, "expectation_of_success": {"found": False},
+                "analogous": [], "level_of_ordinary_skill": {"stated": ""}}, _TEXT, ["US-1"])
+    adj = adjudicate(E, [_doc("US-1", E)], findings=f)
+    assert adj["label"] == "102"

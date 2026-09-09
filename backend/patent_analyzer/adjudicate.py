@@ -148,7 +148,7 @@ def greedy_cover(elements: list[str], doc_sets: list[tuple[str, set[str]]], need
 def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
                allow_missing: int = 0, max_combo: int = 3, min_score: int = 1,
                require_quotes: bool = True, single_partial_103: float | None = None,
-               invention_cpc=None) -> dict:
+               invention_cpc=None, findings: dict | None = None) -> dict:
     """Return {label, basis, risk, reason, n_elements, needed, per_doc_coverage, combo, params}.
     basis: "single" (102) | "combination" (103, union) | "primary_partial" (103, one reference >= single_partial_103) | "none".
 
@@ -206,18 +206,29 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
         "missing": [c for c in names if c not in combo_covered],
     } if combo_docs else None
 
+    def _blocked_103(relied: list[str]) -> str:
+        """Empty when the findings support a §103, otherwise why they do not.
+        With no findings at all the label stays the coverage screening flag it
+        has always been — see the module docstring."""
+        if findings is None:
+            return ""
+        from .obviousness import combination_supported
+        ok, gaps = combination_supported(findings, relied)
+        return "" if ok else gaps
+
     if best and best["n_covered"] >= needed:
         label, basis = "102", "single"
         reason = (f"{_key(best)} covers {best['n_covered']}/{n} elements with verified quotes "
                   f"(needed {needed}); a single reference disclosing each element is anticipation (MPEP 2131).")
-    elif combo and len(combo_docs) >= 2 and combo["n_covered"] >= needed:
+    elif combo and len(combo_docs) >= 2 and combo["n_covered"] >= needed and not _blocked_103(combo_docs):
         label, basis = "103", "combination"
         reason = (f"no single document reaches {needed}/{n}; {' + '.join(combo_docs)} together cover "
                   f"{combo['n_covered']}/{n}, so every element is disclosed somewhere in the art. That is finding (1) "
                   f"of MPEP 2143 I.A only; whether a person of ordinary skill would have combined these references "
                   f"(2143.01 motivation, 2143.02 reasonable expectation of success) is not determined here. Treat this "
                   f"as a §103 screening flag, not an obviousness conclusion.")
-    elif single_partial_103 is not None and best and best_cov >= single_partial_103:
+    elif (single_partial_103 is not None and best and best_cov >= single_partial_103
+          and not _blocked_103([_key(best)])):
         label, basis = "103", "primary_partial"
         reason = (f"{_key(best)} alone covers {best['n_covered']}/{n} elements ({best_cov:.0%} >= {single_partial_103:.0%}); "
                   f"the remaining {n - best['n_covered']} element(s) are not disclosed by it. Flagged as a §103 screening risk by a "
@@ -227,9 +238,18 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
     else:
         label, basis = "ALLOW", "none"
         missing = combo["missing"] if combo else names
-        reason = (f"best single coverage {best_cov:.0%}; union of {len(combo_docs)} documents covers "
-                  f"{combo['n_covered'] if combo else 0}/{n}; {len(missing)} element(s) have no verified disclosure "
-                  f"among the evaluated documents.")
+        gaps = _blocked_103(combo_docs or ([_key(best)] if best else []))
+        if gaps:
+            # the elements are all there; what is missing is a finding, and saying which one is
+            # the whole point of MPEP 2143's "clear articulation" requirement
+            basis = "findings_missing"
+            reason = (f"the references together cover {combo['n_covered'] if combo else 0}/{n} elements, but the "
+                      f"§103 rationale is not made out — {gaps}. MPEP 2143 I.E: if a finding cannot be made, "
+                      f"the rationale cannot be used.")
+        else:
+            reason = (f"best single coverage {best_cov:.0%}; union of {len(combo_docs)} documents covers "
+                      f"{combo['n_covered'] if combo else 0}/{n}; {len(missing)} element(s) have no verified "
+                      f"disclosure among the evaluated documents.")
 
     if label in ("102", "103"):
         risk = "blocking"
@@ -241,7 +261,8 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
     adj = {"label": label, "basis": basis, "risk": risk, "reason": reason, "n_elements": n, "needed": needed,
            "best_single": _key(best) if best else "", "best_coverage": best_cov,
            "per_doc_coverage": per_doc, "combo": combo, "params": params}
-    adj["rule_trace"] = rule_trace(adj, elements, docs_results, invention_cpc)
+    adj["findings"] = findings
+    adj["rule_trace"] = rule_trace(adj, elements, docs_results, invention_cpc, findings)
     adj["prima_facie"] = prima_facie(adj["rule_trace"])
     return adj
 
@@ -290,8 +311,19 @@ def _t(rid: str, mpep: str, requirement: str, status: str, finding: str) -> dict
     return {"id": rid, "mpep": mpep, "requirement": requirement, "status": status, "finding": finding}
 
 
+def _from_finding(findings: dict | None, key: str, absent: str) -> tuple[str, str]:
+    """(status, finding text) for a requirement the model was asked to evidence.
+    Without findings the answer stays `not_determined` — the absence of a call
+    is not a negative finding."""
+    f = (findings or {}).get(key)
+    if not f:
+        return UNDET, absent
+    quote = f' — "{f["quote"][:160]}"' if f.get("located") and f.get("quote") else ""
+    return f["status"], (f.get("reason") or absent)[:300] + quote
+
+
 def rule_trace(adj: dict, elements: list, docs_results: list[dict] | None = None,
-               invention_cpc=None) -> list[dict]:
+               invention_cpc=None, findings: dict | None = None) -> list[dict]:
     """What the determination rests on, requirement by requirement, with the
     MPEP section for each — and, for the findings this rule cannot make, that
     they were not made. `prima_facie` in the returned adjudication is False
@@ -314,8 +346,10 @@ def rule_trace(adj: dict, elements: list, docs_results: list[dict] | None = None
         _t("graham_b", "2141 II (B)", "Ascertaining the differences between the claimed invention and the prior art",
            MET, (f"{len(missing)} of {n} elements have no verified disclosure: " + "; ".join(m[:60] for m in missing[:4]))
            if missing else f"all {n} elements are disclosed across the references relied on"),
-        _t("graham_c", "2141 II (C)", "Resolving the level of ordinary skill in the pertinent art", UNDET,
-           "no level of ordinary skill was resolved — nothing on this record establishes one"),
+        _t("graham_c", "2141 II (C)", "Resolving the level of ordinary skill in the pertinent art",
+           *(((findings or {}).get("level_of_ordinary_skill") or {}).get("status") == MET
+             and (MET, ((findings or {})["level_of_ordinary_skill"]["stated"])[:300])
+             or (UNDET, "no level of ordinary skill was resolved — nothing on this record establishes one"))),
         _t("graham_objective", "2141 II", "Evaluating objective evidence (commercial success, long-felt need, "
            "failure of others, unexpected results)", UNDET,
            "no objective evidence is before the system; an unfiled invention has no prosecution record"),
@@ -336,8 +370,13 @@ def rule_trace(adj: dict, elements: list, docs_results: list[dict] | None = None
                       str(adj.get("reason", ""))))
         return out
 
+    an = (findings or {}).get("analogous") or {}
     for k in relied:
-        st, why = analogous_art(by_key.get(k) or {}, invention_cpc)
+        f = an.get(k)
+        if f:                                    # a located quote beats the classification proxy
+            st, why = f["status"], (f.get("reason") or "")[:300] + (f' — "{f["quote"][:120]}"' if f.get("located") else "")
+        else:
+            st, why = analogous_art(by_key.get(k) or {}, invention_cpc)
         out.append(_t(f"analogous:{k}", "2141.01(a) I",
                       f"{k} must be analogous art: same field of endeavor, or reasonably pertinent to the "
                       f"problem faced by the inventor", st, why))
@@ -360,10 +399,10 @@ def rule_trace(adj: dict, elements: list, docs_results: list[dict] | None = None
         _t("motivation", "2143.01",
            "A motivation to combine, explicit or implicit: market forces, design incentives, the interrelated "
            "teachings of the references, a known need or problem, or the skilled person's background knowledge",
-           UNDET, "no reason to combine was found on this record"),
+           *_from_finding(findings, "motivation", "no reason to combine was found on this record")),
         _t("expectation", "2143.02 I",
-           "A reasonable expectation of success, in addition to a reason to combine", UNDET,
-           "not established"),
+           "A reasonable expectation of success, in addition to a reason to combine",
+           *_from_finding(findings, "expectation_of_success", "not established")),
         _t("articulation", "2143",
            "Clear articulation of the reason why the claimed invention would have been obvious; \"absent some "
            "articulated rationale\" a combination being obvious is not a reason", UNDET,
