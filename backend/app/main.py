@@ -207,6 +207,21 @@ async def _run_langgraph_pipeline(job_id: str):
         print(f"[LANGGRAPH] job {job_id} not found in memory or GCS")
         return
     jobs[job_id] = job
+    # A reviewer's uploaded full text re-runs the evidence step for those
+    # references alone — not the graph. It shares this worker (and so the queue,
+    # the job record and the event feed) but rebuilds its inputs from
+    # results.json, because a finished job has no live checkpoint to replay.
+    if job.get("_rerun_evidence"):
+        from app.fulltext_rerun import rerun_evidence
+        try:
+            await rerun_evidence(job)
+        except Exception as exc:
+            import traceback
+            job["status"] = "error"
+            job["error"] = f"Evidence re-run: {type(exc).__name__}: {exc}"[:2000]
+            job["error_trace"] = traceback.format_exc()[-4000:]
+            _save_job(job)
+        return
     pause_after = _pause_after(job)
     graph = build_graph(checkpointer=_checkpointer())
     config = {"configurable": {"thread_id": job_id, "prompt_overrides": job.get("prompt_overrides") or {}}}
