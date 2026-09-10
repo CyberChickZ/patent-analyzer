@@ -276,6 +276,9 @@ async def main():
     ap.add_argument("--concurrency", type=int, default=3)
     ap.add_argument("--run", default="h2", help="run name under eval_data/runs/ (samples.json + docs.json)")
     ap.add_argument("--tag", default="", help="suffix for doc_results / adjudication_result (e.g. bri)")
+    ap.add_argument("--findings-tag", default="",
+                    help="separate cache suffix for stage 1.5 only, so a changed findings prompt does not "
+                         "force stage 1 (the expensive one) to run again")
     ap.add_argument("--findings", action="store_true",
                     help="stage 1.5: one call per instance for the MPEP 2143.01 / 2143.02 / 2141.01(a) findings, "
                          "then score every variant a second time with the rule gated on them")
@@ -311,7 +314,8 @@ async def main():
 
     findings = None
     if args.findings:
-        findings = await run_findings(stage1, docs, concurrency=args.concurrency, run_dir=run_dir, tag=tag)
+        findings = await run_findings(stage1, docs, concurrency=args.concurrency, run_dir=run_dir,
+                                      tag=(f"_{args.findings_tag}" if args.findings_tag else tag))
         got = [f for f in findings.values() if f.get("verified")]
         loc = sum(f["verified"]["quotes_located"] for f in got)
         chk = sum(f["verified"]["quotes_checked"] for f in got)

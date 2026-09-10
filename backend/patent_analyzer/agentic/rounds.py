@@ -214,7 +214,9 @@ async def run_rounds(elements: list[dict], cpc_groups: list[str], title_terms: l
         new_good = new_strong = 0
         for d in docs:
             if d.get("good"):
-                key = (d.get("pub_num") or "").upper()
+                # papers have no publication number, so key them the way the pool does — keying
+                # on pub_num alone collapsed every paper onto the empty string
+                key = (d.get("pub_num") or d.get("title") or "").upper()
                 if key not in docs_by_pub:
                     docs_by_pub[key] = d
                     good_docs.append(d)
@@ -241,6 +243,7 @@ async def run_rounds(elements: list[dict], cpc_groups: list[str], title_terms: l
             # every publication whose claims were actually read — the pool is what the channels
             # found, this is what the budget could afford to look at, and the two reaches differ
             "read": [d["pub_num"] for d in judged if d.get("pub_num")],
+            "read_papers": sum(1 for d in judged if not d.get("pub_num")),
             "seconds": round(time.monotonic() - t_start, 1)}
 
 

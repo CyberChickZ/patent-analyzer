@@ -105,3 +105,27 @@ def test_claims_screen_reorders_by_what_the_claims_touch():
     assert kept[0] == 2 and kept[1] == 1          # ordered by how many elements the claims touch
     assert 0 not in kept                          # the one the claims rule out drops off the 3-cut
     assert st["stage3_with_claims"] == 4 and st["stage3_calls"] == 1 and docs[0]["claims_reason"] == "different problem"
+
+
+def test_stage1_gives_papers_their_own_share_so_they_cannot_crowd_out_patents():
+    """Giving the paper channel named-entity queries took a job's paper returns
+    from 100-1,000 to 1,600-3,200 (N5, 2026-09-18). On cosine alone those would
+    take the whole shortlist; the gold is measured on the patent side."""
+    import numpy as np
+    from patent_analyzer.agentic import prune as P
+    docs = ([{"title": f"paper {i}", "abstract": "x", "match_type": "Paper"} for i in range(1000)]
+            + [{"title": f"patent {i}", "abstract": "x", "match_type": "Patent"} for i in range(200)])
+
+    def ed(texts):      # every paper is a perfect match, every patent a mediocre one
+        return np.array([[1.0, 0.0] if t.startswith("paper") else [0.6, 0.8] for t in texts], dtype=np.float32)
+
+    def eq(texts):
+        return np.array([[1.0, 0.0]] * len(texts), dtype=np.float32)
+
+    out, info = P.stage1_embed([{"id": "e1", "text": "q"}], docs, topk=1200, cap=300,
+                               embed_docs=ed, embed_queries=eq)
+    kinds = [docs[i]["match_type"] for i in out]
+    assert len(out) == 300
+    assert kinds.count("Patent") == 200          # every patent survives despite the worse cosine
+    assert kinds.count("Paper") == 100           # papers take their 30% share plus the unused rest
+    assert info["stage1_papers_out"] == 100

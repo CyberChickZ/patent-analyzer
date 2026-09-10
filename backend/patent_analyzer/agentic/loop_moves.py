@@ -90,7 +90,7 @@ async def run_moves(state: dict, serpapi_left, serpapi_take, event) -> tuple[lis
         "mode": "moves", "rounds": out["rounds"], "stop": out["stop"], "coverage": out["coverage"],
         "uncovered": out["uncovered"], "n_strong": out["strong"], "read": out["read"],
         "move_rows": out["rows"], "seconds": out["seconds"],
-        "good": [{"pub_num": d.get("pub_num"), "title": (d.get("title") or "")[:100],
+        "good": [{"pub_num": d.get("pub_num"), "title": d.get("title") or "",
                   "sources": d.get("sources"), "touches": d.get("good_touches"),
                   "strong": G.is_strong(d), "reasons": d.get("good_reasons")} for d in good],
         "elements": [{"id": e["id"], "text": e["text"], "facets": e.get("facets"),

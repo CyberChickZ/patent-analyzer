@@ -24,6 +24,12 @@ import numpy as np
 
 STAGE1_TOPK = int(os.environ.get("PRUNE_STAGE1_TOPK", "250"))
 STAGE1_CAP = int(os.environ.get("PRUNE_STAGE1_CAP", "1200"))   # union cap → ≤ CAP/BATCH screen calls
+# Papers and patents compete for that cap on cosine alone, and the paper channel's volume is not
+# stable: giving it named-entity queries took a job's paper returns from 100-1,000 to 1,600-3,200
+# (N5, 2026-09-18), which could quietly push patents out of the shortlist and cost the .607 patent
+# reach. So each kind gets its own share and neither can crowd the other out. The paper share is
+# the smaller one because the patent side is what the gold is measured on.
+STAGE1_PAPER_SHARE = float(os.environ.get("PRUNE_STAGE1_PAPER_SHARE", "0.3"))
 STAGE2_BATCH = int(os.environ.get("PRUNE_STAGE2_BATCH", "40"))
 KEEP = int(os.environ.get("PRUNE_KEEP", "60"))
 GRAPH_SOURCES = {"citation_graph", "google_similar", "lens_bridge"}
@@ -77,13 +83,26 @@ def stage1_embed(elements: list[dict], docs: list[dict], topk: int = STAGE1_TOPK
     # candidates that arrived through the graph (citations / Google similar / paper→patent bridges)
     # were selected by structure, not text: they skip the embedding cut (leader H7 (3))
     protected = {i for i, d in enumerate(docs) if set(d.get("sources") or []) & GRAPH_SOURCES}
-    out = sorted(keep | protected, key=lambda i: -best[i])[:cap + len(protected)]
+    order = sorted(keep | protected, key=lambda i: -best[i])
+    limit = cap + len(protected)
+    if 0.0 < STAGE1_PAPER_SHARE < 1.0 and len(order) > limit:
+        paper_cap = int(limit * STAGE1_PAPER_SHARE)
+        papers = [i for i in order if str(docs[i].get("match_type") or "Paper") != "Patent"]
+        patents = [i for i in order if i not in set(papers)]
+        picked = patents[:limit - min(paper_cap, len(papers))] + papers[:paper_cap]
+        # a kind that did not fill its share hands the rest back rather than wasting it
+        if len(picked) < limit:
+            picked += [i for i in order if i not in set(picked)][:limit - len(picked)]
+        out = sorted(set(picked), key=lambda i: -best[i])
+    else:
+        out = order[:limit]
     keep = set(out)
     for i in range(len(docs)):
         docs[i]["prune_cos"] = float(best[i])
         docs[i]["prune_best_element"] = labels[int(best_el[i])]
         docs[i]["prune_stage1"] = i in keep
     return out, {"stage1_in": len(docs), "stage1_out": len(out),
+                 "stage1_papers_out": sum(1 for i in out if str(docs[i].get("match_type") or "Paper") != "Patent"),
                  "stage1_cut_cos": float(min(best[i] for i in keep)) if keep else None}
 
 
