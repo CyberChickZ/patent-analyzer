@@ -33,6 +33,21 @@ from __future__ import annotations
 import math
 
 
+def abstract_only(d: dict) -> bool:
+    """Was this reference read as an abstract and nothing more?
+
+    Measured on a real job: of 104 delivered papers the full text could be
+    fetched for 16 — the rest are behind bot protection or simply not open
+    access, and 9 of the 17 examiner-cited papers are not OA at all (N7,
+    2026-09-18). An abstract says what a paper is about, not everything it
+    discloses, so it cannot carry the §102 finding that ONE reference discloses
+    every element. It still counts towards a combination, where it stands for
+    one teaching rather than for the whole invention.
+    """
+    mode = str(d.get("text_mode") or d.get("source") or "").lower()
+    return mode.startswith("abstract") or bool(d.get("fulltext_tier") == "abstract_only")
+
+
 def _criterion(e) -> str:
     if isinstance(e, dict):
         return str(e.get("criterion") or e.get("text") or e.get("id") or "")
@@ -189,6 +204,7 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
             "coverage": round(len(covered) / n, 4),
             "n_covered": len(covered),
             "source": d.get("source", ""),
+            "abstract_only": abstract_only(d),
         })
     per_doc.sort(key=lambda x: (-x["n_covered"], x["pub_num"]))
 
@@ -216,7 +232,10 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
         ok, gaps = combination_supported(findings, relied)
         return "" if ok else gaps
 
-    if best and best["n_covered"] >= needed:
+    anticipating = next((x for x in per_doc if x["n_covered"] >= needed and not x.get("abstract_only")), None)
+    if anticipating:
+        best = anticipating
+        best_cov = best["coverage"]
         label, basis = "102", "single"
         reason = (f"{_key(best)} covers {best['n_covered']}/{n} elements with verified quotes "
                   f"(needed {needed}); a single reference disclosing each element is anticipation (MPEP 2131).")
@@ -238,6 +257,18 @@ def adjudicate(elements: list, docs_results: list[dict], min_cover: float = 1.0,
     else:
         label, basis = "ALLOW", "none"
         missing = combo["missing"] if combo else names
+        abs_only = [x for x in per_doc if x.get("abstract_only") and x["n_covered"] >= needed]
+        if abs_only:
+            basis = "abstract_only"
+            reason = (f"{_key(abs_only[0])} appears to cover {abs_only[0]['n_covered']}/{n} elements, but only its "
+                      f"ABSTRACT was read — an abstract states what a document is about, not everything it "
+                      f"discloses, so it cannot carry a §102 finding on its own. Obtain the full text and "
+                      f"re-run the evidence step before relying on it.")
+            risk = "relevant"
+            return {"label": label, "basis": basis, "risk": risk, "reason": reason, "n_elements": n,
+                    "needed": needed, "best_single": _key(best) if best else "", "best_coverage": best_cov,
+                    "per_doc_coverage": per_doc, "combo": combo, "params": params, "findings": findings,
+                    "rule_trace": [], "prima_facie": False}
         # only call it a missing finding when the coverage was actually there — otherwise the
         # reason the label is ALLOW is that an element has no disclosure, and saying "no motivation
         # to combine" would name the wrong gap
@@ -462,7 +493,10 @@ def claim_chart(adj: dict, elements: list, docs_results: list[dict], max_docs: i
         src, cov = by_key.get(k) or {}, per.get(k) or {}
         docs.append({"pub_num": src.get("pub_num") or cov.get("pub_num") or "", "title": src.get("title") or cov.get("title") or k,
                      "key": k, "n_covered": cov.get("n_covered", 0), "coverage": cov.get("coverage", 0.0),
-                     "url": src.get("patent_link") or src.get("url") or "", "source": src.get("source") or cov.get("source") or ""})
+                     "url": src.get("patent_link") or src.get("url") or "", "source": src.get("source") or cov.get("source") or "",
+                     # the chart has to say which columns were read as an abstract: a blank cell
+                     # under one of those means "not in the abstract", not "not disclosed"
+                     "abstract_only": bool(cov.get("abstract_only")) or abstract_only(src)})
     rows = []
     for name in names:
         cells = []

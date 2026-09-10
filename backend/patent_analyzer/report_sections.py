@@ -779,9 +779,20 @@ _DETERMINATION_NOTE = ("Deterministic rule over the verified evidence: an elemen
                        "always change the picture.")
 
 
+_ABSTRACT_ONLY_NOTE = ("Columns marked “abstract only” are references whose full text could not be obtained — "
+                       "most journal articles are behind bot protection or are not open access at all. For those, "
+                       "an empty cell means the abstract does not mention the element, NOT that the reference fails "
+                       "to disclose it, and no such reference is treated as disclosing the whole invention on its "
+                       "own. Upload the full text and re-run the evidence step to settle them.")
+
 _BRI_NOTE = ("Claims were construed under the broadest reasonable interpretation (MPEP 2111): the criteria "
              "were read the way a US examiner reads a pending claim, so a reference satisfies one when it "
              "discloses the same thing under a different name.")
+
+
+def abstract_only_note(chart: dict | None) -> str:
+    """Shown only when a chart actually has such a column."""
+    return _ABSTRACT_ONLY_NOTE if any(d.get("abstract_only") for d in (chart or {}).get("docs") or []) else ""
 
 
 def construction_note(adj: dict | None) -> str:
@@ -818,8 +829,9 @@ def claim_chart_html(chart: dict | None) -> str:
     for d in chart["docs"]:
         name = _e((d.get("pub_num") or d.get("title") or d.get("key") or "")[:28])
         name = f'<a href="{_e(d["url"])}" target="_blank">{name}</a>' if d.get("url") else name
+        tag = ' · abstract only' if d.get("abstract_only") else ''
         out.append(f'<th title="{_e(d.get("title", ""))}">{name}<br><span style="font-weight:400;color:var(--text2)">'
-                   f'{d.get("n_covered", 0)}/{n} elements</span></th>')
+                   f'{d.get("n_covered", 0)}/{n} elements{tag}</span></th>')
     out.append("</tr></thead><tbody>")
     for r in chart["rows"]:
         out.append(f'<tr><td>{_e(r["element"][:140])}</td>')
@@ -851,7 +863,7 @@ def determination_html(adj: dict | None, chart: dict | None = None, explanation:
     n = adj["n_elements"]
     label = adj.get("label")
     out = ['<div class="sec det-sec" style="border-left:3px solid ' + fg + '"><div class="sec-t sec-t-lg">Prior-Art Determination</div>',
-           f'<div class="sec-note">{_e(" ".join(x for x in (construction_note(adj), _DETERMINATION_NOTE) if x))}</div>',
+           f'<div class="sec-note">{_e(" ".join(x for x in (construction_note(adj), _DETERMINATION_NOTE, abstract_only_note(chart)) if x))}</div>',
            f'<div class="sec-b det-verdict"><span class="badge" style="background:{bg};color:{fg}">{_e(adj.get("risk", ""))}</span> '
            f'<b>{_e(determination_label(adj))}</b><br><span style="font-size:.85em">Rule: {_e(adj.get("reason", ""))}</span></div>']
     out.append(claim_chart_html(chart))
@@ -903,9 +915,12 @@ def determination_md(adj: dict | None, chart: dict | None = None, explanation: s
              "_Blocking risk from the documents evaluated here only; not a prediction of grant._", ""]
     if construction_note(adj):
         lines += [f"_{construction_note(adj)}_", ""]
+    if abstract_only_note(chart):
+        lines += [f"_{abstract_only_note(chart)}_", ""]
     if chart and chart.get("rows") and chart.get("docs"):
-        head = "| Element | " + " | ".join(f"{(d.get('pub_num') or d.get('title') or d.get('key') or '')[:24]} ({d.get('n_covered', 0)}/{n})"
-                                             for d in chart["docs"]) + " |"
+        head = "| Element | " + " | ".join(
+            f"{(d.get('pub_num') or d.get('title') or d.get('key') or '')[:24]} ({d.get('n_covered', 0)}/{n}"
+            + (", abstract only)" if d.get("abstract_only") else ")") for d in chart["docs"]) + " |"
         lines += [head, "|" + "---|" * (len(chart["docs"]) + 1)]
         for r in chart["rows"]:
             cells = []

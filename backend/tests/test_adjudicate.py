@@ -408,3 +408,27 @@ def test_a_single_reference_is_asked_for_a_modification_rationale_not_a_motivati
     f2 = verify(raw, _TEXT, ["US-1", "US-2"])
     adj2 = adjudicate(E, _split_docs(), single_partial_103=0.7, findings=f2)
     assert adj2["label"] == "ALLOW" and "MPEP 2143.01" in adj2["reason"]
+
+
+def test_an_abstract_only_paper_cannot_carry_a_102_on_its_own():
+    """Of 104 delivered papers in a real job the full text came back for 16;
+    9 of the 17 examiner-cited papers are not open access at all (N7,
+    2026-09-18). An abstract says what a paper is about, not everything it
+    discloses."""
+    paper = _doc("Smith 2011", E)
+    paper["text_mode"] = "abstract"
+    adj = adjudicate(E, [paper])
+    assert adj["label"] == "ALLOW" and adj["basis"] == "abstract_only"
+    assert "only its ABSTRACT was read" in adj["reason"]
+    assert adj["per_doc_coverage"][0]["abstract_only"] is True
+    # a full-text reference covering the same elements still anticipates
+    assert adjudicate(E, [_doc("US-1", E)])["label"] == "102"
+
+
+def test_an_abstract_only_paper_still_counts_towards_a_combination():
+    """It cannot be the whole invention, but it can be one teaching."""
+    paper = _doc("Smith 2011", E[:2])
+    paper["text_mode"] = "abstract"
+    adj = adjudicate(E, [paper, _doc("US-2", E[2:])], single_partial_103=0.7)
+    assert adj["label"] == "103" and adj["basis"] == "combination"
+    assert "Smith 2011" in (adj["combo"] or {}).get("docs", [])
