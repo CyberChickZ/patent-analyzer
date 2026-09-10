@@ -49,6 +49,9 @@ app = FastAPI(title="Patent Analyzer", version="0.4.0")
 from app.hitl import router as hitl_router
 app.include_router(hitl_router, prefix="/api")
 
+from app.fulltext_uploads import router as fulltext_router
+app.include_router(fulltext_router, prefix="/api")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
