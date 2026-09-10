@@ -2,7 +2,7 @@
 
 `evaluate_single_document` attaches the prior-art PDF *and*, separately, every
 page of it that looks like it has a figure, re-rendered at 150 dpi as a PNG
-image part (`_render_figure_pages`). The pages are therefore sent twice: once
+image part. The pages were therefore sent twice: once
 inside the PDF part, once as pixels. N4 measured the second copy at 2.03x the
 tokens of the first for zero additional figure numerals on one document. This
 runs the same comparison on the real population -- prior-art PDFs the pipeline
@@ -10,7 +10,7 @@ downloaded on earlier jobs, evaluated against that job's own checklist -- so
 the decision to drop the bypass rests on more than one document.
 
 Arm A: the pipeline as it stands (PDF + PNG image parts).
-Arm B: `_render_figure_pages` patched to return nothing (PDF only).
+Arm B: the PDF alone.
 
 Reported per arm: which criteria matched, whether the evidence quotes survive
 verification against the PDF's text layer, tokens and dollars. B is scored
@@ -38,14 +38,45 @@ from evals.common import load_env_yaml
 load_env_yaml()
 
 
+# The renderer this A/B exists to justify deleting. It lived in app/llm.py as
+# `_render_figure_pages` until 2026-09-18; the copy is kept here, verbatim, so
+# the comparison stays reproducible after the pipeline stopped doing it.
+def render_figure_pages(path: str, dpi: int = 150, max_screenshots: int = 10) -> list[tuple[int, bytes]]:
+    import fitz
+    try:
+        doc = fitz.open(path)
+    except Exception:
+        return []
+    try:
+        figure_indices = []
+        for i, page in enumerate(doc):
+            try:
+                images = page.get_images(full=True)
+                if any(img[2] > 100 and img[3] > 100 for img in images):
+                    figure_indices.append(i)
+                    continue
+                if len(page.get_drawings()) > 50:
+                    figure_indices.append(i)
+            except Exception:
+                pass
+        results = []
+        for i in figure_indices[:max_screenshots]:
+            try:
+                pix = doc[i].get_pixmap(dpi=dpi)
+                results.append((i + 1, pix.tobytes("png")))
+            except Exception:
+                pass
+        return results
+    finally:
+        doc.close()
+
+
 def collect(job_root: Path, n: int, min_figs: int) -> list[dict]:
     """(pdf, checklist, summary) triples from finished jobs on this box.
 
     Only documents whose PDF actually renders figure pages are useful: where
-    `_render_figure_pages` returns nothing the two arms are the same call.
+    the renderer returns nothing the two arms are the same call.
     """
-    from app.llm import _render_figure_pages
-
     out = []
     for job_dir in sorted(job_root.glob("*/")):
         res = job_dir / "results.json"
@@ -61,7 +92,7 @@ def collect(job_root: Path, n: int, min_figs: int) -> list[dict]:
         if not checklist or not summary:
             continue
         for pdf in pdfs:
-            figs = _render_figure_pages(str(pdf))
+            figs = render_figure_pages(str(pdf))
             if len(figs) < min_figs:
                 continue
             out.append({"job": job_dir.name, "pdf": str(pdf), "n_fig_pages": len(figs),
@@ -99,9 +130,15 @@ async def run_arm(case: dict, with_figs: bool) -> dict:
     import app.llm as llm
 
     before = json.loads(json.dumps(llm.usage))
-    real = llm._render_figure_pages
-    if not with_figs:
-        llm._render_figure_pages = lambda *a, **k: []
+    figs = render_figure_pages(case["pdf"]) if with_figs else []
+    real = llm.call_llm_with_pdfs
+
+    async def with_images(system, user, pdf_paths, *a, **kw):
+        kw["image_parts"] = [b for _, b in figs] or None
+        return await real(system, user, pdf_paths, *a, **kw)
+
+    if with_figs:
+        llm.call_llm_with_pdfs = with_images
     t0 = time.monotonic()
     try:
         result = await llm.evaluate_single_document(
@@ -110,7 +147,7 @@ async def run_arm(case: dict, with_figs: bool) -> dict:
     except Exception as exc:
         result = {"checklist_results": {}, "error": f"{type(exc).__name__}: {exc}"}
     finally:
-        llm._render_figure_pages = real
+        llm.call_llm_with_pdfs = real
     secs = time.monotonic() - t0
 
     from patent_analyzer.metering import cost_usd
@@ -165,7 +202,7 @@ async def numeral_arm(case: dict, with_figs: bool) -> dict:
     import app.llm as llm
     from patent_analyzer.metering import cost_usd
 
-    figs = llm._render_figure_pages(case["pdf"]) if with_figs else []
+    figs = render_figure_pages(case["pdf"]) if with_figs else []
     before = json.loads(json.dumps(llm.usage))
     try:
         resp = await llm.call_llm_with_pdfs(
