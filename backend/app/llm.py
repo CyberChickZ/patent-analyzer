@@ -975,35 +975,25 @@ def _extract_pdf_text(path: str, max_pages: int = 10, max_chars: int = 60000) ->
     return t[:max_chars] + ("\n[truncated]" if len(t) > max_chars else "")
 
 
-def _render_figure_pages(path: str, dpi: int = 150, max_screenshots: int = 10) -> list[tuple[int, bytes]]:
-    """Detect PDF pages with figures/tables/diagrams and render them as PNG."""
-    import fitz
-    try:
-        doc = fitz.open(path)
-    except Exception:
-        return []
-    try:
-        figure_indices = []
-        for i, page in enumerate(doc):
-            try:
-                images = page.get_images(full=True)
-                if any(img[2] > 100 and img[3] > 100 for img in images):
-                    figure_indices.append(i)
-                    continue
-                if len(page.get_drawings()) > 50:
-                    figure_indices.append(i)
-            except Exception:
-                pass
-        results = []
-        for i in figure_indices[:max_screenshots]:
-            try:
-                pix = doc[i].get_pixmap(dpi=dpi)
-                results.append((i + 1, pix.tobytes("png")))
-            except Exception:
-                pass
-        return results
-    finally:
-        doc.close()
+# _render_figure_pages was deleted on 2026-09-18. It re-rendered every page of
+# the prior-art PDF that looked like it had a figure at 150 dpi and attached the
+# PNGs as image parts *beside the same PDF*, so those pages were sent twice.
+#
+# A/B on 24 prior-art PDFs the pipeline had downloaded (194 figure pages), each
+# against its own job's checklist (evals/figure_png_ab.py):
+#
+#   with PNGs   1,428,140 prompt tokens   $1.2131   12 criteria matched
+#   PDF only      873,498 prompt tokens   $0.7799   10 criteria matched
+#
+# The PNG copy was 38.8% of the input and $0.018 per document. What it bought:
+# 3 criteria found only with it against 1 found only without it, which is
+# McNemar exact p = 0.625 -- what a coin flip looks like. Evidence-quote
+# survival against the text layer was 49/67 with and 50/71 without.
+#
+# Reading figures is NOT what was removed. The prior-art PDF still goes to the
+# model as a native PDF part, figure pages included, and so does the user's own
+# document (detect_and_summarize_invention, doc_json, the draft self-check).
+# What is gone is the second, pixel copy of pages the model already had.
 
 
 def _format_criteria_for_eval(checklist: list) -> str:
@@ -1095,14 +1085,10 @@ async def evaluate_single_document(
     pdfs.append(prior_art_pdf_path)
     pa_ordinal = "SECOND" if source_label else "FIRST"
 
-    fig_pages = _render_figure_pages(prior_art_pdf_path)
+    # The template still carries {fig_note}; leaving it empty renders exactly the
+    # prompt this function already produced for a document with no figure pages,
+    # so no prompt version changes here.
     fig_note = ""
-    if fig_pages:
-        pages_str = ", ".join(str(pn) for pn, _ in fig_pages)
-        fig_note = (
-            f"\n\nAdditionally, {len(fig_pages)} high-res screenshot(s) of "
-            f"prior art pages with figures/tables are attached (pages {pages_str}). "
-            f"Examine these for visual evidence.")
 
     if use_ssr:
         scoring_instruction = (
@@ -1144,7 +1130,6 @@ async def evaluate_single_document(
     try:
         resp = await call_llm_with_pdfs(
             system, prompt, pdfs, thinking_budget=_eval_thinking(8192),
-            image_parts=[img for _, img in fig_pages] or None,
             model=stage_model("eval"))
         m = re.search(r'\{.*\}', resp, re.DOTALL)
         if m:
@@ -1742,21 +1727,45 @@ for a reason: MPEP 2142 — "Knowledge of applicant's disclosure must be put asi
 determination ... impermissible hindsight must be avoided". The claim elements are there to tell
 you what is being compared, not to be read back into the references.
 
+There are {n_refs} reference(s) below. WHICH findings apply depends on that number, so read this
+first:
+
+WITH TWO OR MORE REFERENCES, answer 1, 2, 3 (the combination rationale, MPEP 2143 I.A) and skip 4.
+WITH EXACTLY ONE REFERENCE there is nothing to combine: skip 1, 2 and 3, set their "found" to
+false with the reason "single reference", and answer 4 instead.
+Everyone answers 5, 6 and 7.
+
 1. MOTIVATION TO COMBINE (MPEP 2143.01). A reason one of ordinary skill would have combined these
    references, found in one of: market_forces, design_incentives, interrelated_teachings (one
    reference points at the other's subject matter), known_need_or_problem (a need or problem
    stated in the art at the time), background_knowledge. The quote must be the place the reason
    actually appears. "The combination would be obvious" is not a reason (MPEP 2143, In re Van Os).
 
-2. REASONABLE EXPECTATION OF SUCCESS (MPEP 2143.02 I). Evidence that the combination could be
-   expected to work — routine technique, an explicit statement of compatibility, a worked example.
-   A motivation without this is not enough; both are required.
+2. COMBINABLE BY KNOWN METHODS (MPEP 2143 I.A (2)). That one of ordinary skill could have combined
+   the elements by known methods, and that in combination each element merely performs the same
+   function it does separately. Quote the words showing the elements are separable and ordinary.
+   -> field "combinable_by_known_methods"
 
-3. ANALOGOUS ART (MPEP 2141.01(a) I), one entry per reference. Either same_field_of_endeavor, or
+3. PREDICTABLE RESULTS (MPEP 2143 I.A (3)). That one of ordinary skill would have recognised the
+   results of the combination were predictable. Quote the words showing the behaviour is known
+   rather than surprising. -> field "predictable_results"
+
+4. MODIFICATION RATIONALE for a SINGLE reference (MPEP 2143 I.(B)-(E)). Which one applies:
+   B_simple_substitution (one known element swapped for another, predictable result);
+   C_known_technique_same_way (a known technique improving similar devices the same way);
+   D_known_technique_ready_for_improvement (a known technique applied to a device ready for it);
+   E_obvious_to_try (a finite number of identified, predictable solutions). Quote the words in the
+   reference that make the modification a known one. -> field "modification"
+
+5. REASONABLE EXPECTATION OF SUCCESS (MPEP 2143.02 I). Evidence that the combination or the
+   modification could be expected to work — routine technique, an explicit statement of
+   compatibility, a worked example. A rationale without this is not enough; both are required.
+
+6. ANALOGOUS ART (MPEP 2141.01(a) I), one entry per reference. Either same_field_of_endeavor, or
    reasonably_pertinent_to_the_problem faced by the inventor. The two tests are independent and a
    reference need satisfy only one. Quote the words that establish it.
 
-4. LEVEL OF ORDINARY SKILL (MPEP 2141 II (C)). One sentence characterising the person of ordinary
+7. LEVEL OF ORDINARY SKILL (MPEP 2141 II (C)). One sentence characterising the person of ordinary
    skill in this art, drawn from the references' own background. A quote here is optional.
 
 ════ CLAIM ELEMENTS BEING COMPARED ════
@@ -1786,6 +1795,7 @@ async def obviousness_findings(elements: list[str], refs: dict[str, str],
         return {}
     body = "\n\n".join(f"[{k}]\n{(t or '')[:12000]}" for k, t in refs.items())
     prompt = prompts.render("evaluate.obviousness_findings",
+                            n_refs=len(refs),
                             elements="\n".join(f"- {e}" for e in elements[:40]) or "(none)",
                             references=body)
     system = "You are a US patent examiner making factual findings. Output JSON only."

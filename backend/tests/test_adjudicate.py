@@ -310,6 +310,10 @@ _RAW = {"motivation": {"found": True, "source": "known_need_or_problem", "doc": 
                        "reason": "the primary reference names the need"},
         "expectation_of_success": {"found": True, "doc": "US-2",
                                    "quote": "readily mounted with known methods", "reason": "routine"},
+        "combinable_by_known_methods": {"found": True, "doc": "US-2",
+                                        "quote": "readily mounted with known methods", "reason": "separable parts"},
+        "predictable_results": {"found": True, "doc": "US-1",
+                                "quote": "for the same optical train", "reason": "same optical path"},
         "analogous": [{"doc": "US-1", "test": "same_field_of_endeavor", "quote": "for an endoscope",
                        "reason": "same field"},
                       {"doc": "US-2", "test": "same_field_of_endeavor", "quote": "used in endoscopes",
@@ -330,16 +334,13 @@ def test_without_findings_the_103_stays_the_coverage_screening_flag():
 def test_located_findings_carry_the_103_and_land_in_the_trace():
     from patent_analyzer.obviousness import verify
     f = verify(_RAW, _TEXT, ["US-1", "US-2"])
-    assert f["quotes_checked"] == 4 and f["quotes_located"] == 4
+    assert f["quotes_checked"] == 6 and f["quotes_located"] == 6
     adj = adjudicate(E, _split_docs(), single_partial_103=0.7, findings=f)
     assert adj["label"] == "103" and adj["basis"] == "combination"
     by = {t["id"]: t for t in adj["rule_trace"]}
     assert by["motivation"]["status"] == "met" and by["expectation"]["status"] == "met"
     assert by["analogous:US-1"]["status"] == "met" and by["analogous:US-2"]["status"] == "met"
     assert by["graham_c"]["status"] == "met"                      # level of ordinary skill, stated
-    # still not a prima facie case: 2143 I.A (2) and (3) are not among the four findings asked for
-    assert adj["prima_facie"] is False
-    assert by["rationale_a_2"]["status"] == "not_determined"
 
 
 def test_a_quote_that_cannot_be_located_takes_the_103_away():
@@ -385,3 +386,25 @@ def test_a_missing_finding_is_not_blamed_for_a_missing_element():
                      single_partial_103=0.7, findings=none)
     assert adj["label"] == "ALLOW" and adj["basis"] == "none"
     assert "no verified disclosure" in adj["reason"] and "motivation" not in adj["reason"]
+
+
+def test_a_single_reference_is_asked_for_a_modification_rationale_not_a_motivation():
+    """Requiring a motivation to COMBINE when only one reference is relied on is
+    the wrong question, and the model answers it correctly: "only a single
+    reference was provided", 92 times out of 98 on PANORAMA. A one-reference
+    §103 runs on MPEP 2143 I.(B)-(E) instead."""
+    from patent_analyzer.obviousness import verify
+    raw = {"motivation": {"found": False, "reason": "single reference"},
+           "modification": {"found": True, "rationale": "C_known_technique_same_way", "doc": "US-1",
+                            "quote": "It would be desirable to add a sensor", "reason": "known technique"},
+           "expectation_of_success": {"found": True, "doc": "US-1",
+                                      "quote": "for the same optical train", "reason": "same optics"},
+           "analogous": [{"doc": "US-1", "test": "same_field_of_endeavor", "quote": "for an endoscope"}],
+           "level_of_ordinary_skill": {"stated": "an optical engineer"}}
+    f = verify(raw, _TEXT, ["US-1"])
+    adj = adjudicate(E, [_doc("US-1", E[:3])], single_partial_103=0.7, findings=f)
+    assert adj["label"] == "103" and adj["basis"] == "primary_partial"
+    # and the same findings cannot carry a two-reference combination
+    f2 = verify(raw, _TEXT, ["US-1", "US-2"])
+    adj2 = adjudicate(E, _split_docs(), single_partial_103=0.7, findings=f2)
+    assert adj2["label"] == "ALLOW" and "MPEP 2143.01" in adj2["reason"]

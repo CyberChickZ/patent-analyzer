@@ -40,6 +40,18 @@ MOTIVATION_SOURCES = ("market_forces", "design_incentives", "interrelated_teachi
 # MPEP 2141.01(a) I: two independent tests, "it is not necessary for a reference to fulfill both".
 ANALOGOUS_TESTS = ("same_field_of_endeavor", "reasonably_pertinent_to_the_problem")
 
+# When ONE reference is relied on there is nothing to combine, so 2143.01's "motivation to
+# combine" is the wrong question — and asking it anyway is what sank the first scoring run: 92 of
+# 98 instances answered "Only a single reference was provided", which is true and is not a defect.
+# A single-reference §103 runs on a modification rationale instead (MPEP 2143 I, verbatim):
+#   (B) Simple substitution of one known element for another to obtain predictable results
+#   (C) Use of known technique to improve similar devices (methods, or products) in the same way
+#   (D) Applying a known technique to a known device (method, or product) ready for improvement
+#       to yield predictable results
+#   (E) "Obvious to try" - choosing from a finite number of identified, predictable solutions
+MODIFICATION_RATIONALES = ("B_simple_substitution", "C_known_technique_same_way",
+                           "D_known_technique_ready_for_improvement", "E_obvious_to_try")
+
 SCHEMA = {
     "type": "OBJECT",
     "properties": {
@@ -47,6 +59,19 @@ SCHEMA = {
             "found": {"type": "BOOLEAN"},
             "source": {"type": "STRING", "enum": list(MOTIVATION_SOURCES)},
             "doc": {"type": "STRING"}, "quote": {"type": "STRING"}, "reason": {"type": "STRING"}},
+            "required": ["found"]},
+        "modification": {"type": "OBJECT", "properties": {
+            "found": {"type": "BOOLEAN"},
+            "rationale": {"type": "STRING", "enum": list(MODIFICATION_RATIONALES)},
+            "doc": {"type": "STRING"}, "quote": {"type": "STRING"}, "reason": {"type": "STRING"}},
+            "required": ["found"]},
+        "combinable_by_known_methods": {"type": "OBJECT", "properties": {
+            "found": {"type": "BOOLEAN"}, "doc": {"type": "STRING"},
+            "quote": {"type": "STRING"}, "reason": {"type": "STRING"}},
+            "required": ["found"]},
+        "predictable_results": {"type": "OBJECT", "properties": {
+            "found": {"type": "BOOLEAN"}, "doc": {"type": "STRING"},
+            "quote": {"type": "STRING"}, "reason": {"type": "STRING"}},
             "required": ["found"]},
         "expectation_of_success": {"type": "OBJECT", "properties": {
             "found": {"type": "BOOLEAN"}, "doc": {"type": "STRING"},
@@ -102,6 +127,9 @@ def verify(raw: dict, texts: dict[str, str], relied: list[str]) -> dict:
                 **({"source": node.get("source")} if name == "motivation" else {})}
 
     out["motivation"] = one(raw.get("motivation"), "motivation")
+    out["modification"] = one(raw.get("modification"), "modification")
+    out["combinable_by_known_methods"] = one(raw.get("combinable_by_known_methods"), "combinable")
+    out["predictable_results"] = one(raw.get("predictable_results"), "predictable")
     out["expectation_of_success"] = one(raw.get("expectation_of_success"), "expectation")
 
     by_doc = {str(a.get("doc") or ""): a for a in (raw.get("analogous") or []) if isinstance(a, dict)}
@@ -133,19 +161,48 @@ def verify(raw: dict, texts: dict[str, str], relied: list[str]) -> dict:
     return out
 
 
-def combination_supported(findings: dict | None, relied: list[str]) -> tuple[bool, str]:
-    """Whether a §103 combination rationale stands on these findings.
+FULL_FINDINGS = os.environ.get("OBV_FULL_FINDINGS", "1") != "0"
 
-    MPEP 2143.02 I needs both a reason to combine and a reasonable expectation
-    of success; 2141.01(a) I bars a non-analogous reference from supporting the
-    rejection at all. Missing any of them, MPEP 2143 I.E: "this rationale
-    cannot be used".
+
+def combination_supported(findings: dict | None, relied: list[str]) -> tuple[bool, str]:
+    """Whether a §103 stands on these findings, and if not, which one is missing.
+
+    The rationale depends on how many references are relied on, which is the
+    correction the first scoring run forced. With two or more it is the
+    combination rationale (2143 I.A) and 2143.01's motivation to combine is the
+    right question. With ONE there is nothing to combine, and the question is
+    whether a known technique would have been applied to it — 2143 I.(B)/(C)/
+    (D)/(E). Asking for a motivation to combine there produced "Only a single
+    reference was provided" 92 times out of 98, which is a correct answer to
+    the wrong question.
+
+    Either way MPEP 2143.02 I also needs a reasonable expectation of success,
+    and 2141.01(a) I bars a non-analogous reference outright. With
+    OBV_FULL_FINDINGS the two remaining findings of 2143 I.A — (2) the elements
+    could have been combined by known methods, each still performing the same
+    function, and (3) the results were predictable — are required for a
+    combination as well. MPEP 2143 I.E governs a gap: "this rationale cannot be
+    used".
     """
     if not findings:
         return False, "no findings were made"
     gaps = []
-    if findings.get("motivation", {}).get("status") != MET:
-        gaps.append(f"motivation to combine (MPEP 2143.01): {findings.get('motivation', {}).get('reason', '')}")
+    multi = len(relied) >= 2
+    if multi:
+        if findings.get("motivation", {}).get("status") != MET:
+            gaps.append(f"motivation to combine (MPEP 2143.01): {findings.get('motivation', {}).get('reason', '')}")
+        if FULL_FINDINGS:
+            for key, mpep, what in (("combinable_by_known_methods", "2143 I.A (2)",
+                                     "the elements could have been combined by known methods, each still "
+                                     "performing the same function"),
+                                    ("predictable_results", "2143 I.A (3)",
+                                     "the results of the combination were predictable")):
+                if findings.get(key, {}).get("status") != MET:
+                    gaps.append(f"{what} (MPEP {mpep}): {findings.get(key, {}).get('reason', '')}")
+    else:
+        if findings.get("modification", {}).get("status") != MET:
+            gaps.append(f"a rationale for modifying the single reference (MPEP 2143 I.(B)-(E)): "
+                        f"{findings.get('modification', {}).get('reason', '')}")
     if findings.get("expectation_of_success", {}).get("status") != MET:
         gaps.append(f"reasonable expectation of success (MPEP 2143.02 I): "
                     f"{findings.get('expectation_of_success', {}).get('reason', '')}")
