@@ -4,14 +4,20 @@ Why this exists: on the E4/h1h gold the examiner-cited *papers* were the weak
 side — 2 of 17 resolvable NPL gold reached the pool (reach .118) against .607
 on the patent side — and the M2 e2e runs downloaded 0-6 PDFs out of 30, so the
 documents that did reach Phase 4 mostly arrived with an abstract at best. This
-module turns a paper candidate into a downloadable PDF URL, in tiers:
+module turns a paper candidate into a readable copy, in tiers:
 
     arxiv          the candidate is an arXiv paper -> arxiv.org/pdf/<id>
     oa             an open-access PDF URL is already known (OpenAlex
                    `open_access.oa_url` / `primary_location.pdf_url`, or
-                   Semantic Scholar `openAccessPdf.url`), or Unpaywall names one
+                   Semantic Scholar `openAccessPdf.url`), or Unpaywall names
+                   one, or Europe PMC serves the full text through its API
     abstract_only  no open-access copy found; the document is evaluated from
                    its abstract, and its landing page goes on the manual list
+
+`fulltext_tier` says which tier answered; `fulltext_download` says what came
+back. They are not the same number and the report prints both, because a
+resolved URL is usually not a paper in hand: measured on the 17 examiner-cited
+NPL gold, 6 resolved and 0 returned a PDF.
 
 COMPLIANCE — read before extending this module.
 
@@ -209,6 +215,102 @@ async def unpaywall(doi: str) -> tuple[dict | None, str | None]:
     return payload, None
 
 
+# ── Europe PMC ───────────────────────────────────────────────────────────────
+#
+# The measurement that put this here: of the 17 examiner-cited NPL gold, 6
+# resolved to an open-access URL and 0 returned a PDF. Publisher hosts answer
+# an automated client with a Cloudflare 403 and PubMed Central serves a
+# proof-of-work challenge in place of the file. Europe PMC publishes the same
+# open-access articles through a REST API meant to be called
+# (`/{PMCID}/fullTextXML`, measured 2026-09-18: 200, 97 KB of JATS for
+# PMC2150576), so where a paper is in Europe PMC's open-access set we ask that
+# instead of scraping a page that does not want to be scraped.
+#
+# Coverage, measured on the two acceptance sets: 1/17 of the NPL gold and
+# 12/104 of the papers a real job delivered. Modest, and real.
+
+EPMC_BASE = "https://www.ebi.ac.uk/europepmc/webservices/rest"
+EPMC_COOLDOWN_S = float(os.environ.get("EPMC_COOLDOWN_S", "1.0"))
+EPMC_TIMEOUT_S = float(os.environ.get("EPMC_TIMEOUT_S", "30"))
+EPMC_MAX_CHARS = int(os.environ.get("EPMC_MAX_CHARS", "120000"))
+EPMC_ON = os.environ.get("FULLTEXT_EPMC", "1") not in ("0", "false", "")
+
+_XML_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"[ \t]*\n[ \t]*")
+
+
+async def _epmc_get(path: str) -> tuple[bytes | None, str | None]:
+    def _call() -> bytes:
+        req = urllib.request.Request(f"{EPMC_BASE}/{path}", headers={"User-Agent": _UA})
+        with urllib.request.urlopen(req, timeout=EPMC_TIMEOUT_S, context=_SSL_CTX) as r:
+            return r.read()
+    try:
+        async with SerialLock("europepmc", EPMC_COOLDOWN_S):
+            metering.count("europepmc")
+            return await asyncio.to_thread(_call), None
+    except urllib.error.HTTPError as exc:
+        return None, f"HTTPError: {exc.code}"
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"[:200]
+
+
+async def europepmc_pmcid(doi: str) -> tuple[str, str | None]:
+    """The PMCID of a DOI, only when Europe PMC holds the article itself
+    (`inEPMC == "Y"`). KV-cached, including the negative answer."""
+    d = normalise_doi(doi)
+    if not d:
+        return "", "not a DOI"
+    hit = kv().get(_NS, f"epmc:{d}", max_age_days=CACHE_DAYS)
+    if hit is not None:
+        return hit.get("pmcid") or "", None
+    q = urllib.parse.quote(f'DOI:"{d}"')
+    body, err = await _epmc_get(f"search?query={q}&format=json&resultType=core")
+    if err:
+        return "", err
+    try:
+        res = (json.loads(body).get("resultList") or {}).get("result") or []
+    except Exception as exc:
+        return "", f"{type(exc).__name__}: {exc}"[:200]
+    pmcid = ""
+    if res and res[0].get("inEPMC") == "Y":
+        pmcid = str(res[0].get("pmcid") or "")
+    kv().put(_NS, f"epmc:{d}", {"pmcid": pmcid})
+    return pmcid, None
+
+
+def jats_to_text(xml: bytes | str) -> str:
+    """Readable text out of a JATS full-text document. Not a parser: the body
+    is what the evaluation reads, so tags go and the words stay."""
+    s = xml.decode("utf-8", "replace") if isinstance(xml, bytes) else xml
+    for tag in ("ref-list", "back", "table-wrap", "fig", "front-stub"):
+        s = re.sub(rf"(?is)<{tag}\b.*?</{tag}>", " ", s)
+    s = re.sub(r"(?is)<(title|p|sec|abstract|article-title)\b[^>]*>", "\n", s)
+    s = _XML_TAG_RE.sub(" ", s)
+    s = (s.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+          .replace("&quot;", '"').replace("&#x2019;", "'").replace("&apos;", "'"))
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    s = _WS_RE.sub("\n", s)
+    return re.sub(r"\n{3,}", "\n\n", s).strip()[:EPMC_MAX_CHARS]
+
+
+async def europepmc_text(doi: str) -> tuple[str, str | None]:
+    """Open-access full text for a DOI through Europe PMC, or ("", reason)."""
+    if not EPMC_ON:
+        return "", "Europe PMC disabled"
+    pmcid, err = await europepmc_pmcid(doi)
+    if err:
+        return "", f"Europe PMC lookup: {err}"
+    if not pmcid:
+        return "", "not in Europe PMC's open-access set"
+    body, err = await _epmc_get(f"{pmcid}/fullTextXML")
+    if err:
+        return "", f"Europe PMC {pmcid}: {err}"
+    text = jats_to_text(body or b"")
+    if len(text) < 500:
+        return "", f"Europe PMC {pmcid}: full text too short to be the article"
+    return text, None
+
+
 # ── resolution ───────────────────────────────────────────────────────────────
 
 def _known_pdf_url(doc: dict) -> str:
@@ -282,13 +384,14 @@ def tier_counts(patches: list[dict]) -> dict[str, int]:
 
 
 def read_counts(docs: list[dict], patches: list[dict]) -> dict[str, int]:
-    """Per tier, how many documents ended up with a PDF in hand. Resolving a URL
+    """Per tier, how many documents ended up with the paper in hand - a PDF, or
+    Europe PMC full text. Resolving a URL
     and holding the paper are different numbers and the report prints both:
     counting a resolved-but-unfetchable paper as read is exactly the overstating
     this module exists to stop."""
     counts = {t: 0 for t in TIERS}
     for doc, p in zip(docs, patches):
-        if doc.get("local_pdf"):
+        if doc.get("local_pdf") or doc.get("oa_full_text"):
             counts[p.get("fulltext_tier", "abstract_only")] += 1
     return counts
 
@@ -315,7 +418,7 @@ def manifest_rows(docs: list[dict], patches: list[dict]) -> list[dict]:
     """
     rows = []
     for doc, p in zip(docs, patches):
-        if doc.get("local_pdf"):
+        if doc.get("local_pdf") or doc.get("oa_full_text"):
             continue
         why = p.get("fulltext_detail", "")
         dl = doc.get("fulltext_download") or ""

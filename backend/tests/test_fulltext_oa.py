@@ -187,3 +187,25 @@ def test_report_section_states_the_tiers_and_the_policy():
         assert "entire OSU community" in blob
         assert "library.oregonstate.edu/responsible-use-licensed-electronic-resources" in blob
         assert "10.1/x" in blob
+
+
+def test_jats_to_text_keeps_the_body_and_drops_the_reference_list():
+    xml = (b'<article><front><article-title>A title</article-title></front>'
+           b'<body><sec><title>Methods</title><p>We measured &amp; compared things.</p></sec></body>'
+           b'<ref-list><ref>Smith et al. 1999 irrelevant citation blob</ref></ref-list></article>')
+    t = ft.jats_to_text(xml)
+    assert "We measured & compared things." in t
+    assert "Methods" in t
+    assert "irrelevant citation blob" not in t
+
+
+def test_read_counts_and_manifest_accept_europe_pmc_text():
+    docs = [{"title": "A", "oa_full_text": "x" * 2000}, {"title": "B"}]
+    patches = [{"fulltext_tier": "oa"}, {"fulltext_tier": "abstract_only"}]
+    assert ft.read_counts(docs, patches)["oa"] == 1
+    assert [r["title"] for r in ft.manifest_rows(docs, patches)] == ["B"]
+
+
+def test_europepmc_text_is_off_when_disabled(monkeypatch):
+    monkeypatch.setattr(ft, "EPMC_ON", False)
+    assert asyncio.run(ft.europepmc_text("10.1/x")) == ("", "Europe PMC disabled")

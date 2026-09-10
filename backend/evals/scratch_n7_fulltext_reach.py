@@ -119,6 +119,13 @@ async def run(docs: list[dict], do_fetch: bool) -> list[dict]:
         if do_fetch and p["fulltext_url"]:
             ok, detail, n = await asyncio.to_thread(fetch, p["fulltext_url"])
             row["pdf_ok"], row["fetch_detail"], row["bytes"] = ok, detail, n
+        # Europe PMC is the last open-access stop for whatever the fetch missed.
+        row["epmc_chars"] = 0
+        if do_fetch and not row["pdf_ok"] and p["doi"]:
+            text, err = await ft.europepmc_text(p["doi"])
+            row["epmc_chars"] = len(text)
+            if not text:
+                row["epmc_detail"] = err or ""
         rows.append(row)
     return rows
 
@@ -137,13 +144,19 @@ def report(name: str, rows: list[dict], do_fetch: bool) -> None:
         print(line)
     if do_fetch:
         ok = sum(1 for r in rows if r["pdf_ok"])
+        epmc = sum(1 for r in rows if r.get("epmc_chars"))
+        read = sum(1 for r in rows if r["pdf_ok"] or r.get("epmc_chars"))
         print(f"{'TOTAL PDF':<16}{ok:>5}{(100 * ok / total if total else 0):>7.0f}%")
+        print(f"{'+ Europe PMC':<16}{epmc:>5}{(100 * epmc / total if total else 0):>7.0f}%  "
+              f"(full text through the Europe PMC API, no PDF)")
+        print(f"{'READ (either)':<16}{read:>5}{(100 * read / total if total else 0):>7.0f}%")
 
     # The manual-download list is only useful if it has a page to open.
-    miss = [r for r in rows if r["tier"] == "abstract_only"]
+    miss = [r for r in rows if not r["pdf_ok"] and not r.get("epmc_chars")] if do_fetch \
+        else [r for r in rows if r["tier"] == "abstract_only"]
     with_lp = sum(1 for r in miss if r["landing_page"])
     if miss:
-        print(f"\nabstract-only: {with_lp}/{len(miss)} have a landing page for the manual list "
+        print(f"\nstill unread: {with_lp}/{len(miss)} have a landing page for the manual list "
               f"({100 * with_lp / len(miss):.0f}%)")
         why = Counter(r["detail"] for r in miss)
         for k, v in why.most_common():

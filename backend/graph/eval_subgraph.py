@@ -138,7 +138,14 @@ async def _eval_one(input: SingleDocInput) -> dict:
         # full text when we have it (claims from BigQuery + abstract), else abstract/snippet
         claims = (doc.get("claims_text") or "").strip()
         abstract = (doc.get("abstract") or "").strip() or (doc.get("snippet") or "").strip()
-        if claims:
+        # A paper whose PDF never arrived can still have its body text, fetched
+        # from Europe PMC's open-access API in Phase 3 (patent_analyzer.fulltext).
+        # That is the article, not a summary of it, so it is read as full text.
+        oa_text = (doc.get("oa_full_text") or "").strip()
+        if oa_text:
+            text = f"[ABSTRACT] {abstract}\n\n[FULL TEXT]\n{oa_text}"
+            mode = "full_text"
+        elif claims:
             text = f"[ABSTRACT] {abstract}\n\n[CLAIMS]\n{claims}"
             mode = "full_text"
         else:

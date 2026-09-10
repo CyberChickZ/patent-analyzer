@@ -353,11 +353,11 @@ async def search_node(state: GraphState) -> dict:
     # point at, element by element. No pool ranking, no prune; delivery is the GOOD order, capped.
     if loop_stats.get("mode") == "moves":
         good = loop_stats.get("good") or []
-        by_pub = {(d.get("pub_num") or "").upper(): d for d in all_docs}
+        by_pub = {(d.get("pub_num") or d.get("title") or "").upper(): d for d in all_docs}
         deliver = int(os.environ.get("M1_DELIVER", "120"))
         ranked = []
         for g in good[:deliver]:
-            d = by_pub.get((g.get("pub_num") or "").upper())
+            d = by_pub.get((g.get("pub_num") or g.get("title") or "").upper())
             if d:
                 d["good_touches"] = g.get("touches")
                 d["good_strong"] = bool(g.get("strong"))
@@ -538,6 +538,33 @@ async def search_node(state: GraphState) -> dict:
     # challenge in front of the file. `fulltext_tier` therefore keeps saying
     # which tier answered, and `fulltext_download` says what came back, so a
     # resolved-but-unfetchable paper cannot be counted as read.
+    # Last open-access stop for the papers that still have nothing: Europe PMC
+    # serves the same articles through a REST API meant to be called, so where
+    # the article is in its open-access set we ask that instead of scraping a
+    # page that answers an automated client with a 403. Measured coverage on
+    # the acceptance sets: 1/17 of the NPL gold and 12/104 of the papers a real
+    # job delivered — on the job set that roughly triples what the download
+    # loop alone brought back (5).
+    epmc_n = 0
+    for _, doc in papers:
+        if doc.get("local_pdf") or not doc.get("doi"):
+            continue
+        if _time.monotonic() - dl_t0 > _PDF_DOWNLOAD_BUDGET_S:
+            break
+        try:
+            text, err = await ft_oa.europepmc_text(doc["doi"])
+        except Exception as exc:
+            text, err = "", f"{type(exc).__name__}: {exc}"
+        if text:
+            doc["oa_full_text"] = text
+            doc["fulltext_download"] = "ok_text"
+            doc["fulltext_detail"] = f"Europe PMC full text ({len(text)} chars)"
+            epmc_n += 1
+        elif err:
+            doc["fulltext_detail"] = f"{doc.get('fulltext_detail', '')} — {err}".strip(" —")
+    if epmc_n:
+        _event("info", f"Europe PMC full text for {epmc_n} paper(s) the PDF download could not reach")
+
     if papers:
         docs_only = [d for _, d in papers]
         tiers = ft_oa.tier_counts(oa_patches)
