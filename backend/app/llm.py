@@ -1738,8 +1738,16 @@ Everyone answers 5, 6 and 7.
 1. MOTIVATION TO COMBINE (MPEP 2143.01). A reason one of ordinary skill would have combined these
    references, found in one of: market_forces, design_incentives, interrelated_teachings (one
    reference points at the other's subject matter), known_need_or_problem (a need or problem
-   stated in the art at the time), background_knowledge. The quote must be the place the reason
-   actually appears. "The combination would be obvious" is not a reason (MPEP 2143, In re Van Os).
+   stated in the art at the time), background_knowledge.
+   For the first four the quote must be the place the reason actually appears.
+   **background_knowledge is different and you should use it when it fits.** MPEP 2143.01 says a
+   motivation may be found "explicitly or implicitly in ... the background knowledge, creativity,
+   and common sense of the person of ordinary skill" — that kind of reason is not written down in
+   any reference, so for it set source="background_knowledge", LEAVE THE QUOTE EMPTY, and state
+   the reason in one specific sentence: what the skilled person knew, and why it leads here. Do
+   NOT force a quote for it and do NOT report found=false merely because no reference says it out
+   loud. "The combination would be obvious" is still not a reason (MPEP 2143, In re Van Os) — name
+   the knowledge, not the conclusion.
 
 2. COMBINABLE BY KNOWN METHODS (MPEP 2143 I.A (2)). That one of ordinary skill could have combined
    the elements by known methods, and that in combination each element merely performs the same
