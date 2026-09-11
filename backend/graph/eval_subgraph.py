@@ -13,12 +13,18 @@ from typing import Annotated, TypedDict
 from langgraph.constants import Send
 from langgraph.graph import END, StateGraph
 
-# How many of the delivered candidates are fanned out for a deep read. The gap
-# between this and what Phase 3 delivered is not a detail: at the defaults the
-# search delivers 60 (RERANK_LIMIT) or 120 (M1_DELIVER) and only this many are
-# read. It is reported per job rather than left to be inferred — see
-# `read_gap` below and report_sections.read_coverage_*.
-MAX_EVAL = int(os.environ.get("EVAL_MAX_DOCS", "25"))
+# How many of the delivered candidates are fanned out for a deep read.
+#
+# This was 25 against a delivery of 60 (RERANK_LIMIT) or 120 (M1_DELIVER), and
+# on the first job that measured it the entire shortfall was this cap: 35 of the
+# 60 delivered references were never sent to a model, and not one was dropped
+# for want of text. An assertion that evaluated == delivered cannot do any work
+# while the cap guarantees it is false.
+#
+# The deep read now costs $0.0044 per document (claims from our own BigQuery
+# rather than a PDF download that succeeded 0-6 times in 30), so 120 documents
+# is $0.53 a job. The default is the delivery size.
+MAX_EVAL = int(os.environ.get("EVAL_MAX_DOCS", "120"))
 
 # `source` values that mean no text reached a model, or text reached one and
 # nothing came back. Either way the reference is unchecked, not cleared.
@@ -144,12 +150,27 @@ async def _eval_one(input: SingleDocInput) -> dict:
         oa_text = (doc.get("oa_full_text") or "").strip()
         if oa_text:
             text = f"[ABSTRACT] {abstract}\n\n[FULL TEXT]\n{oa_text}"
-            mode = "full_text"
+            mode = read_as = "full_text"
         elif claims:
-            text = f"[ABSTRACT] {abstract}\n\n[CLAIMS]\n{claims}"
+            # amie_patents.descriptions carries the specification for US
+            # publications (there is none for any other country in the public
+            # source -- see bigquery_patents.hydrate_full_text). With it the
+            # read is claims + spec; without it, claims only, and the report
+            # says which of the two this document got.
+            desc = (doc.get("description") or "").strip()
+            if desc:
+                text = f"[ABSTRACT] {abstract}\n\n[CLAIMS]\n{claims}\n\n[DESCRIPTION]\n{desc}"
+                read_as = "full_text"
+            else:
+                text = f"[ABSTRACT] {abstract}\n\n[CLAIMS]\n{claims}"
+                read_as = "claims_only"
+            # The model is still told "full text": claims are a disclosure, and
+            # demoting them to the abstract prompt would lose the verbatim-quote
+            # requirement. read_as only changes what the report calls it.
             mode = "full_text"
         else:
             text, mode = abstract, "abstract"
+            read_as = "abstract"
         if len(text) >= 120:
             result = await evaluate_single_document_text(
                 input["summary"], input["checklist"], text, title, match_type,
@@ -157,7 +178,7 @@ async def _eval_one(input: SingleDocInput) -> dict:
             )
             if mode == "full_text":
                 result["quote_verification"] = verify_checklist_results(result.get("checklist_results", {}), text)
-            result.setdefault("source", mode)
+            result["source"] = read_as if result.get("checklist_results") else result.get("source", read_as)
             result["text_chars"] = len(text)
             if not result.get("checklist_results"):
                 # abstract_failed / abstract_noparse: text went in, nothing came back
@@ -199,7 +220,7 @@ def _read_gap(delivered: list[dict], fanned: list[dict], scoring_report: list[di
     read end to end. Three different numbers were being conflated:
 
       delivered   what Phase 3 handed over (60 at RERANK_LIMIT, 120 at M1_DELIVER)
-      fanned_out  what Phase 4 sent to a model at all (EVAL_MAX_DOCS, 25)
+      fanned_out  what Phase 4 sent to a model at all (EVAL_MAX_DOCS, 120)
       read        those a model saw text for (source != no_content)
 
     Every document in a gap is an *unchecked* reference, not a cleared one, so
@@ -228,6 +249,10 @@ def _read_gap(delivered: list[dict], fanned: list[dict], scoring_report: list[di
     return {"delivered": n_delivered, "fanned_out": n_fanned, "read": n_read,
             "shortfall": shortfall, "reasons": reasons, "by_source": by_source,
             "headline": headline, "eval_cap": MAX_EVAL}
+
+
+def _criterion_text(c) -> str:
+    return str((c or {}).get("criterion") or (c or {}).get("text") or "") if isinstance(c, dict) else str(c or "")
 
 
 async def reduce_eval(state: EvalState) -> dict:
@@ -284,6 +309,39 @@ async def reduce_eval(state: EvalState) -> dict:
     # (PANORAMA App. C.5.3 rule a; H2 eval: macro-F1 .413 -> .450, blocking recall .29 -> .55 on examiner labels)
     from patent_analyzer.adjudicate import adjudicate
     adjudication = adjudicate(checklist, scoring_report, single_partial_103=0.7)
+
+    # §103 findings gate. One extra call, only when a §103 is on the table: the model makes the
+    # four-to-six MPEP findings that element coverage cannot (motivation 2143.01, reasonable
+    # expectation 2143.02 I, analogous art 2141.01(a) I, and for a combination 2143 I.A (2)/(3)),
+    # every one quoting a reference and every quote located in that reference's own text. The rule
+    # then decides the label from them. Measured on PANORAMA's first 100: macro-F1 .376 -> .363,
+    # §103 F1 .33 -> .30 — the gate costs almost nothing now that a motivation drawn from the
+    # skilled person's background knowledge is allowed to stand unquoted (and is labelled as such
+    # wherever it appears). See H.md §H2c.
+    if os.environ.get("OBV_FINDINGS", "0") == "1" and adjudication.get("label") == "103":
+        try:
+            from app.llm import obviousness_findings
+            from patent_analyzer.adjudicate import chart_columns
+            from patent_analyzer.obviousness import verify
+            by_pub = {(c.get("pub_num") or c.get("title") or ""): c for c in state.get("ranked_candidates") or []}
+            relied = [k for k in chart_columns(adjudication, max_docs=3) if k]
+            texts = {}
+            for k in relied:
+                c = by_pub.get(k) or {}
+                claims, abstract = (c.get("claims_text") or "").strip(), (c.get("abstract") or c.get("snippet") or "").strip()
+                t = f"{abstract}\n\n{claims}".strip() if claims else abstract
+                if len(t) >= 120:
+                    texts[k] = t
+            if texts:
+                raw = await obviousness_findings([_criterion_text(c) for c in checklist], texts)
+                findings = verify(raw, texts, sorted(texts))
+                adjudication = adjudicate(checklist, scoring_report, single_partial_103=0.7,
+                                          findings=findings)
+                adjudication["findings_stats"] = {"quotes_checked": findings["quotes_checked"],
+                                                  "quotes_located": findings["quotes_located"],
+                                                  "references": sorted(texts)}
+        except Exception as exc:
+            adjudication["findings_error"] = f"{type(exc).__name__}: {exc}"[:200]
     from app.llm import _bri_enabled
     from patent_analyzer.report_sections import determination_label
     adjudication["construction"] = "bri" if _bri_enabled() else "plain"   # how the deep read read the criteria

@@ -356,7 +356,8 @@ def _canon_pub(p: str) -> str:
 
 
 
-async def fetch_by_pub_nums(pub_nums: list[str], with_claims: bool = True) -> dict[str, dict]:
+async def fetch_by_pub_nums(pub_nums: list[str], with_claims: bool = True,
+                            with_description: bool = False) -> dict[str, dict]:
     """Full text for known publication numbers from our own bucketed copy.
 
     amie_patents.pubs / amie_patents.claims are hash-partitioned on the
@@ -406,9 +407,16 @@ async def fetch_by_pub_nums(pub_nums: list[str], with_claims: bool = True) -> di
                 WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params,
                 max_gib=2 + 0.03 * len(wanted)):
                 claims[r.publication_number] = r.claims_text or ""
-        return meta, claims
+        descs = {}
+        if with_description:
+            for r in guarded_query(client, f"""
+                SELECT publication_number, description FROM `{GC_PROJECT}.amie_patents.descriptions`
+                WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params,
+                max_gib=2 + 0.03 * len(wanted)):
+                descs[r.publication_number] = r.description or ""
+        return meta, claims, descs
 
-    meta, claims = await asyncio.to_thread(_run)
+    meta, claims, descs = await asyncio.to_thread(_run)
     out = {}
     for r in meta:
         key = _canon(r.publication_number)
@@ -416,6 +424,7 @@ async def fetch_by_pub_nums(pub_nums: list[str], with_claims: bool = True) -> di
             "publication_number": key,
             "title": r.title or "", "abstract": r.abstract or "",
             "claims_text": claims.get(r.publication_number, ""),
+            "description": descs.get(r.publication_number, ""),
             "cpc_codes": list(r.cpc_codes or []), "country_code": r.country_code or "",
             "priority_date": str(r.priority_date or ""), "publication_date": str(r.publication_date or ""),
             "family_id": r.family_id or "",
@@ -680,12 +689,26 @@ async def fetch_cited_papers(patent_pubs: list[str], max_gib: float = 5.0) -> di
 # dataset**.  So the best text this pipeline can put in front of the evaluator,
 # without leaving our own data, is:
 #
-#   US publication      -> title + abstract + claims_text
+#   US publication      -> title + abstract + claims_text + description
 #   non-US publication  -> title + abstract only
 #
-# That is a real limit on §102/§103 reasoning: an element disclosed only in the
-# spec and not claimed will not be found this way.  It is written into the
-# report rather than papered over (report_sections.read_coverage_*).
+# `descriptions` was built on 2026-09-18 from
+# patents-public-data.patents.publications (1.0295 TiB scanned, $6.43 once) and
+# truncated at 40,000 characters, which keeps 51.5% of the text at $10.91/month
+# of logical storage instead of $21.19 for the full column.  The cut is not a
+# loss of reachable evidence so much as a budget for the prompt: 40,000
+# characters is already ~10k tokens per document beside the claims.
+#
+# It is US-only, and so is `claims`, because the public source is.  Measured
+# 2026-09-18 on patents-public-data.patents.publications, claims_localized:
+#
+#   US 18,760,602 rows with claims (122.3 GB of text)
+#   CN 0 · JP 0 · EP 0 · KR 0 · WO 0 · DE 0
+#
+# So "no specification for a non-US publication" is a fact about the data
+# available, not a gap in this pipeline, and the report says
+# "abstract + claims only" rather than leaving it blank
+# (report_sections._EV_LABEL, graph.eval_subgraph read_as).
 FULLTEXT_CHUNK = int(os.getenv("BQ_FULLTEXT_CHUNK", "300"))
 
 
@@ -710,10 +733,10 @@ async def hydrate_full_text(docs: list[dict], chunk: int | None = None) -> dict:
     abstract, then nothing) is still valid.
     """
     chunk = chunk or FULLTEXT_CHUNK
-    stats = {"asked": 0, "chunks": 0, "hit": 0, "with_claims": 0, "errors": []}
+    stats = {"asked": 0, "chunks": 0, "hit": 0, "with_claims": 0, "with_description": 0, "errors": []}
     want = [d for d in docs if _is_patent_doc(d)
             and (d.get("pub_num") or "").strip()
-            and not (d.get("claims_text") or "").strip()]
+            and not ((d.get("claims_text") or "").strip() and (d.get("description") or "").strip())]
     if not want:
         return stats
     by_pub: dict[str, list[dict]] = {}
@@ -725,7 +748,7 @@ async def hydrate_full_text(docs: list[dict], chunk: int | None = None) -> dict:
         batch = pubs[i:i + chunk]
         stats["chunks"] += 1
         try:
-            got = await fetch_by_pub_nums(batch, with_claims=True)
+            got = await fetch_by_pub_nums(batch, with_claims=True, with_description=True)
         except Exception as exc:
             stats["errors"].append(f"{type(exc).__name__}: {exc}"[:200])
             continue
@@ -736,6 +759,10 @@ async def hydrate_full_text(docs: list[dict], chunk: int | None = None) -> dict:
                 if claims:
                     d["claims_text"] = claims
                     stats["with_claims"] += 1
+                desc = (row.get("description") or "").strip()
+                if desc:
+                    d["description"] = desc
+                    stats["with_description"] += 1
                 if not (d.get("abstract") or "").strip() and row.get("abstract"):
                     d["abstract"] = row["abstract"]
                 if not (d.get("title") or "").strip() and row.get("title"):

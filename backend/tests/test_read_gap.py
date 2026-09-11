@@ -87,8 +87,17 @@ def test_bigquery_claims_beat_a_missing_pdf_and_no_content_says_why(monkeypatch)
     out = asyncio.run(ev.eval_single_doc({"summary": "s", "checklist": [], "doc": doc,
                                           "source_pdf_path": None, "source_title": ""}))
     r = out["eval_results"][0]
-    assert r["source"] == "full_text" and seen["mode"] == "full_text"
-    assert "[CLAIMS]" in seen["text"] and r["text_chars"] == len(seen["text"])
+    # claims but no specification: read as claims, still prompted as full text
+    assert r["source"] == "claims_only" and seen["mode"] == "full_text"
+    assert "[CLAIMS]" in seen["text"] and "[DESCRIPTION]" not in seen["text"]
+    assert r["text_chars"] == len(seen["text"])
+
+    # with the specification from amie_patents.descriptions it is a full read
+    doc2 = dict(doc, description="A very long specification. " * 40)
+    out = asyncio.run(ev.eval_single_doc({"summary": "s", "checklist": [], "doc": doc2,
+                                          "source_pdf_path": None, "source_title": ""}))
+    assert out["eval_results"][0]["source"] == "full_text"
+    assert "[DESCRIPTION]" in seen["text"] and "[CLAIMS]" in seen["text"]
 
     empty = {"pub_num": "EP-1608112-A1", "match_type": "Patent", "title": "T", "abstract": ""}
     out = asyncio.run(ev.eval_single_doc({"summary": "s", "checklist": [], "doc": empty,
@@ -101,18 +110,21 @@ def test_bigquery_claims_beat_a_missing_pdf_and_no_content_says_why(monkeypatch)
 def test_hydrate_full_text_chunks_and_only_asks_for_what_is_missing(monkeypatch):
     calls = []
 
-    async def fake_fetch(pubs, with_claims=True):
+    async def fake_fetch(pubs, with_claims=True, with_description=False):
         calls.append(list(pubs))
-        return {bq._canon_pub(p): {"title": "T", "abstract": "A", "claims_text": f"claims of {p}"}
+        return {bq._canon_pub(p): {"title": "T", "abstract": "A", "claims_text": f"claims of {p}",
+                                   "description": f"spec of {p}"}
                 for p in pubs}
 
     monkeypatch.setattr(bq, "fetch_by_pub_nums", fake_fetch)
     docs = ([{"pub_num": f"US{9000000 + i}B2", "match_type": "Patent"} for i in range(700)]
-            + [{"pub_num": "US9075557B2", "match_type": "Patent", "claims_text": "already here"}]
+            + [{"pub_num": "US9075557B2", "match_type": "Patent", "claims_text": "already here",
+                "description": "spec already here"}]
             + [{"pub_num": "10.1/abc", "match_type": "Paper", "title": "a paper"}])
     stats = asyncio.run(bq.hydrate_full_text(docs, chunk=300))
 
-    assert stats["asked"] == 700 and stats["chunks"] == 3 and stats["with_claims"] == 700
+    assert stats["asked"] == 700 and stats["chunks"] == 3
+    assert stats["with_claims"] == 700 and stats["with_description"] == 700
     assert [len(c) for c in calls] == [300, 300, 100]      # never near the 30 GiB single-query ceiling
     assert all(len(c) <= 300 for c in calls)
     assert docs[700]["claims_text"] == "already here"      # a doc that had claims is not re-fetched
@@ -121,7 +133,7 @@ def test_hydrate_full_text_chunks_and_only_asks_for_what_is_missing(monkeypatch)
 
 
 def test_hydrate_full_text_survives_a_failed_chunk(monkeypatch):
-    async def boom(pubs, with_claims=True):
+    async def boom(pubs, with_claims=True, with_description=False):
         raise RuntimeError("bytesBilledLimitExceeded")
 
     monkeypatch.setattr(bq, "fetch_by_pub_nums", boom)
@@ -162,7 +174,7 @@ def test_reissue_design_and_plant_numbers_are_spelled_back_correctly(monkeypatch
     300/300 on publications drawn from amie_patents.claims itself."""
     asked = {}
 
-    async def fake_fetch(pubs, with_claims=True):
+    async def fake_fetch(pubs, with_claims=True, with_description=False):
         asked["pubs"] = list(pubs)
         return {}
 

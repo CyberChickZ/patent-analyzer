@@ -192,7 +192,12 @@ def _evidence_mix(scoring_report: list[dict] | None) -> dict:
     return mix
 
 
-_EV_LABEL = {"pdf": "full PDF", "full_text": "abstract + claims",
+# What a document's `source` means, spelled out. "claims_only" is a real answer,
+# not a gap: amie_patents.descriptions holds the specification for US
+# publications and there is none for any other country in the public source, so
+# a non-US patent is read from its claims (when it has any) and its abstract.
+_EV_LABEL = {"pdf": "full PDF", "full_text": "abstract + claims + specification",
+             "claims_only": "abstract + claims only (no specification: non-US publication)",
              "abstract": "abstract only", "no_content": "nothing to read"}
 
 
