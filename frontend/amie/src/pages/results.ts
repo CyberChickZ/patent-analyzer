@@ -1,4 +1,7 @@
-import { getResults, getStatus, reportUrl, type JobEvent } from "../api";
+import {
+  getResults, getStatus, reportUrl, getFulltextGaps, uploadFulltext, dropFulltextUpload,
+  rerunEvidence, type JobEvent, type FulltextGaps, type FulltextGapRow,
+} from "../api";
 import { esc, clip, pill, num, empty, errorBox, openModal, md, on, plainTitle } from "../ui";
 import { queriesTable } from "../hitl";
 import { dedupeEvents, isLegacyEvent } from "../phases";
@@ -12,6 +15,8 @@ let showAllDocs = false;
  *  reference) does not close them again. */
 let opened = new Set<string>();
 let QUOTA: Quota | null = null;
+let GAPS: FulltextGaps | null = null;
+let showAllGaps = false;
 let spy: IntersectionObserver | null = null;
 
 /** Coverage as the adjudicator counts it — score >= 1 with a verified quote
@@ -36,7 +41,7 @@ function isCovered(doc: any, criterion: string): boolean {
 }
 
 export function disposeResults(): void {
-  R = null; EVENTS = []; showAllDocs = false; QUOTA = null;
+  R = null; EVENTS = []; showAllDocs = false; QUOTA = null; GAPS = null; showAllGaps = false;
   opened = new Set<string>();
   spy?.disconnect(); spy = null;
 }
@@ -69,12 +74,16 @@ export async function renderResults(host: HTMLElement, jobId: string): Promise<v
     <div class="lede"><span class="spinner"></span> Loading results.json — a full run's is tens of MB, so this can take a moment.</div></div>`;
 
   try {
-    const [res, st, q] = await Promise.all([
+    const [res, st, q, gaps] = await Promise.all([
       getResults(jobId),
       getStatus(jobId).catch(() => null),
       loadQuota(),
+      // A job from before this endpoint existed, or a backend that is older
+      // than the page, just means the section is not drawn.
+      getFulltextGaps(jobId).catch(() => null),
     ]);
     QUOTA = q;
+    GAPS = gaps;
     R = res;
     // the record carries the backend's duplicates too; the call counts below
     // would otherwise be inflated by them
@@ -117,6 +126,7 @@ function paint(host: HTMLElement, jobId: string): void {
   ${determinationSection(adj, sr)}
   ${candidatesSection(cands, checklist, sr)}
   ${searchSection()}
+  ${fulltextSection()}
   ${matrixSection(cands, checklist, sr)}
   ${draftSection(R.draft_claims || {})}
   ${editsSection(R.user_edits || [])}
@@ -146,6 +156,7 @@ function paint(host: HTMLElement, jobId: string): void {
       ${quotes.length ? quotes.map((q) => `<div class="quote">${esc(q)}</div>`).join("") : `<div class="small muted">None.</div>`}`);
   });
   on(host, "#toggle-docs", () => { showAllDocs = !showAllDocs; paint(host, jobId); });
+  wireFulltext(host, jobId);
 }
 
 // ─── Section nav ───
@@ -159,6 +170,7 @@ function sections(edits: any[]): Sec[] {
     { id: "sec-verdict", label: "Verdict" },
     { id: "sec-candidates", label: "Candidates" },
     { id: "sec-search", label: "Search" },
+    ...(GAPS && GAPS.rows.length ? [{ id: "sec-fulltext", label: "Full text" }] : []),
     { id: "sec-evidence", label: "Evidence" },
     { id: "sec-draft", label: "Draft" },
     ...(edits.length ? [{ id: "sec-edits", label: "Reviewer edits" }] : []),
@@ -357,6 +369,206 @@ function searchSection(): string {
       </table></div></div></details>` : ""}
     </div>
   </section>`;
+}
+
+// ─── Full text we could not reach ───
+//
+// The references the deep read never actually read, what was tried for each,
+// and a slot for the reviewer's own copy. Nothing on this page fetches a paper:
+// OSU Libraries' Responsible Use policy forbids programmatic downloading of
+// licensed content, and the backend carries the quote (patent_analyzer/
+// fulltext.py). The remedy is a person with a browser, and then one button.
+
+const TIER_LABEL: Record<string, string> = {
+  bigquery_claims: "Our claims table",
+  arxiv: "arXiv",
+  oa: "Open access",
+  pdf_download: "PDF download",
+};
+
+const OUTCOME_PILL: Record<string, string> = {
+  ok: "pill-completed", failed: "pill-failed", missed: "pill-pending",
+  skipped: "pill-tag", unknown: "pill-tag",
+};
+
+function readPill(row: FulltextGapRow): string {
+  if (row.read_state === "full_text") return `<span class="pill pill-completed">read in full</span>`;
+  if (row.read_state === "abstract_only") return `<span class="pill pill-paused">abstract only</span>`;
+  return `<span class="pill pill-failed">nothing read</span>`;
+}
+
+/** Tiers the run has no record for. "Unknown" is a property of the job, not of
+ *  the reference — repeating the same sentence down twenty rows says nothing
+ *  about any of them — so those entries leave the table and the tiers are named
+ *  once above it. It is still stated: the alternative is a trail that looks
+ *  complete while a whole tier is missing from it. */
+function unknownTiers(rows: FulltextGapRow[]): Set<string> {
+  const out = new Set<string>();
+  for (const r of rows) {
+    for (const a of r.attempts) if (a.outcome === "unknown") out.add(a.tier);
+  }
+  return out;
+}
+
+function trail(row: FulltextGapRow, hidden: Set<string>): string {
+  const shown = row.attempts.filter((a) => a.outcome !== "unknown");
+  if (!shown.length) return `<span class="tiny muted">nothing recorded</span>`;
+  return `<ul class="trail">${shown.map((a) => `<li>
+    <span class="pill pill-flat ${OUTCOME_PILL[a.outcome] || "pill-tag"}">${esc(a.outcome)}</span>
+    <b>${esc(TIER_LABEL[a.tier] || a.tier)}</b> ${esc(a.detail)}</li>`).join("")}</ul>`;
+}
+
+const ARXIV_ID = /^(\d{4}\.\d{4,5})(v\d+)?$/;
+
+/** Where the reader goes to save the PDF by hand. Without a link the row is
+ *  just a complaint, so a bare arXiv id — which is what the arXiv channel puts
+ *  in `pub_num` — is turned back into its abstract page. */
+function refLinks(row: FulltextGapRow): string {
+  const bits: string[] = [];
+  if (row.doi) bits.push(`<a href="https://doi.org/${encodeURIComponent(row.doi)}" target="_blank" rel="noopener">doi.org ↗</a>`);
+  const aid = ARXIV_ID.exec(row.pub_num || "");
+  if (aid) bits.push(`<a href="https://arxiv.org/abs/${esc(aid[1])}" target="_blank" rel="noopener">arXiv ↗</a>`);
+  if (row.landing_page && !row.landing_page.includes("doi.org")) {
+    bits.push(`<a href="${esc(row.landing_page)}" target="_blank" rel="noopener">publisher page ↗</a>`);
+  }
+  return bits.join(" · ") || `<span class="muted">no link on the record</span>`;
+}
+
+function uploadCell(row: FulltextGapRow, busy: boolean): string {
+  const up = row.upload;
+  if (up) {
+    return `<div class="stack" style="gap:.25rem">
+      <div class="small">📄 ${esc(clip(up.filename, 28))} <span class="muted tiny">${(up.bytes / 1048576).toFixed(1)} MB</span></div>
+      ${up.reread
+        ? `<span class="pill pill-completed pill-flat">read into the report</span>`
+        : `<div class="row" style="gap:.35rem"><span class="pill pill-queued pill-flat">waiting for the re-run</span>
+             <button class="icon-btn" data-drop="${esc(row.ref_id)}">Remove</button></div>`}
+    </div>`;
+  }
+  return `<div class="stack" style="gap:.3rem">
+    <input type="file" accept="application/pdf,.pdf" class="file-in" data-file="${esc(row.ref_id)}" ${busy ? "disabled" : ""}>
+    <button class="btn btn-sm" data-up="${esc(row.ref_id)}" ${busy ? "disabled" : ""}>Upload PDF</button>
+  </div>`;
+}
+
+/** The whole list is 19 rows on a full run, and the page has just been cut from
+ *  15,000px to 5,700px to stop people scrolling past it. The rows are sorted by
+ *  score, so the first few are the ones whose full text could still change the
+ *  determination; the rest are one click away. */
+const MAX_GAP_ROWS = 6;
+
+function fulltextSection(): string {
+  if (!GAPS || !GAPS.rows.length) return "";
+  const g = GAPS, s = g.summary;
+  const busy = g.status === "running" || g.status === "queued";
+  const hist = g.rerun_history || [];
+  const hidden = unknownTiers(g.rows);
+  const rows = showAllGaps ? g.rows : g.rows.slice(0, MAX_GAP_ROWS);
+  const hiddenNote = [...hidden].map((t) => TIER_LABEL[t] || t).join(", ");
+  return `<section class="section" id="sec-fulltext">
+    <header><h2>Full text we could not reach</h2>
+      <span class="hint">an abstract cannot establish that an element is or is not disclosed</span></header>
+    <div class="stack">
+      <div class="budget">
+        <div><div class="k">Evaluated</div><div class="v">${num(s.evaluated)}</div></div>
+        <div><div class="k">Read in full</div><div class="v">${num(s.full_text)}</div></div>
+        <div><div class="k">Abstract only</div><div class="v">${num(s.abstract_only)}</div></div>
+        <div><div class="k">Nothing read</div><div class="v">${num(s.nothing)}</div></div>
+        <div><div class="k">Uploaded</div><div class="v">${num(s.uploaded)}<small>${s.pending_reread ? ` ${s.pending_reread} pending` : ""}</small></div></div>
+      </div>
+      <div class="notice notice-warn">${esc(g.policy_note)}
+        <a href="${esc(g.policy_url)}" target="_blank" rel="noopener">The policy ↗</a></div>
+      ${hiddenNote ? `<div class="small muted">No per-reference record of ${esc(hiddenNote)} on this job —
+        it ran before that was written down, so those tiers are left out of the trails below
+        rather than shown as failures.</div>` : ""}
+      <div class="tw"><table class="tbl stacked">
+        <thead><tr><th>Reference</th><th>What was read</th><th>What was tried</th><th class="nowrap">Your copy</th></tr></thead>
+        <tbody>${rows.map((row) => `<tr>
+          <td data-l="Reference">
+            <div>${esc(clip(row.title || row.ref_id, 110))}</div>
+            <div class="tiny muted mono">${esc(row.pub_num || row.doi || "—")}</div>
+            <div class="tiny">${refLinks(row)}</div>
+          </td>
+          <td class="nowrap" data-l="What was read">${readPill(row)}
+            <div class="tiny muted">${esc(clip(row.read_reason, 70))}</div>
+            <div class="tiny muted">score ${row.similarity_score.toFixed(2)}</div></td>
+          <td data-l="What was tried">${trail(row, hidden)}</td>
+          <td data-l="Your copy">${uploadCell(row, busy)}</td></tr>`).join("")}</tbody>
+      </table></div>
+      ${g.rows.length > MAX_GAP_ROWS ? `<div><button class="icon-btn" id="toggle-gaps">${showAllGaps
+        ? `Show only the ${MAX_GAP_ROWS} highest-scoring`
+        : `Show every reference (${g.rows.length})`}</button></div>` : ""}
+      <div class="row">
+        <button class="btn" id="rerun-evidence" ${s.pending_reread && !busy ? "" : "disabled"}>
+          Re-run the evidence step${s.pending_reread ? ` (${s.pending_reread})` : ""}</button>
+        <span class="small muted">${busy
+          ? "This job is running — the page will show the result when it finishes."
+          : s.pending_reread
+            ? "Reads only the uploaded PDFs, then recomputes the determination and rewrites the report."
+            : "Upload a PDF above to enable this."}</span>
+      </div>
+      <div id="ft-msg"></div>
+      ${hist.length ? `<details class="box" data-keep="ft-hist"${isOpen("ft-hist", false) ? " open" : ""}>
+        <summary>Earlier re-runs (${hist.length})</summary><div class="box-body"><div class="tw"><table class="tbl">
+        <thead><tr><th>When</th><th class="right">Read</th><th class="right">Failed</th><th>Determination</th></tr></thead>
+        <tbody>${hist.map((h) => `<tr><td class="tiny mono">${esc(h.at.slice(0, 19))}</td>
+          <td class="right num">${h.read.length}</td><td class="right num">${h.failed.length}</td>
+          <td class="tiny">${h.changed
+            ? `${esc(h.label_before || "—")} → <b>${esc(h.label_after || "—")}</b> · ${esc(clip(h.determination_after, 120))}`
+            : `unchanged (${esc(h.label_after || h.label_before || "—")})`}</td></tr>`).join("")}</tbody>
+      </table></div></div></details>` : ""}
+    </div>
+  </section>`;
+}
+
+function wireFulltext(host: HTMLElement, jobId: string): void {
+  const msg = host.querySelector<HTMLElement>("#ft-msg");
+  const say = (html: string) => { if (msg) msg.innerHTML = html; };
+
+  const refresh = async () => {
+    GAPS = await getFulltextGaps(jobId).catch(() => GAPS);
+    paint(host, jobId);
+  };
+
+  on(host, "[data-up]", async (el) => {
+    const ref = el.dataset.up!;
+    const input = host.querySelector<HTMLInputElement>(`input[data-file="${CSS.escape(ref)}"]`);
+    const file = input?.files?.[0];
+    if (!file) return say(`<div class="notice notice-warn">Choose a PDF first.</div>`);
+    (el as HTMLButtonElement).disabled = true;
+    say(`<div class="notice notice-info"><span class="spinner"></span> Uploading ${esc(file.name)}…</div>`);
+    try {
+      await uploadFulltext(jobId, ref, file);
+      await refresh();
+    } catch (e: any) {
+      (el as HTMLButtonElement).disabled = false;
+      say(errorBox(`Upload failed — ${String(e?.message || e)}`));
+    }
+  });
+
+  on(host, "[data-drop]", async (el) => {
+    try {
+      await dropFulltextUpload(jobId, el.dataset.drop!);
+      await refresh();
+    } catch (e: any) {
+      say(errorBox(`Could not remove that upload — ${String(e?.message || e)}`));
+    }
+  });
+
+  on(host, "#toggle-gaps", () => { showAllGaps = !showAllGaps; paint(host, jobId); });
+
+  on(host, "#rerun-evidence", async (el) => {
+    (el as HTMLButtonElement).disabled = true;
+    say(`<div class="notice notice-info"><span class="spinner"></span> Queued. The uploaded PDFs are being read; the determination and the report follow.</div>`);
+    try {
+      const r = await rerunEvidence(jobId);
+      say(`<div class="notice notice-info">Queued ${r.refs.length} reference(s).
+        <a href="#/run/${esc(jobId)}">Watch it run →</a></div>`);
+    } catch (e: any) {
+      (el as HTMLButtonElement).disabled = false;
+      say(errorBox(`Could not start the re-run — ${String(e?.message || e)}`));
+    }
+  });
 }
 
 // ─── Evidence matrix, one per candidate ───

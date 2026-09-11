@@ -287,3 +287,95 @@ export const setPromptCurrent = (name: string, version: number) =>
   sendJson<{ name: string; current: number }>(
     `/api/prompts/${encodeURIComponent(name)}/current`, "PUT", { version },
   );
+
+// ─── Missing full text ───
+//
+// What the deep read never saw, and the slot for the reviewer's own copy.
+// Nothing here fetches a paper: OSU Libraries' Responsible Use policy forbids
+// programmatic downloading of licensed content, so the backend lists what it
+// could not reach and a person supplies the PDF (backend/patent_analyzer/
+// fulltext.py carries the policy text).
+
+export interface FulltextAttempt {
+  tier: "bigquery_claims" | "arxiv" | "oa" | "pdf_download" | string;
+  outcome: "ok" | "missed" | "failed" | "skipped" | "unknown";
+  detail: string;
+}
+
+export interface FulltextUpload {
+  ref_id: string;
+  filename: string;
+  bytes: number;
+  doi: string;
+  gcs_uri: string;
+  uploaded_at: string;
+  reread: boolean;
+}
+
+export interface FulltextGapRow {
+  ref_id: string;
+  pub_num: string;
+  title: string;
+  match_type: string;
+  doi: string;
+  landing_page: string;
+  fulltext_tier: string;
+  read_state: "full_text" | "abstract_only" | "nothing";
+  read_reason: string;
+  text_chars: number;
+  similarity_score: number;
+  attempts: FulltextAttempt[];
+  upload: FulltextUpload | null;
+}
+
+export interface FulltextGaps {
+  job_id: string;
+  status: string;
+  rows: FulltextGapRow[];
+  summary: {
+    evaluated: number; missing: number; abstract_only: number; nothing: number;
+    uploaded: number; pending_reread: number; full_text: number;
+  };
+  policy_note: string;
+  policy_url: string;
+  rerun_history: {
+    at: string; refs: string[]; read: string[]; failed: string[];
+    changed?: boolean; label_before?: string; label_after?: string;
+    determination_before: string; determination_after: string;
+  }[];
+}
+
+export const getFulltextGaps = (id: string) =>
+  json<FulltextGaps>(`/api/jobs/${encodeURIComponent(id)}/fulltext-gaps`);
+
+/** One reference's PDF. Multipart under the direct-upload limit, signed URL
+ *  above it — the same split `submitJob` makes for the job's own input. */
+export async function uploadFulltext(
+  id: string, refId: string, file: File,
+): Promise<{ upload: FulltextUpload; pending_reread: number }> {
+  const base = `/api/jobs/${encodeURIComponent(id)}/fulltext/${encodeURIComponent(refId)}`;
+  if (file.size > DIRECT_UPLOAD_LIMIT) {
+    const u = await json<{ signed_url: string; gcs_uri: string }>(
+      `/api/upload-url?filename=${encodeURIComponent(file.name)}&content_type=application/pdf`,
+    );
+    const put = await fetch(u.signed_url, {
+      method: "PUT", headers: { "Content-Type": "application/pdf" }, body: file,
+    });
+    if (!put.ok) throw new Error(`GCS upload failed (${put.status})`);
+    return sendJson(`${base}/from-gcs`, "POST", { gcs_uri: u.gcs_uri, filename: file.name });
+  }
+  const fd = new FormData();
+  fd.append("file", file);
+  const r = await req(`${base}/upload`, { method: "POST", body: fd });
+  if (!r.ok) throw new Error(`${r.status} ${(await r.text()).slice(0, 300)}`);
+  return r.json();
+}
+
+export const dropFulltextUpload = (id: string, refId: string) =>
+  json<any>(`/api/jobs/${encodeURIComponent(id)}/fulltext/${encodeURIComponent(refId)}`, { method: "DELETE" });
+
+/** Deep-read the uploaded PDFs, re-adjudicate, rewrite the report. Returns as
+ *  soon as the job is queued; progress shows up on the run page's event feed. */
+export const rerunEvidence = (id: string, refs?: string[]) =>
+  sendJson<{ job_id: string; status: string; refs: string[] }>(
+    `/api/jobs/${encodeURIComponent(id)}/rerun-evidence`, "POST", refs ? { refs } : {});

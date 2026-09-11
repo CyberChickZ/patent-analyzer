@@ -82,7 +82,9 @@ function fbToken(req) {
 
 // Parse JSON only for non-upload routes
 app.use((req, res, next) => {
-  if (req.path === "/api/analyze") return next();
+  // Multipart bodies are re-streamed to the backend untouched; parsing them as
+  // JSON here would consume the stream and hand the backend an empty body.
+  if (req.path === "/api/analyze" || /^\/api\/jobs\/[^/]+\/fulltext\/[^/]+\/upload$/.test(req.path)) return next();
   express.json()(req, res, next);
 });
 
@@ -277,6 +279,77 @@ app.post("/api/jobs/:jobId/resume", async (req, res) => {
     res.status(status).json(data);
   } catch (e) {
     console.error("Error in POST /api/jobs/:id/resume:", e);
+    res.status(500).json({ error: "Proxy error" });
+  }
+});
+
+// ─── Missing full text: the list, the upload slot, the evidence re-run ───
+//
+// The reviewer's own PDF for a reference the run could not fetch. The upload is
+// multipart and is re-streamed exactly like /api/analyze; the rest are plain
+// JSON pass-throughs.
+
+app.get("/api/jobs/:jobId/fulltext-gaps", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(`/api/jobs/${encodeURIComponent(req.params.jobId)}/fulltext-gaps`, { firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) {
+    console.error("Error in GET /api/jobs/:id/fulltext-gaps:", e);
+    res.status(500).json({ error: "Proxy error" });
+  }
+});
+
+app.post("/api/jobs/:jobId/fulltext/:refId/upload", async (req, res) => {
+  try {
+    const backendUrl = buildUrl(`/api/jobs/${encodeURIComponent(req.params.jobId)}/fulltext/${encodeURIComponent(req.params.refId)}/upload`);
+    const headers = {};
+    if (!LOCAL_RUN) headers.Authorization = `Bearer ${await getIdToken()}`;
+    if (req.headers["content-type"]) headers["Content-Type"] = req.headers["content-type"];
+    const ft = fbToken(req);
+    if (ft) headers["X-Firebase-Token"] = ft;
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", async () => {
+      try {
+        const backendRes = await fetch(backendUrl, { method: "POST", headers, body: Buffer.concat(chunks) });
+        res.status(backendRes.status).json(await backendRes.json().catch(() => ({})));
+      } catch (e) {
+        console.error("Error forwarding the full-text upload:", e);
+        res.status(500).json({ error: "Proxy error" });
+      }
+    });
+  } catch (e) {
+    console.error("Error in POST /api/jobs/:id/fulltext/:ref/upload:", e);
+    res.status(500).json({ error: "Proxy error" });
+  }
+});
+
+app.post("/api/jobs/:jobId/fulltext/:refId/from-gcs", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(`/api/jobs/${encodeURIComponent(req.params.jobId)}/fulltext/${encodeURIComponent(req.params.refId)}/from-gcs`, { method: "POST", data: req.body, firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) {
+    console.error("Error in POST /api/jobs/:id/fulltext/:ref/from-gcs:", e);
+    res.status(500).json({ error: "Proxy error" });
+  }
+});
+
+app.delete("/api/jobs/:jobId/fulltext/:refId", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(`/api/jobs/${encodeURIComponent(req.params.jobId)}/fulltext/${encodeURIComponent(req.params.refId)}`, { method: "DELETE", firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) {
+    console.error("Error in DELETE /api/jobs/:id/fulltext/:ref:", e);
+    res.status(500).json({ error: "Proxy error" });
+  }
+});
+
+app.post("/api/jobs/:jobId/rerun-evidence", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(`/api/jobs/${encodeURIComponent(req.params.jobId)}/rerun-evidence`, { method: "POST", data: req.body || {}, firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) {
+    console.error("Error in POST /api/jobs/:id/rerun-evidence:", e);
     res.status(500).json({ error: "Proxy error" });
   }
 });

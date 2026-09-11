@@ -371,6 +371,48 @@ details.box > .box-body { padding: .6rem; }
 tr.flagged { background: var(--danger-soft); }
 .flag { color: var(--danger); font-size: .73rem; margin-top: .2rem; }
 
+/* ─── Missing full text (results) ─── */
+/* One line per tier that was tried, so "why is this reference unread" is
+   answered in the row rather than in a modal. Kept to the table's own scale. */
+
+ul.trail { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: .18rem; }
+ul.trail li { font-size: .72rem; color: var(--text-3); line-height: 1.35; }
+ul.trail li b { color: var(--text-2); font-weight: 600; }
+ul.trail .pill { margin-right: .3rem; }
+
+input.file-in {
+  font-family: var(--font-body); font-size: .72rem; color: var(--text-2);
+  max-width: 190px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: .2rem; background: var(--surface);
+}
+input.file-in::file-selector-button {
+  font-family: var(--font-body); font-size: .72rem; margin-right: .4rem;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text-2); padding: .14rem .4rem; cursor: pointer;
+}
+input.file-in:disabled { opacity: .5; }
+
+#ft-msg:empty { display: none; }
+
+/* Under 640px this one table stacks instead of scrolling sideways. Every other
+   table on the page is a thing to read, where a sideways scroll is acceptable;
+   this one has a file picker and a button in its last column, and a control you
+   have to scroll to find is a control nobody uses. */
+@media (max-width: 640px) {
+  input.file-in { max-width: 100%; }
+  table.tbl.stacked thead { display: none; }
+  table.tbl.stacked, table.tbl.stacked tbody, table.tbl.stacked tr, table.tbl.stacked td { display: block; width: 100%; }
+  table.tbl.stacked tr { border-bottom: 1px solid var(--border-strong); padding: .3rem 0; }
+  table.tbl.stacked tr:last-child { border-bottom: none; }
+  table.tbl.stacked td { border-bottom: none; padding: .25rem .55rem; white-space: normal; }
+  table.tbl.stacked td[data-l]::before {
+    content: attr(data-l); display: block;
+    font-size: .64rem; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--text-3); font-weight: 600; margin-bottom: .1rem;
+  }
+  table.tbl.stacked td[data-l="Reference"]::before { display: none; }
+}
+
 /* ─── Section nav (results) ─── */
 
 .secnav {
