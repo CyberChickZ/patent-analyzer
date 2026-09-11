@@ -221,13 +221,20 @@ async def rerun_evidence(job: dict) -> None:
         "ranked_candidates": [{}] * (n_delivered or len(scoring_report)),
     })
 
-    before = (results.get("adjudication") or {}).get("label_text") or (results.get("adjudication") or {}).get("label", "")
-    after = (reduced.get("adjudication") or {}).get("label_text") or (reduced.get("adjudication") or {}).get("label", "")
+    # Compared on `label` + `basis`, not on the rendered sentence: a job that ran
+    # before `label_text` existed has no sentence to compare against, and reading
+    # one absence as a change would announce a flipped verdict on every old job.
+    adj_b, adj_a = results.get("adjudication") or {}, reduced.get("adjudication") or {}
+    key_b = (adj_b.get("label", ""), adj_b.get("basis", ""))
+    key_a = (adj_a.get("label", ""), adj_a.get("basis", ""))
+    changed = key_b != key_a
+    before = adj_b.get("label_text") or adj_b.get("label", "")
+    after = adj_a.get("label_text") or adj_a.get("label", "")
     for evt in reduced.get("events", []):
         job.setdefault("events", []).append(evt)
-    _event(job, "phase4", "info" if before == after else "warn",
-           f"Determination after the re-read: {after or '—'}"
-           + ("" if before == after else f" (was: {before or '—'})"))
+    _event(job, "phase4", "warn" if changed else "info",
+           (f"Determination changed: {key_b[0] or '—'} → {key_a[0] or '—'}. {after}"
+            if changed else f"Determination unchanged ({key_a[0] or '—'}) after the re-read"))
 
     state = state_from_results(results, job, search_stats)
     state.update({k: reduced[k] for k in ("scoring_report", "novelty_score", "risk_level",
@@ -244,7 +251,8 @@ async def rerun_evidence(job: dict) -> None:
         "top_score": round((reduced.get("scoring_report") or [{}])[0].get("similarity_score", 0), 4)}
     job.setdefault("fulltext_reruns", []).append({
         "at": datetime.now(timezone.utc).isoformat(),
-        "refs": refs, "read": read_ok, "failed": failed,
+        "refs": refs, "read": read_ok, "failed": failed, "changed": changed,
+        "label_before": key_b[0], "label_after": key_a[0],
         "determination_before": before, "determination_after": after})
     job["fulltext_uploads"] = uploads
     job["status"] = "completed"

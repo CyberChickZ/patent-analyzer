@@ -16,11 +16,17 @@ CHECKLIST = [{"id": "c1", "criterion": "A distributed controller", "weight": 0.5
              {"id": "c2", "criterion": "A phase-synchronised clock", "weight": 0.5}]
 
 
+# A quote long enough for quote_verify to locate, and present verbatim in the
+# stubbed PDF text below. `adjudicate.element_covered` counts an element only
+# when a quote was found in the document, so a made-up fragment would make the
+# determination depend on the quote matcher's threshold rather than on the
+# evidence these tests are about.
+QUOTE = "The controller is distributed and the clock is phase-synchronised."
+
+
 def _hit(crit, score=2):
-    # `verified_quotes` is what adjudicate.element_covered counts; a criterion
-    # with a quote nobody could find in the document is not coverage.
     return {crit: {"score": score, "match": score >= 2, "analysis": "…",
-                   "evidence_quotes": ["verbatim"], "verified_quotes": ["verbatim"]}}
+                   "evidence_quotes": [QUOTE], "verified_quotes": [QUOTE]}}
 
 
 def _results(tmp_path):
@@ -32,7 +38,8 @@ def _results(tmp_path):
         "search": {"summary": {"total_papers": 2, "fulltext_oa": {"manifest": []}}},
         "extraction": {"candidate_inventions": [{"id": "inv1", "concept": "c", "elements": []}]},
         "eval_stats": {"read_gap": {"delivered": 9}},
-        "adjudication": {"label": "allow", "label_text": "No blocking reference", "n_elements": 2},
+        "adjudication": {"label": "ALLOW", "basis": "none",
+                         "label_text": "No blocking reference", "n_elements": 2},
         "draft_claims": {},
         "evaluation": {"scoring_report": [
             {"pub_num": "10.1/paywalled", "title": "Paywalled paper", "match_type": "Paper",
@@ -62,9 +69,20 @@ def job(tmp_path, monkeypatch):
     return j
 
 
+# What quote_verify reads out of the uploaded PDF. Pinned rather than left to
+# PyMuPDF on a 40-byte fake: `adjudicate` only counts an element covered when a
+# quote was located in the document, so whether these tests see a §102 or an
+# ALLOW would otherwise depend on what the extractor happens to return for a
+# file that is not really a PDF.
+PDF_TEXT = f"Introduction. {QUOTE} The rest of the paper follows."
+
+
 def _stub_read(monkeypatch, covered):
     """The deep read of the uploaded PDF, without Vertex."""
     import app.llm as llm
+    import patent_analyzer.quote_verify as qv
+
+    monkeypatch.setattr(qv, "pdf_text", lambda path: PDF_TEXT)
 
     async def fake(summary, checklist, pdf, title, match_type, **kw):
         assert Path(pdf).read_bytes() == PDF        # the uploaded file, not a download
@@ -113,8 +131,8 @@ def test_the_determination_is_recomputed_from_the_new_evidence(job, monkeypatch)
     assert out["adjudication"]["label"] == "102"
     hist = job["fulltext_reruns"][-1]
     assert hist["read"] == ["10.1-paywalled"] and hist["failed"] == []
+    assert hist["label_before"] == "ALLOW" and hist["label_after"] == "102" and hist["changed"] is True
     assert hist["determination_before"] == "No blocking reference"
-    assert hist["determination_after"] != hist["determination_before"]
 
 
 def test_the_delivered_count_survives_the_rerun(job, monkeypatch):
@@ -133,6 +151,7 @@ def test_the_delivered_count_survives_the_rerun(job, monkeypatch):
 
 def test_an_upload_that_reads_as_nothing_is_reported_as_failed(job, monkeypatch):
     import app.llm as llm
+    import patent_analyzer.quote_verify as qv
 
     from app.fulltext_rerun import rerun_evidence
 
@@ -140,10 +159,11 @@ def test_an_upload_that_reads_as_nothing_is_reported_as_failed(job, monkeypatch)
         return {"title": title, "match_type": match_type, "checklist_results": {}, "error": "unparseable"}
 
     monkeypatch.setattr(llm, "evaluate_single_document", empty)
+    monkeypatch.setattr(qv, "pdf_text", lambda path: PDF_TEXT)
     asyncio.run(rerun_evidence(job))
 
     hist = job["fulltext_reruns"][-1]
-    assert hist["failed"] == ["10.1-paywalled"] and hist["read"] == []
+    assert hist["failed"] == ["10.1-paywalled"] and hist["read"] == [] and hist["changed"] is False
     assert any("produced no" in e["message"] for e in job["events"])
 
 
