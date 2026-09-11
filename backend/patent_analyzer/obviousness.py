@@ -29,6 +29,25 @@ from .adjudicate import MET, NOT_MET, UNDET
 
 QUOTE_THRESHOLD = float(os.environ.get("OBV_QUOTE_THRESHOLD", "0.9"))
 
+# The one finding allowed to stand without a quote, and why.
+#
+# Requiring every rationale to be quotable from a reference is the pre-KSR TSM standard, and KSR
+# rejected exactly that. MPEP 2143.01: a motivation "may be found explicitly or IMPLICITLY in
+# market forces; design incentives; ... and the BACKGROUND KNOWLEDGE, creativity, and common sense
+# of the person of ordinary skill" — the last of those has no quote anywhere by definition. Asking
+# for one anyway cost measurable accuracy: on PANORAMA's first 100 the gate took macro-F1 from
+# .376 to .335 and §103 F1 from .33 to .22, and the model's reason was almost always "neither
+# reference provides an EXPRESS suggestion". We had implemented "can articulate a reason" as "can
+# quote a reason".
+#
+# The other constraint is equally real — MPEP 2143, In re Van Os: "Absent some articulated
+# rationale, a finding that a combination of prior art would have been 'common sense' or
+# 'intuitive' is no different than merely stating the combination 'would have been obvious.'" So
+# the reason still has to be stated, and a §103 resting on it is marked everywhere it appears and
+# never counts towards a prima facie case (leader, 2026-09-18).
+UNEVIDENCED_SOURCE = "background_knowledge"
+UNEVIDENCED_NOTE = "rationale asserted from ordinary skill, not evidenced in the references"
+
 # The six places a motivation may legitimately come from (MPEP 2143.01, verbatim):
 # "market forces; design incentives; the 'interrelated teachings of multiple patents'; 'any need
 #  or problem known in the field of endeavor at the time of invention and addressed by the
@@ -116,12 +135,17 @@ def verify(raw: dict, texts: dict[str, str], relied: list[str]) -> dict:
         doc, quote = str(node.get("doc") or ""), str(node.get("quote") or "")
         if not node.get("found"):
             return {"status": NOT_MET, "reason": str(node.get("reason") or "not found in the references"),
-                    "doc": doc, "quote": "", "located": False}
+                    "doc": doc, "quote": "", "located": False, "evidenced": False}
+        if name == "motivation" and node.get("source") == UNEVIDENCED_SOURCE and not quote.strip():
+            # stated, not quoted — allowed to stand, and labelled wherever it is shown
+            return {"status": MET, "evidenced": False, "source": UNEVIDENCED_SOURCE, "doc": doc,
+                    "quote": "", "located": False,
+                    "reason": f"{UNEVIDENCED_NOTE}: {str(node.get('reason') or '')}"[:400]}
         out["quotes_checked"] += 1
         ok, score = _verified(quote, texts.get(doc, ""))
         out["quotes_located"] += 1 if ok else 0
         return {"status": MET if ok else NOT_MET, "doc": doc, "quote": quote[:400],
-                "located": ok, "score": round(score, 3),
+                "located": ok, "evidenced": ok, "score": round(score, 3),
                 "reason": str(node.get("reason") or "") if ok else
                           f"quote not located in {doc or 'the named reference'} (best {score:.2f})",
                 **({"source": node.get("source")} if name == "motivation" else {})}
@@ -138,14 +162,14 @@ def verify(raw: dict, texts: dict[str, str], relied: list[str]) -> dict:
         a = by_doc.get(k)
         if not a:
             analog[k] = {"status": NOT_MET, "reason": "no analogous-art finding for this reference",
-                         "located": False}
+                         "located": False, "evidenced": False}
             continue
         quote = str(a.get("quote") or "")
         out["quotes_checked"] += 1
         ok, score = _verified(quote, texts.get(k, ""))
         out["quotes_located"] += 1 if ok else 0
         analog[k] = {"status": MET if ok else NOT_MET, "test": a.get("test"), "quote": quote[:400],
-                     "located": ok, "score": round(score, 3),
+                     "located": ok, "evidenced": ok, "score": round(score, 3),
                      "reason": str(a.get("reason") or "") if ok else
                                f"quote not located in {k} (best {score:.2f})"}
     out["analogous"] = analog
@@ -162,6 +186,13 @@ def verify(raw: dict, texts: dict[str, str], relied: list[str]) -> dict:
 
 
 FULL_FINDINGS = os.environ.get("OBV_FULL_FINDINGS", "1") != "0"
+
+
+def unevidenced(findings: dict | None) -> list[str]:
+    """Findings that were asserted rather than quoted — for the trace, the
+    report, and for keeping them out of a prima facie case."""
+    return [k for k, v in (findings or {}).items()
+            if isinstance(v, dict) and v.get("status") == MET and v.get("evidenced") is False]
 
 
 def combination_supported(findings: dict | None, relied: list[str]) -> tuple[bool, str]:

@@ -790,6 +790,17 @@ _BRI_NOTE = ("Claims were construed under the broadest reasonable interpretation
              "discloses the same thing under a different name.")
 
 
+def asserted_rationale_note(adj: dict | None) -> str:
+    """Shown on the verdict card and next to the chart when the §103 rests on a
+    reason nobody could quote. MPEP 2143.01 allows a motivation to be found in
+    the skilled person's background knowledge, which has no quote — so this is
+    permitted, and it is labelled every single place the verdict appears."""
+    from .adjudicate import asserted_rationale
+    note = asserted_rationale(adj)
+    return (f"This §103 rests on a {note}. Every other finding is quoted from a reference and located "
+            f"in its text; this one is not, so it is not part of a prima facie case.") if note else ""
+
+
 def abstract_only_note(chart: dict | None) -> str:
     """Shown only when a chart actually has such a column."""
     return _ABSTRACT_ONLY_NOTE if any(d.get("abstract_only") for d in (chart or {}).get("docs") or []) else ""
@@ -806,10 +817,13 @@ def construction_note(adj: dict | None) -> str:
 def determination_label(adj: dict | None) -> str:
     if not adj:
         return ""
+    from .adjudicate import asserted_rationale
+    suffix = f" — {asserted_rationale(adj)}" if asserted_rationale(adj) else ""
     label = adj.get("label")
     if label == "103" and adj.get("basis") == "primary_partial":
-        return "§103 screening flag: a primary reference discloses most of the elements; the gap is small enough that an examiner would look for a secondary reference"
-    return _LABEL_TEXT.get(label, str(label or ""))
+        return ("§103 screening flag: a primary reference discloses most of the elements; the gap is small "
+                "enough that an examiner would look for a secondary reference" + suffix)
+    return _LABEL_TEXT.get(label, str(label or "")) + suffix
 
 
 def _combo_lines(chart: dict | None) -> list[tuple[str, list[str], str]]:
@@ -863,7 +877,7 @@ def determination_html(adj: dict | None, chart: dict | None = None, explanation:
     n = adj["n_elements"]
     label = adj.get("label")
     out = ['<div class="sec det-sec" style="border-left:3px solid ' + fg + '"><div class="sec-t sec-t-lg">Prior-Art Determination</div>',
-           f'<div class="sec-note">{_e(" ".join(x for x in (construction_note(adj), _DETERMINATION_NOTE, abstract_only_note(chart)) if x))}</div>',
+           f'<div class="sec-note">{_e(" ".join(x for x in (asserted_rationale_note(adj), construction_note(adj), _DETERMINATION_NOTE, abstract_only_note(chart)) if x))}</div>',
            f'<div class="sec-b det-verdict"><span class="badge" style="background:{bg};color:{fg}">{_e(adj.get("risk", ""))}</span> '
            f'<b>{_e(determination_label(adj))}</b><br><span style="font-size:.85em">Rule: {_e(adj.get("reason", ""))}</span></div>']
     out.append(claim_chart_html(chart))
@@ -913,6 +927,8 @@ def determination_md(adj: dict | None, chart: dict | None = None, explanation: s
     lines = ["## Prior-Art Determination", "",
              f"**{adj.get('risk', '')}** — {determination_label(adj)}.", "", f"_Rule: {adj.get('reason', '')}_", "",
              "_Blocking risk from the documents evaluated here only; not a prediction of grant._", ""]
+    if asserted_rationale_note(adj):
+        lines += [f"**{asserted_rationale_note(adj)}**", ""]
     if construction_note(adj):
         lines += [f"_{construction_note(adj)}_", ""]
     if abstract_only_note(chart):

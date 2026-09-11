@@ -343,19 +343,20 @@ def analogous_art(doc: dict, invention_cpc) -> tuple[str, str]:
                    "whether it is reasonably pertinent to the problem is not decided by classification")
 
 
-def _t(rid: str, mpep: str, requirement: str, status: str, finding: str) -> dict:
-    return {"id": rid, "mpep": mpep, "requirement": requirement, "status": status, "finding": finding}
+def _t(rid: str, mpep: str, requirement: str, status: str, finding: str, evidenced: bool = True) -> dict:
+    return {"id": rid, "mpep": mpep, "requirement": requirement, "status": status, "finding": finding,
+            "evidenced": evidenced}
 
 
-def _from_finding(findings: dict | None, key: str, absent: str) -> tuple[str, str]:
+def _from_finding(findings: dict | None, key: str, absent: str) -> tuple[str, str, bool]:
     """(status, finding text) for a requirement the model was asked to evidence.
     Without findings the answer stays `not_determined` — the absence of a call
     is not a negative finding."""
     f = (findings or {}).get(key)
     if not f:
-        return UNDET, absent
+        return UNDET, absent, True
     quote = f' — "{f["quote"][:160]}"' if f.get("located") and f.get("quote") else ""
-    return f["status"], (f.get("reason") or absent)[:300] + quote
+    return f["status"], (f.get("reason") or absent)[:300] + quote, f.get("evidenced", True)
 
 
 def rule_trace(adj: dict, elements: list, docs_results: list[dict] | None = None,
@@ -448,11 +449,24 @@ def rule_trace(adj: dict, elements: list, docs_results: list[dict] | None = None
 
 
 def prima_facie(trace: list[dict]) -> bool:
-    """MPEP 2142: the rejection must be a prima facie case supported by
-    evidence. Every requirement has to be `met` — an undetermined finding is
-    not a finding, and 2143 I.E says in terms that if any of a rationale's
-    findings "cannot be made, then this rationale cannot be used"."""
-    return bool(trace) and all(t["status"] == MET for t in trace)
+    """MPEP 2142: the rejection must be a prima facie case supported BY
+    EVIDENCE. Every requirement has to be `met`, and met on evidence — a
+    rationale asserted from the skilled person's background knowledge is
+    allowed to carry a §103 (MPEP 2143.01 says a motivation may be found
+    implicitly there) but it is not evidence, so it never makes a prima facie
+    case. An undetermined finding is not a finding either, and 2143 I.E says in
+    terms that if any of a rationale's findings "cannot be made, then this
+    rationale cannot be used"."""
+    return bool(trace) and all(t["status"] == MET and t.get("evidenced", True) for t in trace)
+
+
+def asserted_rationale(adj: dict | None) -> str:
+    """The sentence a §103 resting on an unquoted rationale has to carry."""
+    from .obviousness import UNEVIDENCED_NOTE
+    if (adj or {}).get("label") != "103":
+        return ""
+    bad = [t for t in (adj.get("rule_trace") or []) if t.get("status") == MET and not t.get("evidenced", True)]
+    return UNEVIDENCED_NOTE if bad else ""
 
 
 def chart_columns(adj: dict, max_docs: int = 3) -> list[str]:

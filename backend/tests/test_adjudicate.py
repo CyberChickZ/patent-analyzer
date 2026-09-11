@@ -432,3 +432,27 @@ def test_an_abstract_only_paper_still_counts_towards_a_combination():
     adj = adjudicate(E, [paper, _doc("US-2", E[2:])], single_partial_103=0.7)
     assert adj["label"] == "103" and adj["basis"] == "combination"
     assert "Smith 2011" in (adj["combo"] or {}).get("docs", [])
+
+
+def test_a_motivation_from_ordinary_skill_may_stand_unquoted_but_is_labelled_everywhere():
+    """MPEP 2143.01: a motivation "may be found explicitly or implicitly in ...
+    the background knowledge, creativity, and common sense of the person of
+    ordinary skill" — which has no quote by definition. Demanding one is the
+    pre-KSR TSM standard and it cost .376 -> .335 macro-F1 on PANORAMA's first
+    100. It is allowed, and it is marked wherever the verdict is shown."""
+    from patent_analyzer.obviousness import verify
+    from patent_analyzer.report_sections import asserted_rationale_note, determination_label
+    raw = dict(_RAW)
+    raw["motivation"] = {"found": True, "source": "background_knowledge",
+                         "reason": "adding a sensor to an endoscope was routine at the time"}
+    f = verify(raw, _TEXT, ["US-1", "US-2"])
+    assert f["motivation"]["status"] == "met" and f["motivation"]["evidenced"] is False
+    adj = adjudicate(E, _split_docs(), single_partial_103=0.7, findings=f)
+    assert adj["label"] == "103"
+    assert adj["prima_facie"] is False               # allowed to carry the label, never the case
+    assert "not evidenced in the references" in determination_label(adj)
+    assert "not evidenced in the references" in asserted_rationale_note(adj)
+    # and an unquoted motivation from any OTHER source is still rejected
+    raw["motivation"] = {"found": True, "source": "known_need_or_problem", "reason": "asserted"}
+    f2 = verify(raw, _TEXT, ["US-1", "US-2"])
+    assert adjudicate(E, _split_docs(), single_partial_103=0.7, findings=f2)["label"] == "ALLOW"
