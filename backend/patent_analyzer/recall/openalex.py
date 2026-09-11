@@ -194,6 +194,63 @@ async def search_paper_by_title(title: str) -> Candidate | None:
     return _work_to_candidate(results[0])
 
 
+def _title_key(t: str) -> str:
+    return " ".join("".join(c if c.isalnum() or c.isspace() else " " for c in (t or "").lower()).split())
+
+
+async def backfill_dois(cands: list, cap: int = 60) -> dict:
+    """Give paper candidates a DOI when they arrived without one.
+
+    41 of the 88 papers a real job could not read had no DOI at all, which is
+    the single largest reason nothing further can be done with them: no DOI
+    means no Unpaywall, no Europe PMC, no GCS cache key and nothing to put on a
+    manual-download list (N7, 2026-09-18). OpenAlex answers a title search for
+    free, so the lookup is one request per unresolved paper, rate limited and
+    cached, and it only ever fills a field that was empty.
+
+    A match counts only when the returned title is the same title — OpenAlex
+    will happily return its closest work for a query that matches nothing, and
+    a wrong DOI is worse than none.
+    """
+    from ..cache import kv
+    from ..runtime_state import SerialLock
+    todo = [c for c in cands
+            if getattr(c, "match_type", "") != "Patent" and not getattr(c, "doi", "")
+            and len(_title_key(getattr(c, "title", ""))) > 20][:cap]
+    out = {"asked": 0, "filled": 0, "cached": 0, "mismatched": 0}
+    if not todo:
+        return out
+    store = kv()
+    async with httpx.AsyncClient() as client:
+        for c in todo:
+            key = "oa_doi:" + _title_key(c.title)[:180]
+            hit = store.get("recall", key)
+            if hit is not None:
+                out["cached"] += 1
+                if hit.get("doi"):
+                    c.doi = hit["doi"]
+                    out["filled"] += 1
+                continue
+            async with SerialLock("openalex", cooldown_s=1.0):
+                data, err = await _get(client, f"{API_BASE}/works", _params({
+                    "filter": f"title.search:{c.title[:200]}", "per_page": 1, "select": "id,title,doi"}))
+            out["asked"] += 1
+            doi = ""
+            if not err and data:
+                r = (data.get("results") or [{}])[0]
+                got = _title_key(r.get("title") or "")
+                want = _title_key(c.title)
+                if got and (got == want or (len(got) > 30 and (got in want or want in got))):
+                    doi = (r.get("doi") or "").replace("https://doi.org/", "")
+                elif got:
+                    out["mismatched"] += 1
+            store.put("recall", key, {"doi": doi})
+            if doi:
+                c.doi = doi
+                out["filled"] += 1
+    return out
+
+
 async def ids_for_dois(dois: list[str]) -> dict[str, str]:
     """DOI → OpenAlex work id (W…), 50 per request via the pipe-joined
     `filter=doi:` syntax (OpenAlex docs: "You can use OR by putting a pipe

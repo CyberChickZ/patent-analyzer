@@ -302,6 +302,19 @@ async def search_node(state: GraphState) -> dict:
             pooled = recall_pool.pool_and_dedupe(merged)
             _event("info", f"Citation chaining added {len(pooled) - before} candidates")
 
+    # A paper with no DOI is a dead end: no Unpaywall, no Europe PMC, no cache key and nothing to
+    # put on a manual-download list. 41 of the 88 unreadable papers in a real job were in exactly
+    # that state (N7, 2026-09-18), so ask OpenAlex once per unresolved title before going further.
+    if os.environ.get("DOI_BACKFILL", "1") != "0":
+        try:
+            from patent_analyzer.recall import openalex as _oa
+            fill = await _oa.backfill_dois(pooled)
+            if fill.get("filled") or fill.get("mismatched"):
+                _event("info", f"DOI backfill: {fill['filled']} filled of {fill['asked']} asked "
+                               f"({fill['cached']} cached, {fill['mismatched']} rejected as a different title)")
+        except Exception as exc:
+            _event("warn", f"DOI backfill skipped: {type(exc).__name__}: {exc}")
+
     # Convert to legacy doc dicts
     all_docs = recall_pool.candidates_to_legacy_docs(pooled)
 

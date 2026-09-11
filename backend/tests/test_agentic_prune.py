@@ -129,3 +129,42 @@ def test_stage1_gives_papers_their_own_share_so_they_cannot_crowd_out_patents():
     assert kinds.count("Patent") == 200          # every patent survives despite the worse cosine
     assert kinds.count("Paper") == 100           # papers take their 30% share plus the unused rest
     assert info["stage1_papers_out"] == 100
+
+
+def test_doi_backfill_fills_only_empty_dois_and_rejects_a_different_title():
+    """41 of the 88 unreadable papers in a real job had no DOI at all — no DOI
+    means no Unpaywall, no Europe PMC, no cache key and nothing to put on a
+    manual-download list (N7, 2026-09-18). A wrong DOI is worse than none, so a
+    result whose title is not the same title is rejected."""
+    import asyncio
+    from unittest import mock
+    from patent_analyzer.recall import openalex as oa
+    from patent_analyzer.recall.pool import Candidate
+
+    async def fake_get(client, url, params, *a, **k):
+        t = params["filter"].split("title.search:")[1]
+        if "Sourdough" in t:
+            return {"results": [{"title": "A completely different work", "doi": "https://doi.org/10.9/wrong"}]}, None
+        return {"results": [{"title": "CO-FISH strand orientation", "doi": "https://doi.org/10.1/right"}]}, None
+
+    cands = [Candidate(title="CO-FISH strand orientation", match_type="Paper"),
+             Candidate(title="Sourdough starters and wild yeast cultures", match_type="Paper"),
+             Candidate(title="Has one already", match_type="Paper", doi="10.5/keep"),
+             Candidate(title="US Patent thing", match_type="Patent", pub_num="US1A1")]
+    class _Mem:                       # the real KV persists across runs, which would hide the call
+        def __init__(self):
+            self.d = {}
+
+        def get(self, ns, key, max_age_days=None):
+            return self.d.get((ns, key))
+
+        def put(self, ns, key, value):
+            self.d[(ns, key)] = value
+    import patent_analyzer.cache as _cache
+    with mock.patch.object(oa, "_get", fake_get), mock.patch.object(_cache, "kv", lambda: _Mem()):
+        out = asyncio.run(oa.backfill_dois(cands))
+    assert out == {"asked": 2, "filled": 1, "cached": 0, "mismatched": 1}
+    assert cands[0].doi == "10.1/right"
+    assert cands[1].doi == ""            # different title -> rejected
+    assert cands[2].doi == "10.5/keep"   # never overwritten
+    assert cands[3].doi == ""            # patents are not asked about
