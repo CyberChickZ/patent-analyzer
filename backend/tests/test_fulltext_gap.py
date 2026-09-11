@@ -129,3 +129,28 @@ def test_the_summary_counts_add_up_to_what_was_evaluated():
     s = gap.gap_summary(res, gap.gap_rows(res))
     assert s == {"evaluated": 3, "missing": 2, "abstract_only": 1, "nothing": 1,
                  "uploaded": 0, "pending_reread": 0, "full_text": 1}
+
+
+# ── the report says which references came from a hand-supplied PDF ───────────
+
+def _uploaded_row():
+    return {"pub_num": "10.1/a", "title": "Paywalled paper", "source": "pdf",
+            "fulltext_tier": gap.UPLOAD_TIER, "fulltext_detail": "uploaded by hand on 2026-09-18 (p.pdf)",
+            "checklist_results": {"c1": {"score": 2, "verified_quotes": ["q"]},
+                                  "c2": {"score": 0}}}
+
+
+def test_a_report_with_no_uploads_gets_no_extra_section():
+    assert gap.uploaded_fulltext_html([{"pub_num": "x", "source": "pdf"}]) == ""
+    assert gap.uploaded_fulltext_md([{"pub_num": "x", "source": "pdf"}]) == []
+
+
+def test_the_section_names_the_reference_and_says_the_verdict_was_recomputed():
+    h = gap.uploaded_fulltext_html([_uploaded_row(), {"pub_num": "x", "source": "pdf"}])
+    m = "\n".join(gap.uploaded_fulltext_md([_uploaded_row()]))
+    for text in (h, m):
+        assert "Full Text Supplied by Hand" in text
+        assert "Paywalled paper" in text and "10.1/a" in text
+        assert "1 of 2" in text                       # coverage counted the way adjudicate counts it
+        assert "recomputed" in text
+        assert "uploaded by hand on 2026-09-18 (p.pdf)" in text

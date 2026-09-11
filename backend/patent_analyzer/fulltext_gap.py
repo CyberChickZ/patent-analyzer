@@ -199,3 +199,62 @@ def gap_summary(results: dict, rows: list[dict]) -> dict:
         "pending_reread": sum(1 for r in rows if (r.get("upload") or {}).get("reread") is False),
         "full_text": evaluated - sum(1 for r in rows if r["read_state"] != "full_text"),
     }
+
+
+# ── report section: which references were re-read from a supplied PDF ────────
+#
+# A row re-read after an upload carries different evidence from the one the
+# original run produced, and the determination above it may have been recomputed
+# because of it. The report has to say so: otherwise a §102 that only appeared
+# after a reviewer supplied one paper reads exactly like one the pipeline found
+# on its own.
+
+UPLOAD_TIER = "user_upload"
+
+
+def uploaded_rows(scoring_report: list[dict] | None) -> list[dict]:
+    return [r for r in (scoring_report or []) if r.get("fulltext_tier") == UPLOAD_TIER]
+
+
+def _covered_count(row: dict) -> tuple[int, int]:
+    cr = row.get("checklist_results") or {}
+    n = sum(1 for v in cr.values()
+            if isinstance(v, dict) and (v.get("score") or 0) >= 1 and v.get("verified_quotes"))
+    return n, len(cr)
+
+
+def uploaded_fulltext_html(scoring_report: list[dict] | None) -> str:
+    rows = uploaded_rows(scoring_report)
+    if not rows:
+        return ""
+    from html import escape as _e
+    out = ['<div class="sec"><div class="sec-t">Full Text Supplied by Hand</div>',
+           f'<div class="sec-note">{len(rows)} reference(s) below were not reachable during the run and '
+           'were re-read from a PDF a reviewer uploaded afterwards. The determination above was '
+           'recomputed over this evidence.</div>',
+           '<table class="tbl"><thead><tr><th>#</th><th>Reference</th><th>Identifier</th>'
+           '<th>Elements covered</th><th>Where the text came from</th></tr></thead><tbody>']
+    for i, r in enumerate(rows, 1):
+        n, total = _covered_count(r)
+        out.append(f'<tr><td>{i}</td><td>{_e((r.get("title") or "")[:90])}</td>'
+                   f'<td>{_e(r.get("pub_num") or r.get("doi") or "—")}</td>'
+                   f'<td>{n} of {total}</td><td>{_e(r.get("fulltext_detail") or "uploaded")}</td></tr>')
+    out.append("</tbody></table></div>")
+    return "\n".join(out)
+
+
+def uploaded_fulltext_md(scoring_report: list[dict] | None) -> list[str]:
+    rows = uploaded_rows(scoring_report)
+    if not rows:
+        return []
+    out = ["## Full Text Supplied by Hand", "",
+           f"{len(rows)} reference(s) below were not reachable during the run and were re-read from a "
+           "PDF a reviewer uploaded afterwards. The determination above was recomputed over this evidence.",
+           "", "| # | Reference | Identifier | Elements covered | Where the text came from |",
+           "|---|---|---|---|---|"]
+    for i, r in enumerate(rows, 1):
+        n, total = _covered_count(r)
+        out.append(f"| {i} | {(r.get('title') or '')[:90]} | {r.get('pub_num') or r.get('doi') or '-'} | "
+                   f"{n} of {total} | {r.get('fulltext_detail') or 'uploaded'} |")
+    out.append("")
+    return out

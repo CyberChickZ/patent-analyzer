@@ -1056,10 +1056,12 @@ def inject_html(report_html: str, extraction: dict | None, search_stats: dict | 
     adj_block = determination_html(adjudication) if adjudication and "Prior-Art Determination" not in report_html else ""
     # read_gap first: how much of the delivered prior art was actually read
     # qualifies every number under it.
+    from .fulltext_gap import uploaded_fulltext_html
     block = "\n".join(x for x in (read_gap_html(read_gap), extraction_html(extraction),
                                   channel_health_html(search_stats),
                                   evidence_coverage_html(scoring_report),
-                                  fulltext_tier_html(search_stats), loop_html(search_stats),
+                                  fulltext_tier_html(search_stats),
+                                  uploaded_fulltext_html(scoring_report), loop_html(search_stats),
                                   quote_matrix_html(scoring_report, checklist, adjudication=adjudication), adj_block,
                                   draft_html(draft, extraction), cost_html(cost)) if x)
     if not block:
@@ -1077,8 +1079,10 @@ def inject_md(report_md: str, extraction: dict | None, search_stats: dict | None
               adjudication: dict | None = None, draft: dict | None = None,
               cost: dict | None = None, read_gap: dict | None = None) -> str:
     adj_lines = determination_md(adjudication) if adjudication and "## Prior-Art Determination" not in report_md else []
+    from .fulltext_gap import uploaded_fulltext_md
     lines = (read_gap_md(read_gap) + extraction_md(extraction) + channel_health_md(search_stats)
              + evidence_coverage_md(scoring_report) + fulltext_tier_md(search_stats)
+             + uploaded_fulltext_md(scoring_report)
              + loop_md(search_stats)
              + quote_matrix_md(scoring_report, checklist, adjudication=adjudication) + adj_lines
              + draft_md(draft, extraction) + cost_md(cost))
