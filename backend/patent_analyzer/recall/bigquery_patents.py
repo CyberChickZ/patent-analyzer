@@ -409,10 +409,14 @@ async def fetch_by_pub_nums(pub_nums: list[str], with_claims: bool = True,
                 claims[r.publication_number] = r.claims_text or ""
         descs = {}
         if with_description:
+            # descriptions is 510 GiB over the same 4000 buckets, so a bucket
+            # costs 0.128 GiB against the 0.028 GiB a claims bucket costs
+            # (measured: 60 publications = 7.6 GiB). Sharing the claims budget
+            # is what made the first run of this fetch refuse every chunk.
             for r in guarded_query(client, f"""
                 SELECT publication_number, description FROM `{GC_PROJECT}.amie_patents.descriptions`
                 WHERE bucket IN UNNEST(@buckets) AND publication_number IN UNNEST(@pubs)""", params,
-                max_gib=2 + 0.03 * len(wanted)):
+                max_gib=2 + DESC_GIB_PER_PUB * len(wanted)):
                 descs[r.publication_number] = r.description or ""
         return meta, claims, descs
 
@@ -710,6 +714,12 @@ async def fetch_cited_papers(patent_pubs: list[str], max_gib: float = 5.0) -> di
 # "abstract + claims only" rather than leaving it blank
 # (report_sections._EV_LABEL, graph.eval_subgraph read_as).
 FULLTEXT_CHUNK = int(os.getenv("BQ_FULLTEXT_CHUNK", "300"))
+# The description pass is chunked separately and smaller. A bucket of
+# `descriptions` scans 0.128 GiB against 0.028 GiB for `claims` (measured:
+# 60 publications = 7.6 GiB), so 300 publications would be ~38 GiB -- over the
+# 30 GiB ceiling a single query is allowed. 150 is ~19 GiB.
+DESC_CHUNK = int(os.getenv("BQ_DESC_CHUNK", "150"))
+DESC_GIB_PER_PUB = float(os.getenv("BQ_DESC_GIB_PER_PUB", "0.15"))
 
 
 def _is_patent_doc(doc: dict) -> bool:
@@ -719,7 +729,8 @@ def _is_patent_doc(doc: dict) -> bool:
     return bool(re.match(r"^[A-Z]{2}[-\s]?\d", (doc.get("pub_num") or "").upper()))
 
 
-async def hydrate_full_text(docs: list[dict], chunk: int | None = None) -> dict:
+async def hydrate_full_text(docs: list[dict], chunk: int | None = None,
+                            desc_chunk: int | None = None) -> dict:
     """Fill `claims_text` (and any missing abstract) on patent docs from our own
     bucketed copy, so the deep read does not depend on a PDF download.
 
@@ -733,10 +744,12 @@ async def hydrate_full_text(docs: list[dict], chunk: int | None = None) -> dict:
     abstract, then nothing) is still valid.
     """
     chunk = chunk or FULLTEXT_CHUNK
-    stats = {"asked": 0, "chunks": 0, "hit": 0, "with_claims": 0, "with_description": 0, "errors": []}
+    desc_chunk = desc_chunk or DESC_CHUNK
+    stats = {"asked": 0, "chunks": 0, "desc_chunks": 0, "hit": 0,
+             "with_claims": 0, "with_description": 0, "errors": []}
     want = [d for d in docs if _is_patent_doc(d)
             and (d.get("pub_num") or "").strip()
-            and not ((d.get("claims_text") or "").strip() and (d.get("description") or "").strip())]
+            and not (d.get("claims_text") or "").strip()]
     if not want:
         return stats
     by_pub: dict[str, list[dict]] = {}
@@ -748,9 +761,9 @@ async def hydrate_full_text(docs: list[dict], chunk: int | None = None) -> dict:
         batch = pubs[i:i + chunk]
         stats["chunks"] += 1
         try:
-            got = await fetch_by_pub_nums(batch, with_claims=True, with_description=True)
+            got = await fetch_by_pub_nums(batch, with_claims=True)
         except Exception as exc:
-            stats["errors"].append(f"{type(exc).__name__}: {exc}"[:200])
+            stats["errors"].append(f"claims: {type(exc).__name__}: {exc}"[:200])
             continue
         for key, row in got.items():
             for d in by_pub.get(key, []):
@@ -759,12 +772,31 @@ async def hydrate_full_text(docs: list[dict], chunk: int | None = None) -> dict:
                 if claims:
                     d["claims_text"] = claims
                     stats["with_claims"] += 1
-                desc = (row.get("description") or "").strip()
-                if desc:
-                    d["description"] = desc
-                    stats["with_description"] += 1
                 if not (d.get("abstract") or "").strip() and row.get("abstract"):
                     d["abstract"] = row["abstract"]
                 if not (d.get("title") or "").strip() and row.get("title"):
                     d["title"] = row["title"]
+
+    # Second pass, smaller chunks and its own failure handling: the
+    # specification is an improvement on the claims, never a precondition for
+    # them, and the first run of this code lost every claim to a description
+    # query that would not fit the shared budget.
+    desc_want = [p for p, ds in by_pub.items()
+                 if any((d.get("claims_text") or "").strip() for d in ds)
+                 and not any((d.get("description") or "").strip() for d in ds)]
+    for i in range(0, len(desc_want), desc_chunk):
+        batch = desc_want[i:i + desc_chunk]
+        stats["desc_chunks"] += 1
+        try:
+            got = await fetch_by_pub_nums(batch, with_claims=False, with_description=True)
+        except Exception as exc:
+            stats["errors"].append(f"description: {type(exc).__name__}: {exc}"[:200])
+            continue
+        for key, row in got.items():
+            desc = (row.get("description") or "").strip()
+            if not desc:
+                continue
+            for d in by_pub.get(key, []):
+                d["description"] = desc
+                stats["with_description"] += 1
     return stats

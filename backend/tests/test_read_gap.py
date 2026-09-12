@@ -123,10 +123,12 @@ def test_hydrate_full_text_chunks_and_only_asks_for_what_is_missing(monkeypatch)
             + [{"pub_num": "10.1/abc", "match_type": "Paper", "title": "a paper"}])
     stats = asyncio.run(bq.hydrate_full_text(docs, chunk=300))
 
-    assert stats["asked"] == 700 and stats["chunks"] == 3
+    assert stats["asked"] == 700 and stats["chunks"] == 3 and stats["desc_chunks"] == 5
     assert stats["with_claims"] == 700 and stats["with_description"] == 700
-    assert [len(c) for c in calls] == [300, 300, 100]      # never near the 30 GiB single-query ceiling
-    assert all(len(c) <= 300 for c in calls)
+    # claims 300 at a time, the specification 150 at a time: a bucket of
+    # `descriptions` costs 4.5x a bucket of `claims`, and 300 of them would be
+    # ~38 GiB, over the ceiling a single query is allowed
+    assert [len(c) for c in calls] == [300, 300, 100, 150, 150, 150, 150, 100]
     assert docs[700]["claims_text"] == "already here"      # a doc that had claims is not re-fetched
     assert not docs[701].get("claims_text")                # papers are not patents
     assert docs[0]["abstract"] == "A" and docs[0]["title"] == "T"
@@ -184,3 +186,24 @@ def test_reissue_design_and_plant_numbers_are_spelled_back_correctly(monkeypatch
          ("US-RE41525-E", "US-D712191-S", "US-PP20104-P2", "US9075557B2", "US20120194631A1")]))
     assert [bq._bq_form(p) for p in asked["pubs"]] == [
         "US-RE41525-E", "US-D712191-S", "US-PP20104-P2", "US-9075557-B2", "US-2012194631-A1"]
+
+
+def test_a_refused_description_query_does_not_take_the_claims_with_it(monkeypatch):
+    """Job 5ba68132: the specification query shared the claims query's budget
+    (2 + 0.03/pub), needed 7.6 GiB against a 3.8 GiB cap, and the exception
+    aborted the whole chunk -- 0 of 60 documents got claims they did have, and
+    the deep read fell back to abstracts. The specification is an improvement on
+    the claims, never a precondition for them."""
+    async def fake_fetch(pubs, with_claims=True, with_description=False):
+        if with_description:
+            raise bq.BQBudgetExceeded("query would scan 7.6 GiB > cap 3.8 GiB")
+        return {bq._canon_pub(p): {"title": "T", "abstract": "A", "claims_text": f"claims of {p}"}
+                for p in pubs}
+
+    monkeypatch.setattr(bq, "fetch_by_pub_nums", fake_fetch)
+    docs = [{"pub_num": f"US{9000000 + i}B2", "match_type": "Patent"} for i in range(60)]
+    stats = asyncio.run(bq.hydrate_full_text(docs))
+
+    assert stats["with_claims"] == 60 and stats["with_description"] == 0
+    assert all(d["claims_text"] for d in docs)
+    assert stats["errors"] and stats["errors"][0].startswith("description:")
