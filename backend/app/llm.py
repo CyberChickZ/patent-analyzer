@@ -1872,19 +1872,27 @@ QUERIES LEFT: {budget_left}
 HISTORY (each step: what was asked, the total on Google, and the top titles that came back):
 {history}
 
-What the query is FOR. Measured on 8 papers (H.md §H1.5): of the 30 gold families a search
-reached, the citation expansion first reached 19, the paper-to-patent bridges 8, Lens 2 and
-Google's similar-document neighbours 1 — while 60 template keyword queries first reached NONE.
-A query almost never returns the examiner's reference itself; it returns documents whose
-citations, family and neighbours contain it. So judge a query by whether its top titles are
-**the right neighbourhood to expand from** — real patents in the invention's art, with assignees
-and citation trails — not by whether one of them looks like an exact hit.
+What the query is FOR. A query pays off two ways, and both matter:
+  (a) it can return the examiner's reference itself — one query of this kind reached two gold
+      families at once on US20120194631A1: `((remote controlled robot) OR (remote input) OR gaze)
+      (videoconferencing OR (telepresence system) OR …)`;
+  (b) far more often it returns documents whose citations, family and neighbours contain it, and
+      the expansion finds it from there (H.md §H1.5: of 30 gold families reached, citation
+      expansion first reached 19, the bridges 8, Lens 2, similar neighbours 1).
+So a query is good when its top titles are real patents in the invention's art — that serves both
+(a) and (b). Keep trying to hit the reference; do not settle for "the right neighbourhood".
+
+USE THE WORDS PATENTS ACTUALLY USE. Take the terms from the titles that came back and from the
+art's ordinary vocabulary — "remote controlled robot", "pan tilt", "gaze", "video conferencing".
+Do NOT invent compound phrases to describe the invention in your own words: "kinetic conferencing
+proxy", "responsive rotation", "stationary imaging" match nothing, because nobody drafting a
+patent wrote them. A term you have not seen in a real title is probably not a term.
 
 Decide the next query. Rules of thumb:
-- Aim for a field of 80,000-150,000 documents. Below ~50,000 the field is too small to contain
-  the reference you are looking for: drop a specific item or swap it for a broader form. Titles
-  all off-topic at a large total → the neighbourhood group is wrong, not too wide.
+- `total` is a diagnostic, NOT a target. Do not reshape a query to move the number — a phrase
+  invented to widen or narrow the count is a phrase that matches the wrong documents.
 - total < 200 → far too narrow: drop an item, or use a synonym / stemmed form; never repeat a query.
+- Titles all off-topic at a large total → the neighbourhood group is wrong, not too wide.
 - READ the returned titles: when they use patent vocabulary for what the paper calls something
   else (e.g. the paper says "kinetic proxy", patents say "teleconferencing robot",
   "swiveling monitor"), put those words in `learned_terms` and use them next.
