@@ -250,7 +250,18 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
                     t = " ".join(str(t).lower().split())
                     if t and t not in core_forms:
                         core_forms.append(t)
-            lens_queries = [{"element": "core", "terms": core_forms[:6], "cpc": g} for g in neigh_groups[:LENS_CALLS - 2]]
+            # One search with NO classification filter, first. Measured 2026-09-18 on
+            # US20120194631A1: the same terms and cutoff return the gold family 42111630
+            # (US20100208078A1, "Horizontal gaze estimation for video conferencing") in the
+            # unfiltered top 100, and return it under NEITHER of the predicted main groups —
+            # not the one h1i used (H04M3) nor the one the facet call predicts now (F16M11).
+            # A classification filter is a guess about where the examiner filed something, and
+            # Google Patents taught us the same lesson with `CPC=`: it is cheap to be wrong and
+            # expensive to be narrow. Lens is free during the trial, so one unfiltered call costs
+            # nothing but a slot.
+            lens_queries = [{"element": "core", "terms": core_forms[:6], "cpc": None}]
+            lens_queries += [{"element": "core", "terms": core_forms[:6], "cpc": g}
+                             for g in neigh_groups[:max(0, LENS_CALLS - 3)]]
             grp = pred[0] if pred else None
             for e in core_els[1:]:
                 if len(lens_queries) >= LENS_CALLS - 1:
