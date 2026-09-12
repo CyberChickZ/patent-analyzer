@@ -152,6 +152,10 @@ def gap_rows(results: dict, uploads: dict | None = None) -> list[dict]:
         # manifest in search_stats; it is keyed by title, which is the only key
         # both records share.
         m = by_title.get(str(r.get("title") or "").strip().lower()) or {}
+        # Being in the manual manifest *is* the abstract_only tier —
+        # fulltext.manifest_rows emits nothing else — so a job whose rows
+        # predate the per-row stamp still gets a real tier, not a blank.
+        tier = r.get("fulltext_tier") or ("abstract_only" if m else "")
         row = {
             "ref_id": rid,
             "pub_num": r.get("pub_num") or "",
@@ -164,16 +168,21 @@ def gap_rows(results: dict, uploads: dict | None = None) -> list[dict]:
             "doi": r.get("doi") or m.get("doi") or normalise_doi(r.get("pub_num") or ""),
             "landing_page": r.get("landing_page") or m.get("landing_page") or "",
             "fulltext_url": r.get("fulltext_url") or "",
-            "fulltext_tier": r.get("fulltext_tier") or "",
+            # Two separate facts, and conflating them is how a run looks better
+            # than it was. `fulltext_tier` is how far the *resolution* chain got
+            # — arxiv / oa / abstract_only, the three tiers there are (the
+            # EZproxy tier was considered and will not be built; fulltext.py
+            # carries the reason). `fulltext_download` is whether a PDF was
+            # actually fetched and read. Resolving an OA URL and holding the
+            # full text are not the same thing: on the N8 gold set, 17
+            # references resolved 6 OA URLs and produced 0 readable PDFs.
+            "fulltext_tier": tier,
+            "fulltext_download": str(r.get("fulltext_download") or ""),
             "read_state": state,
             "read_reason": why or m.get("reason") or "",
             "text_chars": int(r.get("text_chars") or 0),
             "similarity_score": float(r.get("similarity_score") or 0.0),
-            # Being in the manual manifest *is* the abstract_only tier —
-            # fulltext.manifest_rows emits nothing else — so a job whose rows
-            # predate the per-row stamp still gets a real trail, not "unknown".
-            "attempts": _attempts({**r,
-                                   "fulltext_tier": r.get("fulltext_tier") or ("abstract_only" if m else ""),
+            "attempts": _attempts({**r, "fulltext_tier": tier,
                                    "fulltext_detail": r.get("fulltext_detail") or m.get("reason") or ""}),
             "upload": up or None,
         }

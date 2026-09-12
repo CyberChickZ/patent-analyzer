@@ -87,6 +87,27 @@ def test_the_explicit_download_stamp_wins_over_the_inference():
     assert dl["outcome"] == "skipped" and "budget" in dl["detail"]
 
 
+def test_the_row_keeps_resolution_and_download_as_two_separate_fields():
+    """Resolving an open-access URL is not holding the full text, and a panel
+    that shows only the tier reads as though it were."""
+    rows = gap.gap_rows(_results([{
+        "pub_num": "10.1/a", "title": "A", "source": "abstract", "fulltext_tier": "oa",
+        "fulltext_url": "https://example.org/x.pdf", "fulltext_download": "failed",
+    }]))
+    assert rows[0]["fulltext_tier"] == "oa"          # the chain got as far as an OA link
+    assert rows[0]["fulltext_download"] == "failed"  # and no PDF came back from it
+    assert rows[0]["read_state"] == "abstract_only"
+
+
+def test_the_manual_manifest_fills_the_tier_on_a_job_that_predates_the_per_row_stamp():
+    row = gap.gap_rows(_results(
+        [{"pub_num": "10.1/a", "title": "A", "source": "abstract"}],
+        manifest=[{"title": "A", "reason": "no open-access copy",
+                   "landing_page": "https://example.org/a"}]))[0]
+    assert row["fulltext_tier"] == "abstract_only"
+    assert row["fulltext_download"] == ""
+
+
 def test_a_job_that_predates_the_tiers_says_unknown_rather_than_inventing_a_failure():
     rows = gap.gap_rows(_results([{"pub_num": "10.1/a", "title": "A", "source": "abstract"}]))
     outcomes = {a["tier"]: a["outcome"] for a in rows[0]["attempts"]}

@@ -475,6 +475,21 @@ app.post("/api/admin/set-developer", async (req, res) => {
   }
 });
 
+// What one job actually spent. The backend has served this since f85ef88, but
+// nothing proxied it, so every page that wanted a per-job figure had to print
+// an em dash next to an estimate. It is the measured number — the per-phase
+// meter diffed while the job ran — and it is the only one worth showing beside
+// a rate card, which is a list price and not a bill.
+app.get("/api/jobs/:jobId/usage", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(`/api/jobs/${encodeURIComponent(req.params.jobId)}/usage`, { firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) {
+    console.error("Error in GET /api/jobs/:id/usage:", e);
+    res.status(500).json({ error: "Proxy error" });
+  }
+});
+
 // Health
 // Rate card / quota — what every external source has left, plus the prices the
 // backend costs a run with. Live as of N1; the backend serves it at /api/quota.
