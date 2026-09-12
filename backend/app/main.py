@@ -52,6 +52,9 @@ app.include_router(hitl_router, prefix="/api")
 from app.fulltext_uploads import router as fulltext_router
 app.include_router(fulltext_router, prefix="/api")
 
+from app.diagnostics import router as diagnostics_router
+app.include_router(diagnostics_router)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
