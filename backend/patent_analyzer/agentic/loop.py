@@ -366,8 +366,13 @@ async def run_loop(state: dict, serpapi_left, serpapi_take, event, embed=None) -
     if LOOP_MODE == "moves":
         from .loop_moves import run_moves
         return await run_moves(state, serpapi_left, serpapi_take, event)
-    if LOOP_MODE == "wide":
-        return await run_wide(state, serpapi_left, serpapi_take, event)
+    if LOOP_MODE in ("wide", "wide_good"):
+        # wide_good: same recall as wide; the claims judge replaces the abstract prune at delivery
+        # (nodes/search.py). See agentic/wide_good.py for why the M1 recall strategy was dropped
+        # and this half of it kept.
+        cands, stats = await run_wide(state, serpapi_left, serpapi_take, event)
+        stats["mode"] = LOOP_MODE
+        return cands, stats
     elements = elements_from_state(state)[:MAX_ELEMENTS]
     if not elements:
         return [], {"rounds": [], "reason": "no elements"}

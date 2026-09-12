@@ -383,10 +383,27 @@ async def search_node(state: GraphState) -> dict:
         rank_of = {id(d): i + 1 for i, d in enumerate(ranked)}
         pruned_docs = ranked
 
+    # wide_good: the wide loop recalls, the claims judge delivers. No abstract prune and no
+    # semantic rerank — the abstract ordering is what put two examiner-cited families at rank 598
+    # and 1,841 on h1o, while reading their claims judged both True. See agentic/wide_good.py.
+    if loop_stats.get("mode") == "wide_good" and loop_stats.get("elements"):
+        try:
+            from patent_analyzer.agentic.wide_good import judge_and_deliver
+            _t0 = _time.monotonic()
+            ranked, wg_stats = await judge_and_deliver(loop_stats["elements"], pooled, summary=summary,
+                                                       event=_event)
+            wg_stats["seconds"] = round(_time.monotonic() - _t0, 1)
+            prune_stats = wg_stats
+            rank_of = {id(d): i + 1 for i, d in enumerate(ranked)}
+            pruned_docs = ranked
+        except Exception as exc:
+            _event("channel_crashed", f"wide_good: {type(exc).__name__}: {exc}")
+            prune_stats = {"mode": "wide_good", "error": f"{type(exc).__name__}: {exc}"[:200]}
+
     # Semantic rerank. Everything the prune kept is deep-read and reported (leader, 2026-09-18:
     # h1h lost 8 of the 16 gold families that survived the screen to the old top-30 cut); the
     # embedding order is only a tie-break among documents the claims screen already ranked.
-    if loop_stats.get("mode") != "moves":
+    if loop_stats.get("mode") not in ("moves", "wide_good"):
         from patent_analyzer.semantic_search import rerank_docs
         rank_limit = int(os.environ.get("RERANK_LIMIT", "60")) if pruned_docs else 30
         ranked = rerank_docs(summary, pruned_docs or all_docs, limit=rank_limit)
@@ -659,9 +676,9 @@ async def search_node(state: GraphState) -> dict:
             "move_rows": loop_stats.get("move_rows", []),
             "good": loop_stats.get("good", []),
             "coverage": loop_stats.get("coverage", {}),
-            "uncovered": loop_stats.get("uncovered", []),
-            "n_strong": loop_stats.get("n_strong", 0),
-            "read": loop_stats.get("read", []),
+            "uncovered": loop_stats.get("uncovered") or prune_stats.get("uncovered") or [],
+            "n_strong": loop_stats.get("n_strong") or prune_stats.get("n_strong") or 0,
+            "read": loop_stats.get("read", []) or (prune_stats.get("read_pubs") or []),
             "stop": loop_stats.get("stop"),
             "loop_elements": loop_stats.get("elements", []),
             "loop_mode": loop_stats.get("mode", "elements"),
