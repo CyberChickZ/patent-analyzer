@@ -1,7 +1,17 @@
 """Eval Subgraph: Phase 4 deep evaluation with Send API (Map-Reduce).
 
 Fan-out: one eval_single_doc node per candidate document.
-Reduce: merge all results, compute scores, generate summary.
+Reduce: merge all results, compute scores, run the rule determination.
+
+`OBV_FINDINGS=1` adds the MPEP findings gate to the determination: one model
+call, made only when the rule has already reached a §103, for the findings that
+element coverage cannot supply (motivation 2143.01, reasonable expectation
+2143.02 I, analogous art 2141.01(a) I, and for a combination 2143 I.A (2)/(3)).
+Every finding quotes a reference and every quote is located in that reference's
+text; the rule then decides the label. Default off, and the measurement is why:
+on PANORAMA's 200 it costs .021 macro-F1 and .06 of the §103 F1, which is just
+outside the .02 the gate had to come in under. What it buys is a §103 that can
+say which rationale it rests on and where the words are. See H.md §H2c.
 """
 
 import asyncio
