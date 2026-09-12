@@ -1,0 +1,22 @@
+# What `gcloud run deploy --source .` uploads to the Cloud Build staging
+# bucket. Without this file gcloud falls back to .gitignore, which here covers
+# only .env.yaml and __pycache__ — so every deploy was shipping ~3 GB of
+# eval_data/ and test_pdfs/ to GCS before Docker's own .dockerignore threw
+# them away again. .env.yaml is repeated here on purpose: it is the one file
+# that must never reach a bucket, and the fallback that used to exclude it
+# stops applying the moment this file exists.
+.git/
+.gitignore
+.DS_Store
+.env
+.env.yaml
+.keys/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+local.log
+eval_data/
+test_pdfs/
+evals/fixtures/
+outputs/
