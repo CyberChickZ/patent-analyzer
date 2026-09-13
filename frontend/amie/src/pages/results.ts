@@ -1,11 +1,12 @@
 import {
   getResults, getStatus, reportUrl, getFulltextGaps, uploadFulltext, dropFulltextUpload,
-  rerunEvidence, type JobEvent, type FulltextGaps, type FulltextGapRow,
+  rerunEvidence, getLedger, type JobEvent, type FulltextGaps, type FulltextGapRow,
+  type Ledger,
 } from "../api";
 import { esc, clip, pill, num, empty, errorBox, openModal, md, on, plainTitle } from "../ui";
 import { queriesTable } from "../hitl";
 import { dedupeEvents, isLegacyEvent } from "../phases";
-import { loadQuota, jobCostRange, perM, quotaNote, EMDASH, type Quota } from "../pricing";
+import { loadQuota, perM, quotaNote, upcomingBlock, fmtUSD, EMDASH, type Quota } from "../pricing";
 import { rememberJob } from "../main";
 
 let R: any = null;            // results.json
@@ -16,6 +17,12 @@ let showAllDocs = false;
 let opened = new Set<string>();
 let QUOTA: Quota | null = null;
 let GAPS: FulltextGaps | null = null;
+/** What this job actually spent, from GET /api/jobs/{id}/usage — the per-phase
+ *  meter diffed while it ran, not a range worked out from a rate card. Null
+ *  when the endpoint has nothing for this job, and the page says so rather
+ *  than falling back to an estimate. */
+let LEDGER: Ledger | null = null;
+let LEDGER_WHY = "";
 let showAllGaps = false;
 let spy: IntersectionObserver | null = null;
 
@@ -42,6 +49,7 @@ function isCovered(doc: any, criterion: string): boolean {
 
 export function disposeResults(): void {
   R = null; EVENTS = []; showAllDocs = false; QUOTA = null; GAPS = null; showAllGaps = false;
+  LEDGER = null; LEDGER_WHY = "";
   opened = new Set<string>();
   spy?.disconnect(); spy = null;
 }
@@ -74,16 +82,18 @@ export async function renderResults(host: HTMLElement, jobId: string): Promise<v
     <div class="lede"><span class="spinner"></span> Loading results.json — a full run's is tens of MB, so this can take a moment.</div></div>`;
 
   try {
-    const [res, st, q, gaps] = await Promise.all([
+    const [res, st, q, gaps, ledger] = await Promise.all([
       getResults(jobId),
       getStatus(jobId).catch(() => null),
       loadQuota(),
       // A job from before this endpoint existed, or a backend that is older
       // than the page, just means the section is not drawn.
       getFulltextGaps(jobId).catch(() => null),
+      getLedger(jobId).catch((e: any) => { LEDGER_WHY = String(e?.message || e); return null; }),
     ]);
     QUOTA = q;
     GAPS = gaps;
+    LEDGER = ledger?.ledger || null;
     R = res;
     // the record carries the backend's duplicates too; the call counts below
     // would otherwise be inflated by them
@@ -222,13 +232,16 @@ function wireSecNav(host: HTMLElement): void {
  *  frontend would have had to be found and fixed separately, and the next time
  *  it changes it would drift again. One author, one string.
  *
- *  `label_text` is not on any endpoint yet: results.json's `adjudication` (see
- *  graph/eval_subgraph.py, which stores what `adjudicate()` returns) carries
- *  label / basis / risk / reason but not the rendered label, which today only
- *  report_sections and report_generator call. Until the backend adds one line
- *  putting `determination_label(adj)` on the dict, this renders nothing extra
- *  and the reader gets `adj.reason`, which is the same author's full sentence
- *  and already carries the corrected wording. */
+ *  `label_text` now travels on the adjudication (c7955ce puts
+ *  `determination_label(adj)` on the dict in graph/eval_subgraph.py), so it is
+ *  printed verbatim. A §103 whose motivation comes from background knowledge
+ *  rather than from a reference carries its own clause inside that sentence —
+ *  "rationale asserted from ordinary skill, not evidenced in the references",
+ *  obviousness.UNEVIDENCED_NOTE — and it stays where the backend put it. What
+ *  this page adds is the rule trace underneath, so the reader can see *which*
+ *  requirement was met without a quote instead of only being told that one
+ *  was. On a job old enough to have no `label_text` the reader still gets
+ *  `adj.reason`, the same author's full sentence. */
 function determinationSection(adj: any, sr: any[]): string {
   if (!adj || !adj.label) {
     return `<section class="section" id="sec-verdict"><header><h2>Determination</h2></header>
@@ -248,19 +261,66 @@ function determinationSection(adj: any, sr: any[]): string {
       </div>
       ${adj.label_text ? `<div class="verdict-headline">${esc(adj.label_text)}</div>` : ""}
       <div class="prose">${esc(adj.reason || "")}</div>
+      ${unevidencedBlock(adj)}
       ${adj.obviousness_explanation ? `<details class="box" open>
         <summary>Obviousness explanation <span class="pill pill-tag">model narrative, not the rule's output</span></summary>
         <div class="box-body prose">${md(adj.obviousness_explanation)}</div></details>` : ""}
       ${docs.length ? `<div class="tbl-wrap"><div class="tw"><table class="tbl">
         <thead><tr><th>Charted reference</th><th style="min-width:14rem">Title</th><th class="right">Elements covered</th><th class="right">Coverage</th></tr></thead>
-        <tbody>${docs.map((d: any) => `<tr><td class="mono tiny">${esc(d.pub_num || "—")}</td>
+        <tbody>${docs.map((d: any) => `<tr><td class="mono tiny">${esc(d.pub_num || "—")}${
+          d.abstract_only ? ` <span class="pill pill-paused pill-flat">abstract only</span>` : ""}</td>
           <td>${esc(clip(d.title, 130))}</td><td class="right num">${d.n_covered ?? "—"}/${chart.n_elements ?? "—"}</td>
           <td class="right num">${d.coverage != null ? Math.round(d.coverage * 100) + "%" : "—"}</td></tr>`).join("")}</tbody>
-      </table></div></div>` : ""}
+      </table></div></div>${abstractOnlyCaveat(docs)}` : ""}
       ${(chart.uncovered || []).length ? `<div class="small"><b>Uncovered by every charted reference:</b> <span class="muted">${esc((chart.uncovered || []).join(" · "))}</span></div>` : ""}
       <div class="small muted">${sr.length} document${sr.length === 1 ? "" : "s"} evaluated in full.</div>
     </div></div>
   </section>`;
+}
+
+/** The clause the backend put inside `label_text`, opened out.
+ *
+ *  A §103 can rest on a motivation that comes from what a person of ordinary
+ *  skill knows rather than from anything a reference says, and the rule counts
+ *  that as met — MPEP 2143 does not require a quote for background knowledge.
+ *  The sentence above already says so, in the backend's words. This says which
+ *  requirement it was, because "asserted, not evidenced" is not actionable
+ *  until you can see what was asserted. Nothing here re-words the verdict.
+ *  `evidenced` defaults to true, so an old trace that predates the flag reads
+ *  as evidenced rather than as a silent warning. */
+function unevidencedBlock(adj: any): string {
+  const bad: any[] = (adj.rule_trace || []).filter(
+    (t: any) => t.status === "met" && t.evidenced === false);
+  if (!bad.length) return "";
+  return `<details class="box" data-keep="unevidenced"${isOpen("unevidenced", false) ? " open" : ""}>
+    <summary>${bad.length} requirement${bad.length === 1 ? "" : "s"} met without a citation
+      <span class="pill pill-paused pill-flat">asserted from ordinary skill</span></summary>
+    <div class="box-body">
+      <div class="small muted">Met on background knowledge, not on anything quoted from the references.
+        That is allowed — MPEP 2143 does not require a quote for what a person of ordinary skill
+        already knows — but it is the part of this determination with nothing behind it to check.</div>
+      <div class="tw" style="margin-top:.4rem"><table class="tbl">
+        <thead><tr><th>MPEP</th><th>Requirement</th><th>What the rule found</th></tr></thead>
+        <tbody>${bad.map((t) => `<tr><td class="mono tiny nowrap">${esc(t.mpep || "—")}</td>
+          <td>${esc(t.requirement || t.id || "")}</td>
+          <td class="small">${esc(t.finding || "")}</td></tr>`).join("")}</tbody>
+      </table></div>
+    </div></details>`;
+}
+
+/** A blank cell under an abstract-only column does not mean the document fails
+ *  to disclose the element. It means the abstract did not mention it — and an
+ *  abstract states what a paper is about, not everything it teaches. Without
+ *  this line the chart reads as evidence of absence, which it is not, and
+ *  which is why adjudicate.py refuses to let an abstract carry a §102 at all. */
+function abstractOnlyCaveat(docs: any[]): string {
+  const n = docs.filter((d: any) => d.abstract_only).length;
+  if (!n) return "";
+  return `<div class="notice notice-warn" style="margin-top:.5rem">
+    ${n} of these ${docs.length} column${docs.length === 1 ? "" : "s"} ${n === 1 ? "was" : "were"} read
+    <b>as an abstract only</b>. A blank under such a column means the abstract did not mention that
+    element — not that the document does not disclose it. Supply the full text below and re-run the
+    evidence step before treating one of those blanks as a gap in the art.</div>`;
 }
 
 // ─── Candidates — one block each, checklist + verbatim quotes ───
@@ -397,6 +457,60 @@ function readPill(row: FulltextGapRow): string {
   return `<span class="pill pill-failed">nothing read</span>`;
 }
 
+// ── Resolved ≠ fetched ───────────────────────────────────────────────────────
+//
+// Two columns, because they are two facts and the run looks much better when
+// they are printed as one. `fulltext_tier` is how far the resolution chain got;
+// `fulltext_download` is whether a PDF came back. On the N8 gold set 17
+// references resolved 6 open-access URLs and produced 0 readable PDFs — one
+// column would have shown six successes.
+//
+// The tier list is closed: arXiv, open access, abstract only, plus the
+// reviewer's own upload. There is no paywalled/EZproxy tier and there will not
+// be one; fulltext.py carries the policy and the reason.
+
+const TIER_PILL: Record<string, [string, string]> = {
+  arxiv: ["pill-completed", "arXiv"],
+  oa: ["pill-completed", "open access"],
+  abstract_only: ["pill-failed", "no OA copy"],
+  user_upload: ["pill-completed", "your upload"],
+};
+
+/** Did a PDF actually arrive? `ok`/`cached` yes; everything else is a reason it
+ *  did not, and "not_needed" is the one that is not a loss — the claims text
+ *  was already in hand. */
+const DOWNLOAD_PILL: Record<string, [string, string]> = {
+  ok: ["pill-completed", "PDF fetched"],
+  cached: ["pill-completed", "PDF from cache"],
+  failed: ["pill-failed", "fetch failed"],
+  no_url: ["pill-queued", "no URL to fetch"],
+  skipped_budget: ["pill-paused", "budget ran out"],
+  not_needed: ["pill-tag", "not needed"],
+};
+
+function tierCell(row: FulltextGapRow): string {
+  const t = TIER_PILL[row.fulltext_tier];
+  if (!t) {
+    return `<span class="tiny muted">not recorded</span>
+      <div class="tiny muted">this job ran before the tiers were stamped per reference</div>`;
+  }
+  return `<span class="pill pill-flat ${t[0]}">${esc(t[1])}</span>`;
+}
+
+function downloadCell(row: FulltextGapRow): string {
+  const d = DOWNLOAD_PILL[row.fulltext_download];
+  if (!d) {
+    // No stamp: the trail still knows, because _attempts infers it from the URL
+    // and the source. Read it back rather than printing a second "unknown".
+    const a = row.attempts.find((x) => x.tier === "pdf_download");
+    if (!a || a.outcome === "unknown") return `<span class="tiny muted">not recorded</span>`;
+    const cls = a.outcome === "ok" ? "pill-completed" : a.outcome === "failed" ? "pill-failed" : "pill-queued";
+    return `<span class="pill pill-flat ${cls}">${esc(a.outcome === "ok" ? "PDF fetched" : a.outcome)}</span>
+      <div class="tiny muted">${esc(clip(a.detail, 60))} <i>(inferred)</i></div>`;
+  }
+  return `<span class="pill pill-flat ${d[0]}">${esc(d[1])}</span>`;
+}
+
 /** Tiers the run has no record for. "Unknown" is a property of the job, not of
  *  the reference — repeating the same sentence down twenty rows says nothing
  *  about any of them — so those entries leave the table and the tiers are named
@@ -465,6 +579,12 @@ function fulltextSection(): string {
   const hidden = unknownTiers(g.rows);
   const rows = showAllGaps ? g.rows : g.rows.slice(0, MAX_GAP_ROWS);
   const hiddenNote = [...hidden].map((t) => TIER_LABEL[t] || t).join(", ");
+  // The two counts the whole section exists to keep apart: how many references
+  // the chain found a full-text link for, and how many of those actually
+  // arrived as a readable PDF. The gap between them is the thing to see.
+  const resolved = g.rows.filter((r) => r.fulltext_tier === "arxiv" || r.fulltext_tier === "oa").length;
+  const fetched = g.rows.filter((r) => (r.fulltext_tier === "arxiv" || r.fulltext_tier === "oa")
+    && (r.fulltext_download === "ok" || r.fulltext_download === "cached")).length;
   return `<section class="section" id="sec-fulltext">
     <header><h2>Full text we could not reach</h2>
       <span class="hint">an abstract cannot establish that an element is or is not disclosed</span></header>
@@ -474,15 +594,23 @@ function fulltextSection(): string {
         <div><div class="k">Read in full</div><div class="v">${num(s.full_text)}</div></div>
         <div><div class="k">Abstract only</div><div class="v">${num(s.abstract_only)}</div></div>
         <div><div class="k">Nothing read</div><div class="v">${num(s.nothing)}</div></div>
+        <div><div class="k">Links resolved</div><div class="v">${num(resolved)}<small> of ${num(g.rows.length)} listed</small></div></div>
+        <div><div class="k">PDFs obtained</div><div class="v" style="${resolved && !fetched ? "color:var(--danger)" : ""}">${num(fetched)}<small> of those ${num(resolved)}</small></div></div>
         <div><div class="k">Uploaded</div><div class="v">${num(s.uploaded)}<small>${s.pending_reread ? ` ${s.pending_reread} pending` : ""}</small></div></div>
       </div>
       <div class="notice notice-warn">${esc(g.policy_note)}
         <a href="${esc(g.policy_url)}" target="_blank" rel="noopener">The policy ↗</a></div>
-      ${hiddenNote ? `<div class="small muted">No per-reference record of ${esc(hiddenNote)} on this job —
-        it ran before that was written down, so those tiers are left out of the trails below
+      ${hiddenNote ? `<div class="small muted">Some references on this job carry no record of ${esc(hiddenNote)} —
+        they ran before that was written down, so those tiers are left out of their trails below
         rather than shown as failures.</div>` : ""}
+      <div class="small muted">Two separate columns below, on purpose. <b>Link resolved</b> is how far the
+        open-access chain got — arXiv, an OA copy, or no OA copy at all; those three are the whole list,
+        and there is no paywalled tier because there will not be one. <b>PDF obtained</b> is whether the
+        file was actually fetched and read. A resolved link is not a read paper: on the reference set this
+        was measured against, 6 open-access URLs produced 0 readable PDFs.</div>
       <div class="tw"><table class="tbl stacked">
-        <thead><tr><th>Reference</th><th>What was read</th><th>What was tried</th><th class="nowrap">Your copy</th></tr></thead>
+        <thead><tr><th>Reference</th><th>What was read</th><th class="nowrap">Link resolved</th>
+          <th class="nowrap">PDF obtained</th><th>What was tried</th><th class="nowrap">Your copy</th></tr></thead>
         <tbody>${rows.map((row) => `<tr>
           <td data-l="Reference">
             <div>${esc(clip(row.title || row.ref_id, 110))}</div>
@@ -492,6 +620,8 @@ function fulltextSection(): string {
           <td class="nowrap" data-l="What was read">${readPill(row)}
             <div class="tiny muted">${esc(clip(row.read_reason, 70))}</div>
             <div class="tiny muted">score ${row.similarity_score.toFixed(2)}</div></td>
+          <td class="nowrap" data-l="Link resolved">${tierCell(row)}</td>
+          <td class="nowrap" data-l="PDF obtained">${downloadCell(row)}</td>
           <td data-l="What was tried">${trail(row, hidden)}</td>
           <td data-l="Your copy">${uploadCell(row, busy)}</td></tr>`).join("")}</tbody>
       </table></div>
@@ -575,6 +705,19 @@ function wireFulltext(host: HTMLElement, jobId: string): void {
 
 const MAX_DOCS = 8;
 
+/** Was this reference read as an abstract? Same test as the backend's
+ *  `adjudicate.abstract_only` — the adjudication's own answer where there is
+ *  one, otherwise the row's `source` / `fulltext_tier`. It decides whether a
+ *  blank in this grid is "not disclosed" or "not mentioned in the abstract",
+ *  which are very different claims to be making on a reader's behalf. */
+function isAbstractOnly(doc: any): boolean {
+  const key = String(doc.pub_num || doc.title || "");
+  const per = ((R.adjudication || {}).per_doc_coverage || [])
+    .find((d: any) => String(d.pub_num || d.title || "") === key);
+  if (per && typeof per.abstract_only === "boolean") return per.abstract_only;
+  return String(doc.source || "").startsWith("abstract") || doc.fulltext_tier === "abstract_only";
+}
+
 function matrixSection(cands: any[], checklist: any[], sr: any[]): string {
   if (!sr.length || !checklist.length) {
     return `<section class="section" id="sec-evidence"><header><h2>Evidence matrix</h2></header>
@@ -609,7 +752,9 @@ function matrixSection(cands: any[], checklist: any[], sr: any[]): string {
           (() => { const hit = scored.filter((x) => x.hits > 0).length; return hit ? ` · ${hit} cover at least one element` : ""; })()}</div></summary>
       <div class="cand-body"><div class="tbl-wrap"><div class="tw"><table class="tbl matrix fixed">
         <thead><tr><th class="el-col" style="width:44%">Element</th>
-          ${docs.map((d: any, i: number) => `<th class="doc-col" title="${esc(d.pub_num || "")} — ${esc(d.title || "")}">D${i + 1}</th>`).join("")}</tr></thead>
+          ${docs.map((d: any, i: number) => `<th class="doc-col" title="${esc(d.pub_num || "")} — ${esc(d.title || "")}${
+            isAbstractOnly(d) ? " (read as an abstract only)" : ""}">D${i + 1}${
+            isAbstractOnly(d) ? `<div class="tiny" style="font-weight:400;color:var(--warn)">abs</div>` : ""}</th>`).join("")}</tr></thead>
         <tbody>${g.rows.map((c: any) => `<tr>
           <td class="el-col"><div class="mono tiny muted">${esc(c.id)}</div>${esc(clip(c.criterion, 220))}</td>
           ${docs.map((d: any) => {
@@ -620,10 +765,14 @@ function matrixSection(cands: any[], checklist: any[], sr: any[]): string {
             return `<td class="cell-score ${cls}" ${cr ? `data-cell="${key}" title="score ${sc} — click for the quote and the analysis"` : ""}>${sc || "·"}</td>`;
           }).join("")}</tr>`).join("")}</tbody>
       </table></div></div>
+      ${docs.some(isAbstractOnly) ? `<div class="notice notice-warn" style="margin-top:.4rem">
+        Columns marked <b>abs</b> were read as an abstract only. A blank in one of those columns means the
+        abstract did not mention that element, not that the document does not disclose it.</div>` : ""}
       <div class="tw" style="margin-top:.4rem"><table class="tbl doc-key">
         <tbody>${docs.map((d: any, i: number) => `<tr><td>D${i + 1}</td>
           <td class="mono tiny">${esc(d.pub_num || "—")}</td>
-          <td>${esc(clip(d.title, 150))}</td>
+          <td>${esc(clip(d.title, 150))}${isAbstractOnly(d)
+            ? ` <span class="pill pill-paused pill-flat">abstract only</span>` : ""}</td>
           <td class="right num">${d.similarity_score ?? ""}</td></tr>`).join("")}</tbody></table></div>
       </div>
     </details>`;
@@ -687,8 +836,82 @@ function editsSection(edits: any[]): string {
 
 // ─── Cost and call counts ───
 
-const emptyQuota = (): Quota => ({ available: false, rates: [], other: [], sources: [], jobCost: null });
+const emptyQuota = (): Quota => ({ available: false, rates: [], other: [], sources: [], upcoming: [], jobCost: null });
 
+
+/** The measured figure, not a band off the rate card.
+ *
+ *  This tile used to print `jobCostRange(QUOTA)`, which was always an em dash:
+ *  GET /api/quota does not answer a per-job question, and the endpoint that
+ *  does — GET /api/jobs/{id}/usage, backend f85ef88 — had no route through the
+ *  Express proxy, so nothing could reach it. The route exists now. What comes
+ *  back is `metering.ledger()` over the per-phase meter the run kept, so it is
+ *  what was spent rather than what a list price suggests it might have been.
+ *  When the endpoint has nothing for this job the tile says which, and why, and
+ *  does not substitute an estimate. */
+/** An evidence re-run rewrites the job record's per-phase metrics, so on a job
+ *  that has had one the ledger holds the re-run's phases and nothing else.
+ *  Printing that total as "what this job cost" would understate a full run by
+ *  two orders of magnitude (96eada38 reads $0.01 against 1ba48316's $1.50 for
+ *  the same shape of run), so the page says which phases it is adding up. */
+function partialLedger(): boolean {
+  return !!LEDGER && !LEDGER.rows.some((r) => r.phase === "idca");
+}
+
+function measuredCost(): string {
+  const t = LEDGER?.totals;
+  if (typeof t?.cost_usd === "number") {
+    const phases = new Set(LEDGER!.rows.map((r) => r.phase)).size;
+    return partialLedger()
+      ? `${fmtUSD(t.cost_usd)}<small> recorded · ${phases} phase${phases === 1 ? "" : "s"} only</small>`
+      : `${fmtUSD(t.cost_usd)}<small> measured · ${num(t.llm_calls, "0")} LLM calls</small>`;
+  }
+  const why = /^404/.test(LEDGER_WHY)
+    ? "no usage recorded for this job"
+    : LEDGER_WHY ? "the usage endpoint did not answer" : "not read";
+  return `${EMDASH}<small> ${esc(why)}</small>`;
+}
+
+/** Where the money went, per phase, with the calls that failed or degraded —
+ *  the three questions no counter reconstructs after the fact. */
+function ledgerBlock(): string {
+  const L = LEDGER;
+  if (!L) {
+    return `<div class="small muted">Per-job spend comes from <code>GET /api/jobs/{id}/usage</code>;
+      ${esc(LEDGER_WHY ? `it answered ${clip(LEDGER_WHY, 120)}` : "it was not read")}, so no dollar figure is shown for this run.</div>`;
+  }
+  const me = L.most_expensive;
+  return `<details class="box" data-keep="ledger"${isOpen("ledger", false) ? " open" : ""}>
+    <summary>Where it went — ${L.rows.length} ledger row${L.rows.length === 1 ? "" : "s"}${
+      me ? ` · ${esc(me.phase)} is ${Math.round(me.share_of_total * 100)}% of it` : ""}</summary>
+    <div class="box-body">
+      ${partialLedger() ? `<div class="notice notice-warn" style="margin-bottom:.5rem">
+        The job record holds ${esc([...new Set(L.rows.map((r) => r.phase))].join(", "))} and no earlier phase.
+        An evidence re-run replaces the per-phase metrics, so the search and evaluation this report rests on
+        are not in the total above — it is what the record still has, not what the run cost.</div>` : ""}
+      <div class="tw"><table class="tbl">
+        <thead><tr><th>Phase</th><th>What</th><th class="right">Calls</th><th class="right">Tokens in / out</th>
+          <th class="right">Seconds</th><th class="right">Cost</th></tr></thead>
+        <tbody>${L.rows.map((r) => `<tr>
+          <td>${esc(r.phase)}</td>
+          <td class="mono tiny">${esc(r.name)}<div class="muted">${esc(r.kind)}</div></td>
+          <td class="right num">${num(r.calls, "0")}</td>
+          <td class="right num tiny">${num(r.input_tokens, "—")} / ${num(r.output_tokens, "—")}</td>
+          <td class="right num">${r.seconds.toFixed(1)}</td>
+          <td class="right num">${fmtUSD(r.cost_usd)}</td></tr>`).join("")}</tbody>
+        <tfoot><tr><td colspan="4"><b>Total</b></td>
+          <td class="right num"><b>${L.totals.seconds.toFixed(1)}</b></td>
+          <td class="right num"><b>${fmtUSD(L.totals.cost_usd)}</b></td></tr></tfoot>
+      </table></div>
+      ${L.incidents.length ? `<div class="subhead">Calls that retried, failed or degraded (${L.incidents.length})</div>
+        <div class="tw"><table class="tbl"><tbody>${L.incidents.map((i) => `<tr>
+          <td class="tiny">${esc(i.phase)}</td><td class="mono tiny">${esc(i.source)}</td>
+          <td><span class="pill pill-flat ${i.kind === "failed" ? "pill-failed" : "pill-paused"}">${esc(i.kind)}</span></td>
+          <td class="tiny muted">${esc(clip(i.detail, 160))}</td></tr>`).join("")}</tbody></table></div>`
+        : `<div class="small muted">No call retried, failed or degraded.</div>`}
+      ${L.caveats.map((c) => `<div class="tiny muted" style="margin-top:.35rem">${esc(c)}</div>`).join("")}
+    </div></details>`;
+}
 
 function costSection(sr: any[]): string {
   const s = (R.search || {}).summary || {};
@@ -713,14 +936,15 @@ function costSection(sr: any[]): string {
 
   return `<section class="section" id="sec-cost">
     <header><h2>Cost and call counts</h2>
-      <span class="hint">counts are real and come from this job's own record; anything in dollars comes from <code>GET /api/quota</code> or is left blank</span></header>
+      <span class="hint">counts are real and come from this job's own record; the dollar figure is measured, from <code>GET /api/jobs/{id}/usage</code>, and the rate card below from <code>GET /api/quota</code></span></header>
     <div class="stack">
       <div class="budget">
-        <div><div class="k">Estimated for this job</div><div class="v">${jobCostRange(QUOTA)}</div></div>
+        <div><div class="k">This job cost</div><div class="v">${measuredCost()}</div></div>
         <div><div class="k">Documents evaluated</div><div class="v">${num((R.eval_stats || {}).evaluated ?? sr.length)}</div></div>
         <div><div class="k">Quotes verified</div><div class="v">${num(((R.eval_stats || {}).quote_stats || {}).verified)}<small> of ${num(((R.eval_stats || {}).quote_stats || {}).quotes)}</small></div></div>
         <div><div class="k">BigQuery</div><div class="v">${esc(QUOTA?.other.find((o) => /bigquery/i.test(o.item))?.price || EMDASH)}<small> ${QUOTA?.available ? "from /api/quota" : "no rate card"}</small></div></div>
       </div>
+      ${ledgerBlock()}
       <div class="tbl-wrap"><div class="tw"><table class="tbl">
         <thead><tr><th>What was called</th><th class="right">Count</th><th>Note</th></tr></thead>
         <tbody>${rows.map(([k, v, n]) => `<tr><td>${esc(k)}</td><td class="right num">${v}</td><td class="small muted">${esc(n)}</td></tr>`).join("")}</tbody>
@@ -733,6 +957,7 @@ function costSection(sr: any[]): string {
             : `<tr><td class="mono muted">${EMDASH}</td><td class="right num muted">${EMDASH}</td><td class="right num muted">${EMDASH}</td></tr>`}</tbody>
         </table></div>
         <div class="small muted">${esc(quotaNote(QUOTA || emptyQuota()))}</div>
+        ${upcomingBlock(QUOTA)}
         ${Object.keys(pv).length ? `<div class="subhead">Prompt versions used</div><div class="tw"><table class="tbl">
           <thead><tr><th>Prompt</th><th class="right">Version</th></tr></thead>
           <tbody>${Object.entries(pv).map(([k, v]) => `<tr><td class="mono tiny">${esc(k)}</td><td class="right num">${esc(v)}</td></tr>`).join("")}</tbody>
