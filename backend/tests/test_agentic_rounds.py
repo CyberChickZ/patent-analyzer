@@ -173,3 +173,41 @@ def test_select_for_reading_ranks_inside_the_must_read_set_too(monkeypatch):
     assert "GOLD" in got                              # and the best of 801 Lens hits beats the rest
     assert info["in"] == 806 and info["read"] == 20
     assert info["tiers"] == [5, 801, 0] and info["read_per_tier"] == [5, 15, 0]
+
+
+def test_no_single_source_decides_the_read_and_plain_query_hits_keep_a_share(monkeypatch):
+    """wg3's real shape: 6,565 candidates in the must-read tier for ~812 places,
+    5,318 of them from the citation graph alone, and the third tier — plain
+    query hits past a query's top ten — got ZERO. Two of the three gold
+    families in that pool were never read: one came through lens_search (444
+    candidates), one was a plain query hit with no must-read source at all."""
+    def fake_embed(elements, rows, topk=1, cap=1, **kw):
+        for i, r in enumerate(rows):
+            r["prune_cos"] = 1.0 - i / len(rows)
+        return list(range(len(rows))), {}
+    import patent_analyzer.agentic.prune as P
+    monkeypatch.setattr(P, "stage1_embed", fake_embed)
+
+    cands = []
+
+    def add(n, sources, tag):
+        for i in range(n):
+            cands.append(Candidate(pub_num=f"{tag}{i}", title=f"{tag} {i}", match_type="Patent",
+                                   sources=sources))
+    add(5318, ["agentic_loop", "citation_graph"], "CIT")
+    add(444, ["agentic_loop", "lens_search"], "LENSS")
+    add(396, ["agentic_loop", "lens_bridge"], "LENSB")
+    add(407, ["agentic_loop", "google_similar"], "SIM")
+    add(2900, ["agentic_loop"], "Q")
+    for i in range(90):
+        cands[i].raw = {"loop": {"rank": i % 10}}
+
+    _, info = R.select_for_reading([{"id": "e1", "text": "a camera"}], cands, 900)
+    assert info["read"] == 900
+    assert info["read_per_tier"][0] == 90                 # every query's top ten, always
+    assert info["read_per_tier"][2] > 150                 # plain query hits are no longer zero
+    per = info["read_per_source"]
+    assert per["lens"] == 150                             # its own share, not 444-vs-6,565 odds
+    assert per["google_similar"] == 100
+    # the citation graph keeps more than its quota only because thinner sources left slots unused
+    assert 300 <= per["citation_graph"] < 5318

@@ -49,6 +49,50 @@ MUST_READ_SOURCES = {"lens_bridge", "lens_search", "reliance_bridge", "citation_
                      "google_similar", "P2_examiner"}
 MUST_READ_QUERY_RANK = int(os.environ.get("M1_MUST_READ_RANK", "10"))
 
+# How the must-read tier divides its slots. On wg3 that tier held 6,565 candidates for ~812
+# places and the citation graph alone was 5,318 of them, so one source decided almost the whole
+# read. Two of the three gold families in that pool were never read: one arrived through
+# lens_search (444 candidates) and one was a plain query hit with no must-read source at all.
+# A quota per source stops any one channel deciding the read, and leftovers are handed back so a
+# thin source never wastes a slot (leader, 2026-09-18).
+SOURCE_QUOTA = {"citation_graph": 300, "reliance_bridge": 150, "P2_examiner": 100,
+                "google_similar": 100, "lens": 150}
+# ...and a floor for everything else. The third tier — plain query hits past a query's top ten —
+# got ZERO slots on wg3, which is how US8416715B2 (gold family 43306096) reached the pool and was
+# never looked at. A query hit that no graph channel corroborates is exactly the kind of document
+# the claims judge exists to rule on.
+TIER3_FLOOR = float(os.environ.get("M1_TIER3_FLOOR", "0.25"))
+
+
+def _bucket(sources) -> str:
+    """Which quota a candidate draws on. Lens's bridge and its search share one."""
+    ss = set(sources or ())
+    if ss & {"lens_bridge", "lens_search"}:
+        return "lens"
+    for name in ("citation_graph", "reliance_bridge", "P2_examiner", "google_similar"):
+        if name in ss:
+            return name
+    return "other"
+
+
+def _allocate(items: list, quota: dict[str, int], cap: int, key) -> list:
+    """Take up to `quota[bucket]` of each bucket, best first, then hand the
+    unused slots to whatever is left — also best first, so a bucket that could
+    not fill its share never costs the read a document."""
+    by: dict[str, list] = {}
+    for it in items:
+        by.setdefault(_bucket(key(it)), []).append(it)
+    taken, rest = [], []
+    for name, group in by.items():
+        n = quota.get(name, 0)
+        taken += group[:n]
+        rest += group[n:]
+    taken = taken[:cap]
+    if len(taken) < cap:
+        seen = {id(x) for x in taken}
+        taken += [x for x in rest if id(x) not in seen][:cap - len(taken)]
+    return taken
+
 
 def _cos_of(elements: list[dict], cands: list[Candidate], summary: str = "") -> list[float]:
     """Cosine of each candidate against the element texts, written to
@@ -106,14 +150,23 @@ def select_for_reading(elements: list[dict], cands: list[Candidate], n: int,
     for t in tiers:
         t.sort(key=lambda ic: -cos[ic[0]])
     picked: list[Candidate] = []
-    for t in tiers:
-        picked += [c for _, c in t[:max(0, n - len(picked))]]
+    picked += [c for _, c in tiers[0][:n]]                       # every query's top ten, always
+    left = max(0, n - len(picked))
+    floor3 = min(int(left * TIER3_FLOOR), len(tiers[2]))         # keep a place for plain query hits
+    two = _allocate(tiers[1], SOURCE_QUOTA, max(0, left - floor3), key=lambda ic: ic[1].sources)
+    picked += [c for _, c in two]
+    picked += [c for _, c in tiers[2][:max(0, n - len(picked))]]
+    if len(picked) < n:                                          # tier 3 thin → give the rest back
+        got = {id(c) for c in picked}
+        picked += [c for _, c in tiers[1] if id(c) not in got][:n - len(picked)]
     read = {id(c) for c in picked}
-    left = [cos[i] for i, c in enumerate(cands) if id(c) not in read]
+    leftover = [cos[i] for i, c in enumerate(cands) if id(c) not in read]
+    import collections
     info = {"in": len(cands), "read": len(picked),
             "tiers": [len(t) for t in tiers],
             "read_per_tier": [sum(1 for _, c in t if id(c) in read) for t in tiers],
-            "cut_cos": round(max(left), 4) if left else None}
+            "read_per_source": dict(collections.Counter(_bucket(c.sources) for c in picked)),
+            "cut_cos": round(max(leftover), 4) if leftover else None}
     return picked, info
 
 
