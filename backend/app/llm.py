@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+import httpx
 from google import genai
 from google.genai import types
 
@@ -238,6 +239,15 @@ def _incident(source: str, kind: str, detail: str = "") -> None:
         pass
 
 
+# The isinstance test above is the precise one. This is for transports that are
+# not httpx — httpcore leaking through un-wrapped, aiohttp when google-genai is
+# built on it, an OSError from the socket layer — where the class name is all
+# there is to go on.
+_RETRYABLE_NAMES = ("Timeout", "ServiceUnavailable", "ResourceExhausted",
+                    "ConnectError", "ReadError", "WriteError", "CloseError",
+                    "ConnectionReset", "ConnectionAborted", "IncompleteRead")
+
+
 def _is_retryable(exc: BaseException) -> bool:
     model = _current_model.get() or MODEL
     if isinstance(exc, APIError) and exc.code in (429, 503, 500):
@@ -248,7 +258,25 @@ def _is_retryable(exc: BaseException) -> bool:
         _incident(model, "retry", f"{exc.code} from Vertex: {str(getattr(exc, 'message', exc))[:160]}")
         return True
     name = type(exc).__name__
-    retryable = any(k in name for k in ("Timeout", "ServiceUnavailable", "ResourceExhausted"))
+    # A connection that never opened, or died mid-body, is the same kind of
+    # answer as a 503: Vertex did not refuse the work, the transport dropped it.
+    # It used to fall through to "not retryable" because the name test below
+    # only catches the word "Timeout", and httpx's ConnectError / ReadError do
+    # not contain it. Measured on Cloud Run (job 08f8212d, 2026-09-19): Phase 4
+    # took 39 of these across a 60-document fan-out with errors_429 == 0, and
+    # every one killed its document on the first attempt — 41 of 60 references
+    # were never read. Same machinery as everything else here, one predicate
+    # wider: _retry_decorator already backs off exponentially over 4 attempts.
+    #
+    # ProtocolError is split deliberately. RemoteProtocolError is the peer
+    # breaking the conversation (retry); LocalProtocolError and
+    # UnsupportedProtocol are this process being wrong, and retrying a bug just
+    # makes four of it.
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError,
+                        httpx.RemoteProtocolError, httpx.ProxyError)):
+        _incident(model, "retry", f"{name}: {exc}"[:200])
+        return True
+    retryable = any(k in name for k in _RETRYABLE_NAMES)
     # Not retryable = the call is over. The ledger records it either way; this
     # predicate is the one place every exception out of Vertex passes through.
     _incident(model, "retry" if retryable else "failed", f"{name}: {exc}"[:200])
