@@ -75,7 +75,23 @@ def capped_query(client, sql: str, params=None, max_gib: float = 10.0):
     Measured 2026-09-18 on amie_patents.abstracts: OR-of-terms 0.11 GiB,
     phrase OR 1.8 GiB, phrase AND 86 GiB. The cap itself is checked against
     the pre-execution estimate, so it must sit above the (inflated) estimate
-    (~90 GiB for common tokens) — worst case ~$0.6 if the index is bypassed."""
+    (~90 GiB for common tokens) — worst case ~$0.6 if the index is bypassed.
+
+    That paragraph contradicts its only production caller and has since the day
+    it was written: search_abstracts passes max_gib=30, and 30 is below the
+    ~90 GiB the text says the cap has to clear. Job e7f847bf (2026-09-19) is
+    what it looks like from outside — "Query exceeded limit for bytes billed:
+    32212254720. 107519934464 or higher required" — one estimate at 100.1 GiB,
+    channel returns nothing, delivery ships with 0 patents.
+
+    Do not raise the cap to close the gap. The keyword channel over
+    amie_patents.abstracts is retired from production (leader_master_plan.md §1
+    通道处置: "bigquery_patents 全文搜索通道退出生产"), and nodes/search.py no
+    longer runs it unless BQ_KEYWORD_CHANNEL=1. So this cap is not that
+    channel's bottleneck any more — it is the guard on whatever eval turns the
+    channel back on, and 30 GiB is the right size for a guard: it refuses the
+    ~$0.6 full-column scan instead of paying for it.
+    """
     from google.cloud import bigquery
     job = client.query(sql, job_config=bigquery.QueryJobConfig(
         query_parameters=params or [], maximum_bytes_billed=int(max_gib * 2 ** 30)))

@@ -124,3 +124,19 @@ def test_evidence_coverage_reaches_the_report():
     assert "Evidence Coverage" in html and "17 of 25" in html
     md = inject_md("# R\n\n## Evaluation Criteria\n", None, None, MIX, None)
     assert "## Evidence Coverage" in md
+
+
+def test_bigquery_keyword_channel_is_off_in_production():
+    """master plan §1 通道处置: "bigquery_patents 全文搜索通道退出生产". The 30 GiB
+    cap that rejected it on job e7f847bf is not the thing to raise."""
+    import importlib
+    import os
+    assert search_mod.BQ_KEYWORD_CHANNEL is False          # default, no env set
+
+    os.environ["BQ_KEYWORD_CHANNEL"] = "1"
+    try:
+        assert importlib.reload(search_mod).BQ_KEYWORD_CHANNEL is True
+    finally:
+        del os.environ["BQ_KEYWORD_CHANNEL"]
+        importlib.reload(search_mod)
+    assert search_mod.BQ_KEYWORD_CHANNEL is False

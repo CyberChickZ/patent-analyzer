@@ -28,6 +28,47 @@ _CHANNEL_TIMEOUT_OVERRIDES = {
 # Total time allowed for the prior-art PDF downloads, all documents together.
 _PDF_DOWNLOAD_BUDGET_S = float(os.environ.get("PDF_DOWNLOAD_BUDGET_S", "300"))
 
+# The BigQuery *keyword* channel — SEARCH over our own abstracts table — is
+# retired from production. leader_master_plan.md §1 (通道处置) settled it:
+# "bigquery_patents 全文搜索通道退出生产". The patents that reach a delivery come
+# from the agentic loop's seeds and citation expansion, not from this scan.
+#
+# This is not the same thing as `fulltext_bq` below, which looks up claims for
+# candidates we already have by publication number and stays exactly as it is.
+#
+# BQ_KEYWORD_CHANNEL=1 puts it back for an eval that wants to measure it.
+BQ_KEYWORD_CHANNEL = os.environ.get("BQ_KEYWORD_CHANNEL", "0") == "1"
+
+
+def salvage_timed_out_loop(partial: dict, timeout_s: float) -> tuple[list, dict]:
+    """What the agentic loop had found by the time its deadline cancelled it.
+
+    `run_loop(partial=...)` fills `partial` with the live containers it
+    accumulates into, so this reads work already done and paid for rather than
+    discarding it. The stats it returns exist to make the truncation loud:
+    `truncated` is what tells the report, the ledger and the next reader that
+    this delivery is a partial search and not a thorough one that found little.
+    """
+    cands = list((partial.get("pool") or {}).values())
+    budget = partial.get("budget")
+    inv = partial.get("cands") or []
+    # `mode` keeps its real value rather than becoming "truncated". Downstream
+    # delivery branches on it, and rewriting it here would route the job around
+    # the claims judge — which is itself a silent degradation. `truncated` is
+    # the flag to read; it travels beside the mode, not instead of it.
+    return cands, {"rounds": [], "mode": partial.get("mode") or "elements",
+                   "truncated": True,
+                   "truncated_after_s": round(float(timeout_s), 1),
+                   "salvaged": len(cands),
+                   "queries_issued": len(partial.get("log") or []),
+                   "gp_calls": getattr(budget, "gp_calls", None),
+                   "serpapi_calls": getattr(budget, "serp_calls", None),
+                   "elements": [{"id": e["id"], "text": e["text"], "facets": e.get("facets"), "candidate": c["id"]}
+                                for c in inv for e in c.get("elements", [])],
+                   "candidates": [{"id": c["id"], "level": c.get("level"), "n_elements": len(c.get("elements", []))}
+                                  for c in inv],
+                   "coverage_by_element": {}}
+
 
 def _channel_timeout(name: str) -> float:
     env = os.environ.get(f"SEARCH_TIMEOUT_{name.upper()}") or os.environ.get("SEARCH_CHANNEL_TIMEOUT_S")
@@ -170,16 +211,36 @@ async def search_node(state: GraphState) -> dict:
     loop_stats: dict = {}
     loop_cands: list = []
     loop_timed_out = False
+    # The loop's own view of what it has collected so far. A wall-clock budget
+    # that fires cancels the coroutine, and everything it had already paid for
+    # went with it: on job e7f847bf (2026-09-19) the deadline hit after 8 Lens
+    # queries and 46.4 GiB of BigQuery, and the delivery came out of that job
+    # with 0 patents in it. A deadline is a reason to stop looking, not a reason
+    # to throw away what has been found.
+    loop_partial: dict = {}
     try:
         from patent_analyzer.agentic.loop import run_loop
         loop_cands, loop_stats = await asyncio.wait_for(run_loop(
             state, lambda: serpapi_budget["left"], _serpapi_take,
-            lambda kind, msg, payload=None: _event(kind, msg, payload)),
+            lambda kind, msg, payload=None: _event(kind, msg, payload),
+            partial=loop_partial),
             timeout=_channel_timeout("agentic_loop"))
     except asyncio.TimeoutError:
         loop_timed_out = True
-        _event("channel_timeout", f"agentic_loop: no result within {_channel_timeout('agentic_loop'):.0f}s "
-                                  "— continuing with the remaining channels")
+        # Everything downstream of here must be able to tell a truncated loop
+        # from a complete one. Silent degradation is worse than a clean failure:
+        # a delivery half the usual size reads exactly like a hard search.
+        loop_cands, loop_stats = salvage_timed_out_loop(loop_partial, _channel_timeout("agentic_loop"))
+        _event("channel_timeout",
+               f"agentic_loop: no result within {_channel_timeout('agentic_loop'):.0f}s — "
+               f"keeping the {len(loop_cands)} candidates it had already found "
+               f"({loop_stats['queries_issued']} queries issued). THE SEARCH IS TRUNCATED, "
+               "not complete: treat this delivery as a partial one.", loop_stats)
+        from patent_analyzer import metering
+        metering.incident("agentic_loop",
+                          metering.DEGRADED if loop_cands else metering.FAILED,
+                          f"timed out after {_channel_timeout('agentic_loop'):.0f}s; "
+                          f"salvaged {len(loop_cands)} candidates")
     except Exception as exc:
         _event("channel_crashed", f"agentic_loop: {type(exc).__name__}: {exc}")
 
@@ -192,8 +253,9 @@ async def search_node(state: GraphState) -> dict:
         ("semantic_scholar", run_semantic_scholar),
         ("openalex", run_openalex),
         ("arxiv", run_arxiv),
-        ("bigquery_patents", run_bigquery_patents),
     ]
+    if BQ_KEYWORD_CHANNEL:
+        channel_specs.append(("bigquery_patents", run_bigquery_patents))
     import time as _time
 
     async def _timed(name, fn):
@@ -242,10 +304,25 @@ async def search_node(state: GraphState) -> dict:
                                "detail": (limited[0][:200] if limited else
                                           (str(errs[0].get("error", ""))[:200] if errs and not cands else "")),
                                "errors": [str(e.get("error", ""))[:160] for e in errs[:5]]})
+    if not BQ_KEYWORD_CHANNEL:
+        # A channel that is absent from the report and a channel that returned
+        # nothing look the same to a reader. Say which one this is.
+        channel_health.append({"channel": "bigquery_patents", "status": "retired", "n": 0, "seconds": 0.0,
+                               "detail": "retired from production by design (master plan §1 通道处置); "
+                                         "set BQ_KEYWORD_CHANNEL=1 to measure it", "errors": []})
+
     if loop_timed_out:
         for h in channel_health:
             if h["channel"] == "agentic_loop":
-                h.update(status="timeout", detail=f"no result within {_channel_timeout('agentic_loop'):.0f}s")
+                # status stays "timeout" even when candidates were salvaged: the
+                # row has to say the search was cut short, or a truncated run and
+                # a thorough one that found little are indistinguishable in the
+                # report — and only one of them is worth re-running.
+                h.update(status="timeout", truncated=True, salvaged=len(loop_cands),
+                         detail=(f"cut off at {_channel_timeout('agentic_loop'):.0f}s with "
+                                 f"{len(loop_cands)} candidates already found "
+                                 f"({loop_stats.get('queries_issued', 0)} queries issued) — "
+                                 "kept, but this search is PARTIAL"))
 
     # Pool & dedupe
     pooled = recall_pool.pool_and_dedupe(channel_results)
@@ -682,6 +759,12 @@ async def search_node(state: GraphState) -> dict:
             "stop": loop_stats.get("stop"),
             "loop_elements": loop_stats.get("elements", []),
             "loop_mode": loop_stats.get("mode", "elements"),
+            # True means the recall loop was cut off by its wall-clock budget and
+            # what follows was built from a partial search. Nothing else in these
+            # stats says so: the pool, the delivery and the scores all look like
+            # an ordinary thin result.
+            "loop_truncated": bool(loop_stats.get("truncated")),
+            "loop_truncated_after_s": loop_stats.get("truncated_after_s"),
             "coverage_by_element": loop_stats.get("coverage_by_element", {}),
             "prune": prune_stats,
             "pruned": [{"pub_num": d.get("pub_num", ""), "sources": d.get("sources", []),

@@ -58,6 +58,17 @@ class Budget:
 GP_WAIT_S = int(os.environ.get("LOOP_GP_WAIT_S", "0"))   # evals: wait out a Google block instead of dropping the query
 
 
+def _register_partial(partial: dict | None, **live) -> None:
+    """Hand the caller references to the containers this run accumulates into.
+
+    Nothing is copied. `pool` is mutated in place for the whole run, so a caller
+    holding the same dict sees the candidates appear as they are found and can
+    salvage them after cancelling the run.
+    """
+    if partial is not None:
+        partial.update(live)
+
+
 async def _wait_for_gp(budget: Budget) -> None:
     """With no SerpAPI credit left, an eval run may sit out Google's soft
     block (15 min breaker) rather than log the query as `none`."""
@@ -87,7 +98,7 @@ async def _search(query: str, before: str | None, budget: Budget, num: int = 20,
     return [], None, "none"
 
 
-async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list[Candidate], dict]:
+async def run_wide(state: dict, serpapi_left, serpapi_take, event, partial: dict | None = None) -> tuple[list[Candidate], dict]:
     """Recall-first: ≤WIDE_MAX_QUERIES broad queries over every candidate
     invention, 100 results each (patents + scholar), every hit is a seed,
     citation expansion up to MAX_CITED_LIGHT. No validator walk: the pool is
@@ -105,6 +116,16 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
     pool: dict[str, Candidate] = {}
     log = []
     seeds: list[str] = []
+    # The caller's window into work in progress. A `wait_for` that fires cancels
+    # this coroutine and takes `pool` with it, so everything the loop had already
+    # paid for — Lens queries, BigQuery expansion, an hour of wall clock —
+    # vanished on a timeout. These are the live objects, not copies: the caller
+    # reads whatever has accumulated by the moment it gives up.
+    #
+    # `cands` goes too, and not as a nicety: the delivery step keys on
+    # loop_stats["elements"], so a salvage without them would quietly route the
+    # job around the claims judge — trading one silent degradation for another.
+    _register_partial(partial, pool=pool, log=log, budget=budget, cands=cands, mode=LOOP_MODE)
 
     async def _run(qs: list[dict]) -> list[str]:
         new_seeds: list[str] = []
@@ -372,8 +393,15 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event) -> tuple[list
                                  "coverage_by_element": {}}
 
 
-async def run_loop(state: dict, serpapi_left, serpapi_take, event, embed=None) -> tuple[list[Candidate], dict]:
-    """Returns (candidates for the pool, loop_stats)."""
+async def run_loop(state: dict, serpapi_left, serpapi_take, event, embed=None,
+                   partial: dict | None = None) -> tuple[list[Candidate], dict]:
+    """Returns (candidates for the pool, loop_stats).
+
+    `partial` is an optional dict the caller owns. The run fills it with the
+    live containers it accumulates into, so a caller that cancels this
+    coroutine — nodes/search.py gives the loop a wall-clock budget — can still
+    take the candidates found before the deadline instead of nothing.
+    """
     if LOOP_MODE == "moves":
         from .loop_moves import run_moves
         return await run_moves(state, serpapi_left, serpapi_take, event)
@@ -381,7 +409,7 @@ async def run_loop(state: dict, serpapi_left, serpapi_take, event, embed=None) -
         # wide_good: same recall as wide; the claims judge replaces the abstract prune at delivery
         # (nodes/search.py). See agentic/wide_good.py for why the M1 recall strategy was dropped
         # and this half of it kept.
-        cands, stats = await run_wide(state, serpapi_left, serpapi_take, event)
+        cands, stats = await run_wide(state, serpapi_left, serpapi_take, event, partial=partial)
         stats["mode"] = LOOP_MODE
         return cands, stats
     elements = elements_from_state(state)[:MAX_ELEMENTS]
@@ -394,6 +422,7 @@ async def run_loop(state: dict, serpapi_left, serpapi_take, event, embed=None) -
     budget = Budget(serpapi_left, serpapi_take)
 
     pool: dict[str, Candidate] = {}
+    _register_partial(partial, pool=pool, budget=budget)
     known: set[str] = set()
     uncovered = list(elements)
     cpc_hint: str | None = None
