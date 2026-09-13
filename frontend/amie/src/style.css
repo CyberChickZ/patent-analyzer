@@ -560,4 +560,9 @@ details.cand > summary.cand-head:focus-visible { outline: 2px solid var(--accent
 .meter > span { display: block; height: 100%; background: var(--accent); }
 .meter.m-warn > span { background: var(--warn); }
 .meter.m-danger > span { background: var(--danger); }
+/* A reserved key is counted but unavailable, so its bar is not the colour of
+   headroom and its row is not marked in the colour of a problem. */
+.meter.m-held > span { background: var(--text-3); }
 tr.is-spent > td:first-child { box-shadow: inset 2px 0 0 var(--danger); }
+tr.is-reserved > td:first-child { box-shadow: inset 2px 0 0 var(--text-3); }
+tr.is-reserved > td { background: var(--neutral-soft); }

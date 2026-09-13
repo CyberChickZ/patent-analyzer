@@ -49,6 +49,21 @@ export function fmtDate(ts?: string): string {
   return isNaN(d.getTime()) ? "—" : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+/** A calendar day, no clock, in UTC.
+ *
+ *  Used where the day itself is the fact — a plan's expiry, or the day of the
+ *  month a counter rolls over on. UTC because that is the day the provider
+ *  means: a bare `"2026-10-02"` parses as UTC midnight, and rendering it in
+ *  a US timezone prints the 1st, which is a different answer to "when does
+ *  this expire" than the one the backend gave. */
+export function fmtDay(ts?: string | null): string {
+  if (!ts) return "—";
+  const d = new Date(ts);
+  return isNaN(d.getTime())
+    ? "—"
+    : d.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
+}
+
 export function num(n: unknown, fallback = "—"): string {
   if (n === null || n === undefined || n === "") return fallback;
   const v = Number(n);

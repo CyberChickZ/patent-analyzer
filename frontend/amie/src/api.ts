@@ -244,6 +244,11 @@ export interface QuotaRow {
   error: string;
   expires_on: string | null;
   expires_in_days: number | null;
+  /** SerpAPI only: a key held back for demos and production jobs, which
+   *  evaluation runs never rotate onto. Present on nothing else, hence
+   *  optional — a source that does not set it is not "not reserved", it is a
+   *  source the idea does not apply to. */
+  reserved?: boolean;
 }
 
 export interface RateCard {
@@ -319,7 +324,15 @@ export interface FulltextGapRow {
   match_type: string;
   doi: string;
   landing_page: string;
+  /** How far the resolution chain got: arxiv | oa | abstract_only, plus
+   *  user_upload for a PDF a reviewer supplied. Those are the tiers there are —
+   *  an EZproxy tier was considered and will not be built. */
   fulltext_tier: string;
+  /** Whether a PDF was actually fetched: ok | cached | failed | no_url |
+   *  skipped_budget | not_needed, "" on a job that predates the stamp. A
+   *  separate question from the tier — resolving an open-access link and
+   *  holding the full text are not the same thing. */
+  fulltext_download: string;
   read_state: "full_text" | "abstract_only" | "nothing";
   read_reason: string;
   text_chars: number;

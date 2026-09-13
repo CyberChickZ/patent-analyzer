@@ -18,6 +18,8 @@
  *  this file are edited by different people on different days, and a renamed
  *  key should cost one row, not the panel. */
 
+import { esc } from "./ui";
+
 export interface Rate {
   model: string;
   inPerM: number | null;   // USD per 1M input tokens
@@ -28,6 +30,23 @@ export interface Rate {
 export interface OtherRate {
   item: string;
   price: string;
+}
+
+/** A rate with an end date is not the same fact as a rate, and it is exactly
+ *  the fact a card kept in the frontend goes stale on without anyone noticing.
+ *  Vertex's note above the Gemini 3 table: "offered with introductory pricing
+ *  of $0.75 / $3.75 per 1M tokens input / output through December 31, 2026.
+ *  Starting January 1, 2027, standard pricing of $1.5 / $7.5 per 1M tokens
+ *  input / output will apply." Every number rendered from this comes off
+ *  `prices.upcoming_changes`, never off that sentence. */
+export interface PriceChange {
+  model: string;
+  from: string;             // effective_from, ISO date
+  inPerM: number | null;
+  outPerM: number | null;
+  wasIn: number | null;
+  wasOut: number | null;
+  multiple: number | null;
 }
 
 export interface QuotaSource {
@@ -48,6 +67,8 @@ export interface Quota {
   rates: Rate[];
   other: OtherRate[];
   sources: QuotaSource[];
+  /** scheduled rate changes still ahead of today, from the backend */
+  upcoming: PriceChange[];
   /** this endpoint does not answer it; see GET /api/jobs/{id}/usage */
   jobCost: { low: number; high: number } | null;
 }
@@ -112,6 +133,16 @@ function parseQuota(d: any): Quota {
     exhausted: !!pick(r, "exhausted"),
   })).filter((r: QuotaSource) => r.name);
 
+  const upcoming: PriceChange[] = (pick(prices, "upcoming_changes", "upcomingChanges") || []).map((c: any) => ({
+    model: String(pick(c, "model", "name") ?? ""),
+    from: String(pick(c, "effective_from", "from", "effectiveFrom") ?? ""),
+    inPerM: n(pick(c, "input_usd_per_mtok", "inPerM")),
+    outPerM: n(pick(c, "output_usd_per_mtok", "outPerM")),
+    wasIn: n(pick(c, "from_input", "wasIn")),
+    wasOut: n(pick(c, "from_output", "wasOut")),
+    multiple: n(pick(c, "multiple")),
+  })).filter((c: PriceChange) => c.model && c.from);
+
   return {
     available: rates.length > 0 || other.length > 0,
     reviewBy: pick(prices, "review_by", "reviewBy") || undefined,
@@ -119,11 +150,12 @@ function parseQuota(d: any): Quota {
     rates,
     other,
     sources,
+    upcoming,
     jobCost: low !== null && high !== null ? { low, high } : null,
   };
 }
 
-const EMPTY = (reason: string): Quota => ({ available: false, reason, rates: [], other: [], sources: [], jobCost: null });
+const EMPTY = (reason: string): Quota => ({ available: false, reason, rates: [], other: [], sources: [], upcoming: [], jobCost: null });
 
 let cached: Promise<Quota> | null = null;
 
@@ -149,6 +181,23 @@ export function loadQuota(force = false): Promise<Quota> {
     })();
   }
   return cached;
+}
+
+/** The scheduled-change block, shared by every page that prints a rate card.
+ *  One author, one wording — the same reason the verdict sentence is the
+ *  backend's. Empty when the backend reports no change ahead, which is also
+ *  what it reports when it could not be reached, and that case already says so
+ *  through `quotaNote`. */
+export function upcomingBlock(q: Quota | null): string {
+  const cs = q?.upcoming || [];
+  if (!cs.length) return "";
+  return `<div class="notice notice-warn">
+    <b>Scheduled price ${cs.length === 1 ? "change" : "changes"} — today's rate is not next year's.</b>
+    <ul style="margin:.35rem 0 0;padding-left:1.1rem">
+      ${cs.map((c) => `<li><code>${esc(c.model)}</code> — ${perM(c.wasIn)} / ${perM(c.wasOut)} per 1M today,
+        <b>${perM(c.inPerM)} / ${perM(c.outPerM)} from ${esc(c.from)}</b>${
+          c.multiple ? ` (output ×${c.multiple})` : ""}</li>`).join("")}
+    </ul></div>`;
 }
 
 /** The one line that goes under a table with nothing in it. */

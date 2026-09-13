@@ -1,7 +1,7 @@
 import { listJobs, submitJob, deleteJob, type JobSummary } from "../api";
 import { esc, pill, fmtDate, errorBox, empty, on } from "../ui";
 import { PAUSE_ORDER, PAUSE_LABEL } from "../phases";
-import { loadQuota, jobCostRange, perM, quotaNote, EMDASH, type Quota } from "../pricing";
+import { loadQuota, jobCostRange, perM, quotaNote, upcomingBlock, EMDASH, type Quota } from "../pricing";
 import { go, rememberJob } from "../main";
 
 const INPUT_MODES = [
@@ -201,6 +201,7 @@ function budgetBody(q: Quota | null): string {
       <div><div class="k">External calls</div><div class="v">${esc(other[0]?.price || EMDASH)}<small> ${esc(other[0]?.item || "")}</small></div></div>
       <div><div class="k">Rate card</div><div class="v">${q?.reviewBy ? `checked to<small> ${esc(q.reviewBy)}</small>` : EMDASH}</div></div>
     </div>
+    ${upcomingBlock(q)}
     <div class="tbl-wrap"><div class="tw"><table class="tbl">
       <thead><tr><th>Model</th><th class="right">Input / 1M</th><th class="right">Output / 1M</th><th>Note</th></tr></thead>
       <tbody>${rows}</tbody>
