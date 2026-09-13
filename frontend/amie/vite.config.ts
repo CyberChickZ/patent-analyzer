@@ -11,7 +11,7 @@ export default defineConfig({
       "/report": BACKEND,
       "/results": BACKEND,
       "/jobs": BACKEND,
-      "/healthz": BACKEND,
+      "/health": BACKEND,
       "/a2a": BACKEND,
       "/.well-known": BACKEND,
     },

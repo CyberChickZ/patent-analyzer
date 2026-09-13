@@ -502,9 +502,13 @@ app.get("/api/quota", async (req, res) => {
   }
 });
 
-app.get("/api/healthz", async (req, res) => {
+// The backend path moved from /healthz to /health: on Cloud Run, /healthz is
+// intercepted in front of the container and answered with Google's own 404 page,
+// so this proxy has been forwarding to a path that could not reply — from here
+// too, since the hop goes out to the same *.run.app host.
+app.get("/api/health", async (req, res) => {
   try {
-    const { status, data } = await proxyBackend("/healthz");
+    const { status, data } = await proxyBackend("/health");
     res.status(status).json(data);
   } catch (e) {
     res.status(502).json({ error: "Backend unreachable" });

@@ -491,7 +491,7 @@ GCS_TIMEOUT_S = float(os.getenv("GCS_TIMEOUT_S", "60"))
 # GCS failures are swallowed on purpose (local disk is the primary during a run),
 # but swallowing them *silently* meant a deploy with no bucket access looked
 # perfectly healthy until the report was missing. Log the first failure per
-# operation, then stay quiet, and record it so /healthz can say so.
+# operation, then stay quiet, and record it so /health can say so.
 _gcs_failures: dict[str, dict] = {}
 
 
@@ -508,7 +508,7 @@ def _gcs_failed(op: str, exc: BaseException) -> None:
 # Lazily-built storage.Client. The module-level binding matters: `global
 # _gcs_client` without it makes _get_gcs raise NameError, which the best-effort
 # try/except around every upload then swallowed. Deleted by db92443 and unnoticed
-# for exactly that reason until /healthz started reporting GCS failures
+# for exactly that reason until /health (then /healthz) started reporting GCS failures
 # (b0488ae) — job state had not reached the bucket since.
 _gcs_client = None
 
@@ -608,8 +608,17 @@ def _get_job(job_id: str) -> dict | None:
 
 # ─── REST API ──────────────────────────────────────────────────
 
-@app.get("/healthz")
-async def healthz():
+# `/healthz`, not `/health`, was the path until 2026-09-19, and on Cloud Run it
+# never answered: something in front of the container serves its own branded HTML
+# 404 for that exact path. Measured against revisions 00074 and 00075 through the
+# IAM proxy — `/health`, `/healthz2` and a nonsense path all came back as
+# FastAPI's `{"detail":"Not Found"}`, `/healthz` alone came back as Google's 404
+# page, and unauthenticated `/` returns 403 while unauthenticated `/healthz`
+# returns that same 404, so it is being taken before IAM, not by this app. The
+# endpoint that exists to report GCS failures had therefore been unreadable from
+# outside for its whole life — which is the only thing it is for.
+@app.get("/health")
+async def health():
     # `gcs` is empty on a healthy deploy; a populated one means job state and
     # reports are only on this instance's disk and will not survive it.
     return {"status": "ok", "version": "0.3.0",
