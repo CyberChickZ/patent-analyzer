@@ -15,6 +15,7 @@ import asyncio
 import contextvars
 import json
 import os
+import functools
 import re
 import time
 from pathlib import Path
@@ -280,15 +281,54 @@ def _is_retryable(exc: BaseException) -> bool:
     # Not retryable = the call is over. The ledger records it either way; this
     # predicate is the one place every exception out of Vertex passes through.
     _incident(model, "retry" if retryable else "failed", f"{name}: {exc}"[:200])
+    if not retryable:
+        # _retry_decorator logs the give-up; this one is already on the books.
+        try:
+            exc._amie_incident_logged = True
+        except (AttributeError, TypeError):
+            pass
     return retryable
 
 
-_retry_decorator = retry(
+_RETRY_ATTEMPTS = int(os.getenv("LLM_RETRY_ATTEMPTS", "4"))
+
+_tenacity_retry = retry(
     retry=retry_if_exception(_is_retryable),
     wait=wait_random_exponential(multiplier=1, max=60),
-    stop=stop_after_attempt(4),
+    stop=stop_after_attempt(_RETRY_ATTEMPTS),
     reraise=True,
 )
+
+
+def _retry_decorator(fn):
+    """`_tenacity_retry`, plus the one incident it cannot record on its own.
+
+    `_is_retryable` logs every exception it sees, as "retry" when it will try
+    again and "failed" when it will not. Nothing logged the third case: the
+    call that was retryable every time and still ran out of attempts. tenacity
+    re-raises it and the caller turns it into an unread document, but the
+    ledger counted only retries — job 99a35c00 (2026-09-19) closed with
+    `failures: 0` against 58 retry incidents while 14 of its 60 references came
+    back `abstract_failed`. A phase that lost a quarter of its evidence must
+    not report a clean bill.
+
+    The exception is stamped so the non-retryable path, which already logged
+    its own "failed", is not counted twice.
+    """
+    inner = _tenacity_retry(fn)
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await inner(*args, **kwargs)
+        except BaseException as exc:
+            if not getattr(exc, "_amie_incident_logged", False):
+                _incident(_current_model.get() or MODEL, "failed",
+                          f"gave up after {_RETRY_ATTEMPTS} attempts: "
+                          f"{type(exc).__name__}: {exc}"[:200])
+            raise
+
+    return wrapper
 
 
 # Model of the in-flight call, so the retry predicate can attribute a 429 to it.
