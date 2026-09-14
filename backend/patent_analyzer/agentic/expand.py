@@ -25,6 +25,76 @@ def _after(meta: dict, cutoff: str | None) -> bool:
     return bool(cutoff and d and d >= cutoff)
 
 
+PER_SEED_MIN = int(__import__("os").environ.get("EXPAND_PER_SEED_MIN", "3"))
+PER_SEED_MAX = int(__import__("os").environ.get("EXPAND_PER_SEED_MAX", "50"))
+
+
+def _per_seed(by_seed: dict[str, list[str]], cited: "Counter", known: set[str],
+              meta: dict, max_cited: int, order: list[str] | None = None) -> tuple[list[str], dict]:
+    """Give every seed a share of the expansion instead of one global vote.
+
+    The old rule was `cited.most_common()[:max_cited]` — the documents cited by
+    the most seeds, capped at 5,000. That constant was chosen when a job had
+    about 1,400 seeds. Every later recall improvement (named-entity queries for
+    the paper channel, dates pushed into the API, the Reliance bridge entering
+    the pool, the Lens bridge at its 800 cap) raised it to about 10,000, and on
+    one paper 43,762 — so the same 5,000 slots were being filled from a pool of
+    up to 251,000 by "how many seeds cite this", which at that size selects the
+    field's textbook references rather than this invention's. Measured over 8
+    papers: the citation expansion first reached 19 gold families before and 3
+    after, while every other channel held (bridges 11 = 11). H.md §H1.10.
+
+    So each seed takes its own top k, k = ceil(max_cited / seeds) clamped to
+    [PER_SEED_MIN, PER_SEED_MAX]. Inside a seed the order is still the global
+    weight, which keeps the "corroborated by other seeds" signal as a tie-break
+    where it belongs — between one seed's own references — instead of letting
+    it decide the whole expansion. If the union still overflows, it is trimmed
+    round-robin so a seed is never dropped whole.
+
+    With more seeds than slots — 10,000 seeds against 5,000 — not every seed can
+    have even one, so the order they are served in decides. `order` is the
+    caller's own seed order, and loop.py builds it query hits first, then the
+    Reliance bridge, then Lens; a query's own hit is a better place to walk from
+    than the eight-thousandth bridge patent.
+
+    Not implemented, and it cannot be here: Harry asked for the overflow tie to
+    go to the seed with the most claims-judged element touches. Expansion runs
+    during recall and the claims judge runs after it, so no such number exists
+    yet at this point. The caller's ordering is the best signal actually
+    available, and it is at least the one the caller controls.
+
+    Worth knowing before reading `per_seed_k`: when seeds outnumber slots the
+    allocation degenerates to one document per seed for the first `max_cited`
+    seeds, and the rest get nothing however large k says it is. wg4 had 3,513
+    to 43,762 seeds against 5,000 slots, so that is the normal case today, not
+    an edge. Making this better needs either a cap that scales with the seed
+    count or a smaller, better seed set — a per-seed split alone cannot conjure
+    slots that do not exist. `per_seed_served` reports how many seeds actually
+    got one.
+    """
+    rank = {s: i for i, s in enumerate(order or [])}
+    seeds = sorted((s for s, ps in by_seed.items() if ps),
+                   key=lambda s: rank.get(s, len(rank)))
+    if not seeds:
+        return [], {"per_seed_k": 0, "per_seed_seeds": 0}
+    k = max(PER_SEED_MIN, min(PER_SEED_MAX, -(-max_cited // len(seeds))))
+    queues: list[list[str]] = []
+    for s in seeds:
+        fresh = [p for p in dict.fromkeys(by_seed[s]) if p not in known and p not in meta]
+        fresh.sort(key=lambda p: -cited[p])
+        queues.append(fresh[:k])
+    out, seen, served = [], set(), set()
+    for i in range(k):                                   # round robin: no seed is dropped whole
+        for s, q in zip(seeds, queues):
+            if i < len(q) and q[i] not in seen and len(out) < max_cited:
+                seen.add(q[i])
+                out.append(q[i])
+                served.add(s)                            # this seed actually contributed one
+        if len(out) >= max_cited:
+            break
+    return out, {"per_seed_k": k, "per_seed_seeds": len(seeds), "per_seed_served": len(served)}
+
+
 async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CITED_PER_ROUND,
                  before: str | None = None, light: bool = False, forward: bool = False) -> tuple[list[Candidate], dict]:
     """Returns (new candidates from citations, info) where info has the
@@ -77,8 +147,9 @@ async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CIT
                     by_seed.setdefault(_canon(s), []).append(pub)
         info["forward_total"] = sum(len(v) for v in fwd.values())
     info["cited_total"] = len(cited)
-    new = [p for p, _ in cited.most_common() if p not in known and p not in meta][:max_cited]
+    new, alloc = _per_seed(by_seed, cited, known, meta, max_cited, order=seeds)
     info["cited_new"] = len(new)
+    info.update(alloc)
     kept = set(new)
     # which seed brought which kept document (ids only; the funnel joins them to gold)
     info["cited_by_seed"] = {s: [p for p in dict.fromkeys(ps) if p in kept] for s, ps in by_seed.items()}
