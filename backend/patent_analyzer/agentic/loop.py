@@ -31,7 +31,16 @@ MAX_ROUNDS = int(os.environ.get("LOOP_MAX_ROUNDS", "3"))
 MAX_ELEMENTS = int(os.environ.get("LOOP_MAX_ELEMENTS", "12"))
 SEEDS_PER_ELEMENT = 10
 GP_CALLS_PER_JOB = int(os.environ.get("LOOP_GP_MAX_CALLS", "30"))
-LOOP_MODE = os.environ.get("LOOP_MODE", "wide")          # moves (M1 rounds) | wide (recall-first) | elements
+# wide_good is the production default (leader, 2026-09-18): the wide loop recalls and the
+# claims judge decides delivery. It is chosen on delivery, not on recall — measured on the 5
+# papers h1h and wg4 share, delivered reach .156 against .094 while pool reach is .438 against
+# .500. The delivery order has grounds a reviewer can check (which element, which claim number,
+# or a located quote for a paper); an abstract-level ranking has none.
+#   wide       recall only, abstract prune + semantic rerank decide delivery (the h1* runs)
+#   wide_good  same recall, claims judge decides delivery
+#   moves      M1's round loop, expand only from GOOD — measured worse, kept for reference
+#   elements   the original per-element loop
+LOOP_MODE = os.environ.get("LOOP_MODE", "wide_good")
 WIDE_MAX_QUERIES = int(os.environ.get("LOOP_WIDE_MAX_QUERIES", "10"))
 CPC_QUERIES = int(os.environ.get("LOOP_CPC_QUERIES", "2"))
 LENS_CALLS = int(os.environ.get("LOOP_LENS_CALLS", "6"))      # Lens trial: 1000 req/month
