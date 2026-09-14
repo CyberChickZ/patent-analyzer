@@ -36,10 +36,14 @@ echo "backend  → http://localhost:$BACKEND_PORT   (logs: $ROOT/backend/local.l
 pids+=($!)
 
 for _ in $(seq 1 60); do
-  curl -sf "http://localhost:$BACKEND_PORT/healthz" >/dev/null 2>&1 && break
+  curl -sf "http://localhost:$BACKEND_PORT/health" >/dev/null 2>&1 && break
   sleep 1
 done
-curl -sf "http://localhost:$BACKEND_PORT/healthz" >/dev/null 2>&1 \
+# /healthz moved to /health: on Cloud Run the former is answered by Google's own
+# frontend and never reaches the container, so the endpoint had to move (L9, 2026-09-18).
+# This probe kept the old path and reported "backend did not come up" against a backend
+# that was up and answering.
+curl -sf "http://localhost:$BACKEND_PORT/health" >/dev/null 2>&1 \
   || { echo "backend did not come up — see backend/local.log"; exit 1; }
 
 if [ "$BACKEND_ONLY" = "1" ]; then
