@@ -107,3 +107,36 @@ def retry_n(n):
     import app.llm as llm
     return retry(retry=retry_if_exception(llm._is_retryable),
                  stop=stop_after_attempt(n), reraise=True)
+
+
+def test_attempt_count_is_a_knob_and_not_decoration(monkeypatch):
+    """LLM_RETRY_ATTEMPTS is set in the Cloud Run env, so it has to reach
+    tenacity's stop condition — a number nobody reads is worse than no knob."""
+    import asyncio
+    import importlib
+    import os
+
+    os.environ["LLM_RETRY_ATTEMPTS"] = "6"
+    try:
+        import app.llm as llm
+        llm = importlib.reload(llm)
+        assert llm._RETRY_ATTEMPTS == 6
+        seen = []
+        monkeypatch.setattr(llm, "_incident", lambda m, k, d: seen.append((k, d)))
+        monkeypatch.setattr(llm, "_tenacity_retry", retry_n(6))   # same stop, no sleeping
+
+        calls = []
+
+        @llm._retry_decorator
+        async def always_drops():
+            calls.append(1)
+            raise httpx.ConnectError("")
+
+        with pytest.raises(httpx.ConnectError):
+            asyncio.run(always_drops())
+        assert len(calls) == 6
+        assert any("gave up after 6 attempts" in d for k, d in seen if k == "failed")
+    finally:
+        del os.environ["LLM_RETRY_ATTEMPTS"]
+        import app.llm as llm2
+        importlib.reload(llm2)
