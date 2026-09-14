@@ -81,5 +81,6 @@ logs/
 backend/amie/graph/downloaded_papers/*
 backend/amie/graph/papers/*
 # === Secrets ===
+# backend/.gitignore already covers backend/.env.yaml; this catches a copy left anywhere else.
 .env.yaml
 **/.env.yaml
