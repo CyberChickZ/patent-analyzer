@@ -20,7 +20,7 @@ from ..recall import serpapi as sp
 from ..recall.pool import Candidate, candidates_to_legacy_docs, pool_and_dedupe
 from .coverage import tag_coverage
 from .elements import attach_facets, candidates_from_state, elements_from_state
-from .expand import MAX_CITED_LIGHT, expand, similar_neighbours
+from .expand import MAX_CITED_LIGHT, budget_for, expand, similar_neighbours
 from .neighbourhood import paper_neighbourhood
 from .query_gen import boolean_query, next_mode
 from .validator import validate
@@ -336,7 +336,18 @@ async def run_wide(state: dict, serpapi_left, serpapi_take, event, partial: dict
                                      "candidates": [{"id": c["id"], "level": c["level"],
                                                      "n_elements": len(c["elements"])} for c in cands],
                                      "coverage_by_element": {}}
-    expanded, info = await expand(seeds, set(pool), max_cited=MAX_CITED_LIGHT, before=cutoff, light=True, forward=True) if seeds else ([], {})
+    # which kind each seed is, so the expansion can give a query's own hit a deeper slice than the
+    # eight-thousandth bridge patent, and so the budget can scale with how many seeds there are
+    seed_kind = {}
+    for p_ in q_seeds:
+        seed_kind.setdefault(p_, "query")
+    for p_ in bridge_seeds:
+        seed_kind.setdefault(p_, "bridge")
+    for p_ in lens_pubs:
+        seed_kind.setdefault(p_, "lens")
+    expanded, info = await expand(seeds, set(pool), max_cited=budget_for(len(seeds), MAX_CITED_LIGHT),
+                                  before=cutoff, light=True, forward=True,
+                                  seed_kind=seed_kind) if seeds else ([], {})
     dropped = set(info.get("seeds_after_cutoff") or [])
     for k in list(pool):
         if k in dropped:

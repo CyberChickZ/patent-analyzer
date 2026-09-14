@@ -72,3 +72,42 @@ def test_the_callers_seed_order_decides_who_gets_a_slot_when_there_are_too_many(
 
 def test_no_seeds_is_not_a_crash():
     assert _per_seed({}, Counter(), set(), {}, 5000) == ([], {"per_seed_k": 0, "per_seed_seeds": 0})
+
+
+def test_budget_scales_with_seeds_instead_of_staying_at_five_thousand():
+    from patent_analyzer.agentic.expand import MAX_CITED_LIGHT, budget_for
+    assert budget_for(200, MAX_CITED_LIGHT) == 5000        # small jobs unchanged
+    assert budget_for(1400, MAX_CITED_LIGHT) == 7000       # 5 per seed
+    assert budget_for(43_762, MAX_CITED_LIGHT) == 20_000   # capped, metadata fetch stays in guard
+
+
+def test_a_query_seeds_own_references_survive_ten_thousand_bridge_seeds():
+    """wg4's shape. The gold sits in ONE query seed's references, cited once,
+    while 6,000 textbooks are cited nine times each by the bridge seeds. Under
+    the old global vote it was nowhere near the 5,000 cut; a query seed now
+    takes ten of its own whatever k works out to."""
+    by_seed, cited, kind, order = {}, Counter(), {}, []
+    for q in range(1200):
+        refs = [f"Q{q}_{j}" for j in range(40)]
+        by_seed[f"QS{q}"] = refs
+        kind[f"QS{q}"] = "query"
+        order.append(f"QS{q}")
+        for p in refs:
+            cited[p] += 1
+    by_seed["QS0"] = ["GOLD_A", "GOLD_B"] + by_seed["QS0"]
+    cited["GOLD_A"] = cited["GOLD_B"] = 1
+    for b in range(9000):
+        refs = [f"TEXTBOOK{(b + j) % 6000}" for j in range(6)]
+        by_seed[f"BS{b}"] = refs
+        kind[f"BS{b}"] = "bridge"
+        order.append(f"BS{b}")
+        for p in refs:
+            cited[p] += 1
+
+    from patent_analyzer.agentic.expand import MAX_CITED_LIGHT, budget_for
+    budget = budget_for(len(by_seed), MAX_CITED_LIGHT)
+    new, info = _per_seed(by_seed, cited, set(), {}, budget, order=order, kind=kind)
+    assert budget == 20_000 and info["per_seed_k"] == 3
+    assert {"GOLD_A", "GOLD_B"} <= set(new), "a query seed's own references must survive"
+    old_rank = min(i for i, (p, _) in enumerate(cited.most_common()) if p.startswith("GOLD"))
+    assert old_rank > 5000, f"gold ranked {old_rank} globally — the old rule would have kept it"

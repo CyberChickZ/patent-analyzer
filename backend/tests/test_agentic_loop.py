@@ -44,7 +44,7 @@ def test_loop_rounds_and_budget(monkeypatch):
     monkeypatch.setattr(L.gp, "search", fake_gp)
     monkeypatch.setattr(L.gp, "is_blocked", lambda: False)
 
-    async def fake_expand(seeds, known, max_cited=200, before=None):
+    async def fake_expand(seeds, known, max_cited=200, before=None, **kw):
         return [_cand("US7", "cited art")], {"cpc_subclasses": {"H04N": 1}}
     monkeypatch.setattr(L, "expand", fake_expand)
 
@@ -101,7 +101,7 @@ def test_loop_removes_post_cutoff_seeds_from_pool(monkeypatch):
     monkeypatch.setattr(L.gp, "search", fake_gp)
     monkeypatch.setattr(L.gp, "is_blocked", lambda: False)
 
-    async def fake_expand(seeds, known, max_cited=200, before=None):
+    async def fake_expand(seeds, known, max_cited=200, before=None, **kw):
         assert before == "20110202"
         return [], {"cpc_subclasses": {}, "seeds_after_cutoff": ["US2"]}
     monkeypatch.setattr(L, "expand", fake_expand)
@@ -125,7 +125,7 @@ def test_mode_walk_never_repeats_a_query(monkeypatch):
     monkeypatch.setattr(L.gp, "search", fake_gp)
     monkeypatch.setattr(L.gp, "is_blocked", lambda: False)
 
-    async def fake_expand(seeds, known, max_cited=200, before=None):
+    async def fake_expand(seeds, known, max_cited=200, before=None, **kw):
         return [], {"cpc_subclasses": {}}
     monkeypatch.setattr(L, "expand", fake_expand)
     _, stats = asyncio.run(L.run_loop(state, lambda: 0, lambda: False, lambda k, m, p=None: None))
@@ -191,7 +191,7 @@ def test_wide_mode_expands_light_from_the_query_hits(monkeypatch):
     monkeypatch.setattr(L.gp, "is_blocked", lambda: False)
     seen = {}
 
-    async def fake_expand(seeds, known, max_cited=200, before=None, light=False, forward=False):
+    async def fake_expand(seeds, known, max_cited=200, before=None, light=False, forward=False, seed_kind=None):
         if "max_cited" not in seen:
             seen.update(seeds=list(seeds), max_cited=max_cited, before=before, light=light)
         c7 = _cand("US7", "cited art")
@@ -279,7 +279,7 @@ def test_wide_mode_react_drives_the_queries(monkeypatch):
     monkeypatch.setattr(L.gp, "search", fake_gp)
     monkeypatch.setattr(L.gp, "is_blocked", lambda: False)
 
-    async def fake_expand(seeds, known, max_cited=200, before=None, light=False, forward=False):
+    async def fake_expand(seeds, known, max_cited=200, before=None, light=False, forward=False, seed_kind=None):
         return [], {"cpc_subclasses": {}, "seeds_after_cutoff": []}
     monkeypatch.setattr(L, "expand", fake_expand)
 

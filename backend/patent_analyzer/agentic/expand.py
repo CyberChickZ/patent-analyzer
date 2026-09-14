@@ -27,10 +27,24 @@ def _after(meta: dict, cutoff: str | None) -> bool:
 
 PER_SEED_MIN = int(__import__("os").environ.get("EXPAND_PER_SEED_MIN", "3"))
 PER_SEED_MAX = int(__import__("os").environ.get("EXPAND_PER_SEED_MAX", "50"))
+# The budget has to grow with the seed set or a per-seed split is theatre: 5,000 slots shared by
+# 43,762 seeds is one document each for the first 5,000 and nothing for the rest (leader/Harry,
+# 2026-09-19). 5 per seed, floored at the old 5,000 so small jobs are unchanged and capped at
+# 20,000 so the metadata fetch stays inside its 15 GiB guard.
+BUDGET_PER_SEED = int(__import__("os").environ.get("EXPAND_BUDGET_PER_SEED", "5"))
+BUDGET_MAX = int(__import__("os").environ.get("EXPAND_BUDGET_MAX", "20000"))
+# A query's own hit is a better place to walk from than the eight-thousandth bridge patent, so it
+# gets a deeper slice of its own references.
+K_BY_KIND = {"query": 10, "bridge": 3, "lens": 3}
+
+
+def budget_for(n_seeds: int, floor: int) -> int:
+    return max(floor, min(BUDGET_MAX, BUDGET_PER_SEED * max(1, n_seeds)))
 
 
 def _per_seed(by_seed: dict[str, list[str]], cited: "Counter", known: set[str],
-              meta: dict, max_cited: int, order: list[str] | None = None) -> tuple[list[str], dict]:
+              meta: dict, max_cited: int, order: list[str] | None = None,
+              kind: dict[str, str] | None = None) -> tuple[list[str], dict]:
     """Give every seed a share of the expansion instead of one global vote.
 
     The old rule was `cited.most_common()[:max_cited]` — the documents cited by
@@ -78,13 +92,14 @@ def _per_seed(by_seed: dict[str, list[str]], cited: "Counter", known: set[str],
     if not seeds:
         return [], {"per_seed_k": 0, "per_seed_seeds": 0}
     k = max(PER_SEED_MIN, min(PER_SEED_MAX, -(-max_cited // len(seeds))))
+    kind = kind or {}
     queues: list[list[str]] = []
     for s in seeds:
         fresh = [p for p in dict.fromkeys(by_seed[s]) if p not in known and p not in meta]
         fresh.sort(key=lambda p: -cited[p])
-        queues.append(fresh[:k])
+        queues.append(fresh[:max(k, K_BY_KIND.get(kind.get(s, ""), 0))])
     out, seen, served = [], set(), set()
-    for i in range(k):                                   # round robin: no seed is dropped whole
+    for i in range(max([k] + [len(q) for q in queues] or [k])):   # round robin: no seed dropped whole
         for s, q in zip(seeds, queues):
             if i < len(q) and q[i] not in seen and len(out) < max_cited:
                 seen.add(q[i])
@@ -96,7 +111,8 @@ def _per_seed(by_seed: dict[str, list[str]], cited: "Counter", known: set[str],
 
 
 async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CITED_PER_ROUND,
-                 before: str | None = None, light: bool = False, forward: bool = False) -> tuple[list[Candidate], dict]:
+                 before: str | None = None, light: bool = False, forward: bool = False,
+                 seed_kind: dict[str, str] | None = None) -> tuple[list[Candidate], dict]:
     """Returns (new candidates from citations, info) where info has the
     seeds' family ids, CPC subclass counts and BQ stats. Seeds and cited
     documents with priority_date >= `before` (YYYYMMDD) are dropped.
@@ -147,7 +163,7 @@ async def expand(seed_pubs: list[str], known: set[str], max_cited: int = MAX_CIT
                     by_seed.setdefault(_canon(s), []).append(pub)
         info["forward_total"] = sum(len(v) for v in fwd.values())
     info["cited_total"] = len(cited)
-    new, alloc = _per_seed(by_seed, cited, known, meta, max_cited, order=seeds)
+    new, alloc = _per_seed(by_seed, cited, known, meta, max_cited, order=seeds, kind=seed_kind)
     info["cited_new"] = len(new)
     info.update(alloc)
     kept = set(new)
