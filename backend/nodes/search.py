@@ -40,6 +40,63 @@ _PDF_DOWNLOAD_BUDGET_S = float(os.environ.get("PDF_DOWNLOAD_BUDGET_S", "300"))
 BQ_KEYWORD_CHANNEL = os.environ.get("BQ_KEYWORD_CHANNEL", "0") == "1"
 
 
+def google_patents_health(loop_stats: dict) -> dict:
+    """Google Patents direct, as a row of its own.
+
+    The channel is not in `channel_specs` — it lives inside the agentic loop,
+    which tries it first and falls back to SerpAPI when it is refused — so the
+    report had no way of saying whether it worked at all. On Cloud Run that is
+    the difference between a thin search and a broken one.
+
+    Measured from us-west1 on 2026-09-19 at 01:38Z and 02:00Z: **0 of 100**
+    direct requests were answered — two runs of fifty, one second and four
+    seconds apart, HTTP 503 with Google's "Sorry" page on the very first
+    request of each run — while the same query issued from a laptop returned
+    200 in the same minute. The egress is what Google refuses, not the code.
+
+    The status is nevertheless read off what *this job* got, never off that
+    measurement. Three hours after it, job 99a35c00 had three of its five
+    direct queries answered from this same service (300 hits, real
+    total_num_results, and metering counted five HTTP requests for five
+    attempts, so none of it came from cache). The block comes and goes. A row
+    that hardcoded "unavailable on Cloud Run" would be wrong about as often as
+    it was right, and a report that is confidently wrong is worth less than no
+    report.
+    """
+    rounds = loop_stats.get("rounds") or []
+    if rounds:
+        calls = sum(int(r.get("gp_calls") or 0) for r in rounds)
+        blocked = sum(int(r.get("gp_blocked") or 0) for r in rounds)
+    else:                                   # a truncated loop carries them flat
+        calls = int(loop_stats.get("gp_calls") or 0)
+        blocked = int(loop_stats.get("gp_blocked") or 0)
+    answered = max(0, calls - blocked)
+    on_cloud = bool(os.environ.get("K_SERVICE"))
+    cloud_note = ("Google refuses this service's egress: measured 0 of 100 direct requests "
+                  "from us-west1 on 2026-09-19 (2×50, 1 s and 4 s apart, 503 + Sorry on the "
+                  "first request each time) against 200 from a laptop the same minute")
+    if calls and answered == 0 and on_cloud:
+        status, detail = "retired(cloud)", (
+            f"unavailable on Cloud Run — {blocked} of {calls} direct requests refused. "
+            f"{cloud_note}. The loop falls back to SerpAPI; patents still arrive, "
+            "but not from this channel.")
+    elif calls and answered == 0:
+        # A laptop can be blocked too, and it is a different fact from the one
+        # above: nothing about this service's egress follows from it.
+        status, detail = "blocked", f"all {calls} direct requests were refused by Google"
+    elif blocked and answered:
+        status, detail = "limited", (
+            f"{answered} of {calls} direct queries answered, {blocked} refused"
+            + (f" — {cloud_note}, so on Cloud Run this channel comes and goes" if on_cloud else "")
+            + ". The loop fell back to SerpAPI for the rest.")
+    elif calls == 0:
+        status, detail = "empty", "no direct query was issued (the loop had no budget for one)"
+    else:
+        status, detail = "ok", f"all {calls} direct queries answered"
+    return {"channel": "google_patents", "status": status, "n": answered, "seconds": 0.0,
+            "detail": detail, "errors": [], "attempted": calls, "refused": blocked}
+
+
 def salvage_timed_out_loop(partial: dict, timeout_s: float) -> tuple[list, dict]:
     """What the agentic loop had found by the time its deadline cancelled it.
 
@@ -304,6 +361,8 @@ async def search_node(state: GraphState) -> dict:
                                "detail": (limited[0][:200] if limited else
                                           (str(errs[0].get("error", ""))[:200] if errs and not cands else "")),
                                "errors": [str(e.get("error", ""))[:160] for e in errs[:5]]})
+    channel_health.append(google_patents_health(loop_stats))
+
     if not BQ_KEYWORD_CHANNEL:
         # A channel that is absent from the report and a channel that returned
         # nothing look the same to a reader. Say which one this is.
