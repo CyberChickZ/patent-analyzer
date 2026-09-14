@@ -55,3 +55,11 @@ tenacity==9.1.4
 # Optional at runtime: app/email_notify.py falls back to plain-text-only mail
 # when it is missing. Pinned here so the deployed image sends the HTML part.
 markdown==3.10.3
+
+# Open-access full-text downloads speak Chrome's TLS/HTTP2 fingerprint.
+# Measured 2026-09-19 (N7b) on one Unpaywall-confirmed open-access article per
+# host: urllib with any User-Agent got 403 from www.jbc.org and dl.acm.org,
+# curl_cffi with impersonate="chrome" got the PDF from both. Optional in code —
+# patent_analyzer/fulltext_sources.py falls back to urllib on ImportError — but
+# pinned here so the deployed image has it.
+curl_cffi==0.14.0
