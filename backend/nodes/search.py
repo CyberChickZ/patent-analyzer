@@ -694,6 +694,10 @@ async def search_node(state: GraphState) -> dict:
             doc["fulltext_download"] = got["fulltext_download"]
             doc["fulltext_detail"] = got["fulltext_detail"]
             doc["fulltext_source"] = got["fulltext_source"]
+            # The plan is scaffolding for one acquisition, not state: leaving it
+            # on the document would push a dozen dicts per paper into the
+            # checkpoint for nothing.
+            doc.pop("fulltext_plan", None)
             if got["pdf"]:
                 (job_dir / fname).write_bytes(got["pdf"])
                 doc["local_pdf"] = str(job_dir / fname)
