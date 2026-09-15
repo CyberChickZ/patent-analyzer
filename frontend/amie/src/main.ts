@@ -1,6 +1,6 @@
 import "./style.css";
 import { loadConfig, isDevMode } from "./api";
-import { login, logout, onAuth, isDeveloper } from "./auth";
+import { login, logout, onAuth, isDeveloper, authErrorMessage } from "./auth";
 import * as theme from "./theme";
 import { closeModal, esc } from "./ui";
 import { renderSubmit } from "./pages/submit";
@@ -139,7 +139,7 @@ async function boot(): Promise<void> {
       b.className = "btn btn-sm";
       b.textContent = "Sign in";
       b.addEventListener("click", async () => {
-        try { await login(); } catch (e: any) { alert(e?.message || "Login failed"); }
+        try { await login(); } catch (e: any) { alert(authErrorMessage(e)); }
       });
       authSlot.appendChild(b);
       view.innerHTML = `<div class="empty" style="margin-top:3rem">
