@@ -657,35 +657,70 @@ async def search_node(state: GraphState) -> dict:
     for i, doc in enumerate(ranked):
         if (doc.get("claims_text") or "").strip():
             doc["fulltext_download"] = "not_needed"
+    paper_ids = {id(doc) for _, doc in papers}
     for i, doc in need_pdf[:MAX_DOWNLOADS]:
+        if _time.monotonic() - dl_t0 > _PDF_DOWNLOAD_BUDGET_S:
+            dl_skipped += 1
+            doc["fulltext_download"] = "skipped_budget"
+            continue
+        fname = f"prior_art_{i:03d}.pdf"
+        # GCS, keyed by DOI, is shared across jobs: the same examiner-cited
+        # paper comes back run after run, and the second run should not ask the
+        # publisher again.
+        doi = doc.get("doi") or ft_oa.normalise_doi(doc.get("pub_num") or "")
+        try:
+            cached = await asyncio.to_thread(ft_oa.cache_get, doi) if doi else None
+            if cached:
+                (job_dir / fname).write_bytes(cached)
+                doc["local_pdf"] = str(job_dir / fname)
+                doc["fulltext_download"] = "cached"
+                dl_cached += 1
+                download_count += 1
+                continue
+        except Exception:
+            pass
+
+        if id(doc) in paper_ids:
+            # Papers walk the whole open-access plan: repository copy, then the
+            # APIs that publish full text for programmatic use, and only then
+            # the publisher's own copy. `acquire` reports what actually came
+            # back, which is a different question from which tier resolved.
+            try:
+                got = await ft_oa.acquire(doc, doc)
+            except Exception as exc:
+                got = {"pdf": None, "text": "", "fulltext_download": "failed",
+                       "fulltext_source": "", "attempts": [],
+                       "fulltext_detail": f"{type(exc).__name__}: {exc}"[:200]}
+            doc["fulltext_download"] = got["fulltext_download"]
+            doc["fulltext_detail"] = got["fulltext_detail"]
+            doc["fulltext_source"] = got["fulltext_source"]
+            if got["pdf"]:
+                (job_dir / fname).write_bytes(got["pdf"])
+                doc["local_pdf"] = str(job_dir / fname)
+                download_count += 1
+                if doi:
+                    await asyncio.to_thread(ft_oa.cache_put, doi, got["pdf"])
+            elif got["text"]:
+                doc["oa_full_text"] = got["text"]
+                download_count += 1
+            elif got["fulltext_download"] == "no_url":
+                dl_no_url += 1
+            else:
+                dl_failed += 1
+            continue
+
         pdf_url = doc.get("fulltext_url") or recall_pool.resolve_pdf_url(doc)
         if not pdf_url:
             dl_no_url += 1
             doc["fulltext_download"] = "no_url"
             continue
-        if _time.monotonic() - dl_t0 > _PDF_DOWNLOAD_BUDGET_S:
-            dl_skipped += 1
-            doc["fulltext_download"] = "skipped_budget"
-            continue
         try:
-            fname = f"prior_art_{i:03d}.pdf"
-            # GCS, keyed by DOI, is shared across jobs: the same examiner-cited
-            # paper comes back run after run, and the second run should not ask
-            # the publisher again.
-            doi = doc.get("doi") or ft_oa.normalise_doi(doc.get("pub_num") or "")
-            local = None
-            cached = await asyncio.to_thread(ft_oa.cache_get, doi) if doi else None
-            if cached:
-                (job_dir / fname).write_bytes(cached)
-                local = str(job_dir / fname)
-                dl_cached += 1
-            else:
-                local = await asyncio.to_thread(download_pdf, pdf_url, job_dir, fname)
-                if local and doi:
-                    await asyncio.to_thread(ft_oa.cache_put, doi, Path(local).read_bytes())
+            local = await asyncio.to_thread(download_pdf, pdf_url, job_dir, fname)
+            if local and doi:
+                await asyncio.to_thread(ft_oa.cache_put, doi, Path(local).read_bytes())
             if local:
                 doc["local_pdf"] = local
-                doc["fulltext_download"] = "cached" if cached else "ok"
+                doc["fulltext_download"] = "ok"
                 download_count += 1
             else:
                 dl_failed += 1
