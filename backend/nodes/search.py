@@ -752,7 +752,10 @@ async def search_node(state: GraphState) -> dict:
     # loop alone brought back (5).
     epmc_n = 0
     for _, doc in papers:
-        if doc.get("local_pdf") or not doc.get("doi"):
+        # `acquire` already tried NCBI's BioC API, which covers the same
+        # open-access articles; a paper that came back from there must not be
+        # fetched again from Europe PMC and have its text overwritten.
+        if doc.get("local_pdf") or doc.get("oa_full_text") or not doc.get("doi"):
             continue
         if _time.monotonic() - dl_t0 > _PDF_DOWNLOAD_BUDGET_S:
             break
