@@ -1,4 +1,4 @@
-import { listJobs, submitJob, deleteJob, type JobSummary } from "../api";
+import { listJobs, submitJob, deleteJob, isNotSignedIn, type JobSummary } from "../api";
 import { esc, pill, fmtDate, errorBox, empty, on } from "../ui";
 import { PAUSE_ORDER, PAUSE_LABEL } from "../phases";
 import { loadQuota, jobCostRange, perM, quotaNote, upcomingBlock, EMDASH, type Quota } from "../pricing";
@@ -217,7 +217,9 @@ async function loadJobs(): Promise<void> {
   try {
     jobs = await listJobs();
   } catch (e: any) {
-    host.innerHTML = errorBox(`Could not load jobs — ${e?.message || e}`);
+    host.innerHTML = isNotSignedIn(e)
+      ? empty("请先登录", "登录后这里会列出你提交过的分析任务。")
+      : errorBox(`Could not load jobs — ${e?.message || e}`);
     return;
   }
   if (!jobs.length) {

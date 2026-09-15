@@ -76,11 +76,27 @@ export async function loadConfig(): Promise<{ dev: boolean }> {
   return { dev: false };
 }
 
+/** Thrown instead of sending a request that has no token to send.
+ *  Without it every page fired its fetches on the login screen, got 401 back
+ *  and left its own spinner running — "Recent jobs · Loading…" forever
+ *  (Harry, 2026-09-19, cloud login screen). */
+export class NotSignedIn extends Error {
+  constructor() {
+    super("请先登录：这一页的数据要登录后才能读。");
+    this.name = "NotSignedIn";
+  }
+}
+
+export function isNotSignedIn(e: unknown): boolean {
+  return (e as any)?.name === "NotSignedIn";
+}
+
 async function req(url: string, options: RequestInit = {}): Promise<Response> {
   const headers = new Headers(options.headers);
   if (!devMode) {
     const token = await getToken();
-    if (token) headers.set("X-Firebase-Token", token);
+    if (!token) throw new NotSignedIn();
+    headers.set("X-Firebase-Token", token);
   }
   return fetch(url, { ...options, headers });
 }
