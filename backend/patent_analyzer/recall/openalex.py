@@ -210,14 +210,25 @@ async def backfill_dois(cands: list, cap: int = 60) -> dict:
 
     A match counts only when the returned title is the same title — OpenAlex
     will happily return its closest work for a query that matches nothing, and
-    a wrong DOI is worse than none.
+    a wrong DOI is worse than none: it points the full-text fetch, the shared
+    GCS cache and the manual-download list at the wrong paper at once.
+
+    Title equality on one source is not enough for that, so a *substring* match
+    (the loose case, where OpenAlex's title merely contains ours or vice versa)
+    is only accepted when Crossref independently returns the same DOI for the
+    same title. Exact title equality is accepted on OpenAlex alone. Crossref is
+    free and cached, so the cross-check costs one request on the uncertain rows
+    and nothing on the certain ones. (N7b, 2026-09-19, on paper-fetch's
+    two-source pattern.)
     """
     from ..cache import kv
     from ..runtime_state import SerialLock
+    from ..fulltext_sources import crossref_doi_for_title
     todo = [c for c in cands
             if getattr(c, "match_type", "") != "Patent" and not getattr(c, "doi", "")
             and len(_title_key(getattr(c, "title", ""))) > 20][:cap]
-    out = {"asked": 0, "filled": 0, "cached": 0, "mismatched": 0}
+    out = {"asked": 0, "filled": 0, "cached": 0, "mismatched": 0,
+           "cross_confirmed": 0, "cross_rejected": 0}
     if not todo:
         return out
     store = kv()
@@ -240,8 +251,16 @@ async def backfill_dois(cands: list, cap: int = 60) -> dict:
                 r = (data.get("results") or [{}])[0]
                 got = _title_key(r.get("title") or "")
                 want = _title_key(c.title)
-                if got and (got == want or (len(got) > 30 and (got in want or want in got))):
-                    doi = (r.get("doi") or "").replace("https://doi.org/", "")
+                cand = (r.get("doi") or "").replace("https://doi.org/", "").lower()
+                if got and got == want:
+                    doi = cand
+                elif got and cand and len(got) > 30 and (got in want or want in got):
+                    # Loose match: make Crossref agree before believing it.
+                    other = await crossref_doi_for_title(c.title)
+                    if other and other == cand:
+                        doi, out["cross_confirmed"] = cand, out["cross_confirmed"] + 1
+                    else:
+                        out["cross_rejected"] += 1
                 elif got:
                     out["mismatched"] += 1
             store.put("recall", key, {"doi": doi})

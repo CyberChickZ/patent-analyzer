@@ -163,8 +163,55 @@ def test_doi_backfill_fills_only_empty_dois_and_rejects_a_different_title():
     import patent_analyzer.cache as _cache
     with mock.patch.object(oa, "_get", fake_get), mock.patch.object(_cache, "kv", lambda: _Mem()):
         out = asyncio.run(oa.backfill_dois(cands))
-    assert out == {"asked": 2, "filled": 1, "cached": 0, "mismatched": 1}
+    assert out == {"asked": 2, "filled": 1, "cached": 0, "mismatched": 1,
+                   "cross_confirmed": 0, "cross_rejected": 0}
     assert cands[0].doi == "10.1/right"
     assert cands[1].doi == ""            # different title -> rejected
     assert cands[2].doi == "10.5/keep"   # never overwritten
     assert cands[3].doi == ""            # patents are not asked about
+
+
+def test_a_loose_title_match_needs_crossref_to_agree_before_it_is_believed():
+    """A wrong DOI is worse than no DOI: it points the full-text fetch, the
+    shared GCS cache and the manual-download list at the wrong paper at once.
+    Exact title equality is enough on OpenAlex alone; a substring match is not,
+    so Crossref has to return the same DOI for the same title (N7b, on
+    paper-fetch's two-source pattern)."""
+    import asyncio
+    from unittest import mock
+    from patent_analyzer.recall import openalex as oa
+    from patent_analyzer.recall.pool import Candidate
+
+    async def fake_get(client, url, params, *a, **k):
+        # OpenAlex answers with a longer title that *contains* the asked one.
+        return {"results": [{"title": "CO-FISH strand orientation in mouse cells",
+                             "doi": "https://doi.org/10.1/loose"}]}, None
+
+    class _Mem:
+        def __init__(self):
+            self.d = {}
+
+        def get(self, ns, key, max_age_days=None):
+            return self.d.get((ns, key))
+
+        def put(self, ns, key, value):
+            self.d[(ns, key)] = value
+
+    import patent_analyzer.cache as _cache
+    import patent_analyzer.fulltext_sources as fs
+
+    async def agree(title):
+        return "10.1/loose"
+
+    async def disagree(title):
+        return "10.9/something-else"
+
+    for confirm, want_doi, key in ((agree, "10.1/loose", "cross_confirmed"),
+                                   (disagree, "", "cross_rejected")):
+        cands = [Candidate(title="CO-FISH strand orientation", match_type="Paper")]
+        with mock.patch.object(oa, "_get", fake_get), \
+             mock.patch.object(_cache, "kv", lambda: _Mem()), \
+             mock.patch.object(fs, "crossref_doi_for_title", confirm):
+            out = asyncio.run(oa.backfill_dois(cands))
+        assert cands[0].doi == want_doi
+        assert out[key] == 1
