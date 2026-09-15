@@ -75,6 +75,7 @@ import urllib.request
 import certifi
 
 from . import metering
+from . import fulltext_sources as fs
 from .cache import kv
 from .runtime_state import PeriodQuota, SerialLock, day_key
 
@@ -152,23 +153,70 @@ def doi_slug(doi: str) -> str:
 
 # ── Unpaywall ────────────────────────────────────────────────────────────────
 
-def oa_url_from_unpaywall(payload: dict | None) -> tuple[str, str]:
-    """(url, host_type) of the best open-access copy, or ("", "").
+# A repository copy is the same article without bot management in front of it,
+# so it is tried before the publisher's own copy. Measured 2026-09-19 (N7b): of
+# the five publisher hosts N7 called a wall, two answered a Chrome-fingerprinted
+# client with the PDF and three put a JS challenge in the way — while the
+# repository copies of the same articles (PMC through NCBI's BioC API) came back
+# over plain HTTP. An unknown host_type sorts last because there is nothing to
+# justify preferring it.
+HOST_RANK = {"repository": 0, "publisher": 2}
+_UNKNOWN_HOST_RANK = 3
+_KEY_RANK = {"url_for_pdf": 0, "url": 1, "url_for_landing_page": 2}
 
-    Measured 2026-09-18 on 10.1038/nature14539: `is_oa` is true and
-    `best_oa_location.host_type` is "repository", yet `url_for_pdf` is null.
-    Reading only `url_for_pdf` therefore throws away real open-access copies —
-    fall through to `url` and `url_for_landing_page`, and if the best location
-    offers neither, try the other `oa_locations`.
+# Hosts that are repositories even when the field does not say so — used to rank
+# the PDF URL a search channel put on the candidate, which carries no host_type.
+_REPO_HOST_RE = re.compile(
+    r"(arxiv\.org|biorxiv\.org|medrxiv\.org|chemrxiv\.org|osti\.gov|zenodo\.org|"
+    r"ssrn\.com|hal\.science|escholarship\.org|repec\.org|europepmc\.org|"
+    r"ncbi\.nlm\.nih\.gov|\.edu(/|$)|repository|eprints|dspace|scholarworks)", re.I)
+
+
+def is_repository_url(url: str) -> bool:
+    return bool(_REPO_HOST_RE.search(url or ""))
+
+
+def oa_locations_ordered(payload: dict | None) -> list[dict]:
+    """Every open-access copy Unpaywall knows, repositories first.
+
+    Two measured facts shape the order. (1) 10.1038/nature14539: `is_oa` true,
+    `best_oa_location.host_type` "repository", `url_for_pdf` **null** — reading
+    only `url_for_pdf` throws away a real copy, so `url` and
+    `url_for_landing_page` are kept as fallbacks. (2) N7b: publisher hosts are
+    where the bot management is; repository hosts are not. So the sort is
+    host_type first, and only then PDF-before-landing-page inside a host class.
+
+    Returns [{"url", "host_type", "kind"}] with duplicates removed.
     """
     if not payload or not payload.get("is_oa"):
-        return "", ""
+        return []
     locs = [payload.get("best_oa_location")] + list(payload.get("oa_locations") or [])
-    for key in ("url_for_pdf", "url", "url_for_landing_page"):
-        for loc in locs:
-            if isinstance(loc, dict) and loc.get(key):
-                return str(loc[key]), str(loc.get("host_type") or "")
-    return "", ""
+    rows = []
+    for i, loc in enumerate(locs):
+        if not isinstance(loc, dict):
+            continue
+        host = str(loc.get("host_type") or "")
+        for key in ("url_for_pdf", "url", "url_for_landing_page"):
+            if loc.get(key):
+                rank = HOST_RANK.get(host, _UNKNOWN_HOST_RANK)
+                if rank == _UNKNOWN_HOST_RANK and is_repository_url(str(loc[key])):
+                    rank, host = 0, host or "repository"
+                rows.append({"url": str(loc[key]), "host_type": host, "kind": key,
+                             "_sort": (rank, _KEY_RANK[key], i)})
+    rows.sort(key=lambda r: r["_sort"])
+    out, seen = [], set()
+    for r in rows:
+        if r["url"] in seen:
+            continue
+        seen.add(r["url"])
+        out.append({"url": r["url"], "host_type": r["host_type"], "kind": r["kind"]})
+    return out
+
+
+def oa_url_from_unpaywall(payload: dict | None) -> tuple[str, str]:
+    """(url, host_type) of the copy to try first, or ("", "")."""
+    rows = oa_locations_ordered(payload)
+    return (rows[0]["url"], rows[0]["host_type"]) if rows else ("", "")
 
 
 async def unpaywall(doi: str) -> tuple[dict | None, str | None]:
@@ -333,40 +381,217 @@ def _landing_page(doc: dict, doi: str) -> str:
     return f"https://doi.org/{doi}" if doi else ""
 
 
-async def resolve(doc: dict, use_unpaywall: bool = True) -> dict:
-    """Best open-access PDF URL for one paper-shaped doc dict.
+def build_plan(doc: dict, doi: str, payload: dict | None) -> list[dict]:
+    """The ordered list of things to try for one paper, cheapest and least
+    contentious first.
 
-    Returns {"fulltext_tier", "fulltext_url", "landing_page", "doi",
-    "fulltext_detail"} — a patch, so callers stay clear of in-place mutation of
-    graph state. The chain is arXiv, then what OpenAlex/Semantic Scholar
-    already told us, then Unpaywall, then abstract_only.
+        arXiv -> repository copy -> BioC-PMC -> preprint server ->
+        Crossref TDM -> publisher copy -> abstract-only
+
+    The point of the order is that the parties who publish full text *for
+    programmatic use* are asked before the parties who put bot management in
+    front of it. Putting the publisher first — which is what the previous chain
+    did, by reading `url_for_pdf` out of whichever location happened to have one
+    — meant the hard cases were attempted first and the easy ones never.
+
+    Steps with no `url` are handled by a named fetcher in `acquire()` (BioC-PMC
+    returns text, not a file). Steps whose URL can only be discovered by asking
+    (Crossref TDM, `citation_pdf_url`, CORE, Wayback) are marked `lazy` and cost
+    nothing unless everything before them failed.
     """
-    doi = normalise_doi(doc.get("doi") or doc.get("pub_num") or "")
+    plan: list[dict] = []
     aid = arxiv_id_of(doc.get("arxiv_id"), doc.get("pub_num"),
                       _known_pdf_url(doc), doc.get("url"))
-    out = {"doi": doi, "landing_page": _landing_page(doc, doi)}
-
     if aid:
-        return {**out, "fulltext_tier": "arxiv", "fulltext_url": arxiv_pdf_url(aid),
-                "fulltext_detail": f"arXiv:{aid}"}
+        plan.append({"source": "arxiv", "url": arxiv_pdf_url(aid), "tier": "arxiv",
+                     "detail": f"arXiv:{aid}"})
 
     known = _known_pdf_url(doc)
-    if known:
-        return {**out, "fulltext_tier": "oa", "fulltext_url": known,
-                "fulltext_detail": "open-access URL from OpenAlex/Semantic Scholar"}
+    known_is_repo = bool(known) and is_repository_url(known)
+    if known_is_repo:
+        plan.append({"source": "repository", "url": known, "tier": "oa",
+                     "detail": "repository PDF from OpenAlex/Semantic Scholar"})
 
-    if use_unpaywall and doi:
+    rows = oa_locations_ordered(payload)
+    for r in rows:
+        if r["host_type"] == "repository":
+            plan.append({"source": "repository", "url": r["url"], "tier": "oa",
+                         "detail": f"Unpaywall repository copy ({r['kind']})"})
+
+    if doi:
+        plan.append({"source": "bioc_pmc", "tier": "oa",
+                     "detail": "NCBI BioC API (PubMed Central open-access subset)"})
+
+    pre = fs.preprint_pdf_url(doi, f"{doc.get('venue', '')} {doc.get('journal', '')}")
+    if pre:
+        plan.append({"source": "preprint", "url": pre, "tier": "oa",
+                     "detail": "bioRxiv/medRxiv direct PDF"})
+    if doi.startswith("10.26434/"):
+        plan.append({"source": "chemrxiv", "tier": "oa", "lazy": True,
+                     "detail": "ChemRxiv (Cambridge Open Engage API)"})
+    if doi.startswith("10.7554/elife."):
+        plan.append({"source": "elife", "tier": "oa", "lazy": True,
+                     "detail": "eLife article API"})
+
+    if doi:
+        plan.append({"source": "crossref_tdm", "tier": "oa", "lazy": True,
+                     "detail": "Crossref link[] marked intended-application: text-mining"})
+
+    if known and not known_is_repo:
+        plan.append({"source": "publisher", "url": known, "tier": "oa",
+                     "detail": "publisher PDF from OpenAlex/Semantic Scholar"})
+    for r in rows:
+        if r["host_type"] != "repository":
+            plan.append({"source": "publisher", "url": r["url"], "tier": "oa",
+                         "detail": f"Unpaywall {r['host_type'] or 'unknown host'} copy ({r['kind']})"})
+
+    if doi:
+        plan.append({"source": "citation_pdf_url", "tier": "oa", "lazy": True,
+                     "detail": "citation_pdf_url meta tag on the landing page"})
+        plan.append({"source": "core", "tier": "oa", "lazy": True,
+                     "detail": "CORE aggregator"})
+        plan.append({"source": "wayback", "tier": "oa", "lazy": True,
+                     "detail": "Internet Archive snapshot"})
+        plan.append({"source": "wiley_tdm", "tier": "oa", "lazy": True,
+                     "detail": "Wiley TDM API (needs WILEY_TDM_TOKEN)"})
+        plan.append({"source": "elsevier_tdm", "tier": "oa", "lazy": True,
+                     "detail": "Elsevier article API (needs ELSEVIER_TDM_KEY)"})
+    return plan
+
+
+async def resolve(doc: dict, use_unpaywall: bool = True) -> dict:
+    """Best open-access copy for one paper-shaped doc dict.
+
+    Returns {"fulltext_tier", "fulltext_url", "landing_page", "doi",
+    "fulltext_detail", "fulltext_source", "fulltext_plan"} — a patch, so callers
+    stay clear of in-place mutation of graph state.
+
+    `fulltext_tier` is how far *resolution* got and `fulltext_url` is the first
+    thing worth trying; neither is a claim that anything was read. `acquire()`
+    is what actually reads, and `fulltext_download` is what it reports. Keeping
+    the two apart is the whole point: on the 17 examiner-cited NPL gold, 6
+    resolved and 0 returned a PDF under the original chain.
+    """
+    doi = normalise_doi(doc.get("doi") or doc.get("pub_num") or "")
+    out = {"doi": doi, "landing_page": _landing_page(doc, doi)}
+
+    payload, err = (None, None)
+    if use_unpaywall and doi and not arxiv_id_of(doc.get("arxiv_id"), doc.get("pub_num"),
+                                                 _known_pdf_url(doc), doc.get("url")):
         payload, err = await unpaywall(doi)
-        url, host = oa_url_from_unpaywall(payload)
-        if url:
-            return {**out, "fulltext_tier": "oa", "fulltext_url": url,
-                    "fulltext_detail": f"Unpaywall ({host or 'unknown host'})"}
-        detail = err or ("Unpaywall: not open access" if payload else "Unpaywall: DOI unknown")
-        return {**out, "fulltext_tier": "abstract_only", "fulltext_url": "",
-                "fulltext_detail": detail}
 
+    plan = build_plan(doc, doi, payload)
+    # Only a step that already *has* a URL counts as resolution. A plan full of
+    # steps that might turn something up (BioC-PMC, Crossref TDM, the Internet
+    # Archive) is not a copy found, and calling it one would be the same
+    # overstating that the tier/download split exists to stop. Those steps stay
+    # in the plan and `acquire()` still runs them — if one of them delivers, it
+    # shows up in `fulltext_download`, which is where it belongs.
+    eager = [s for s in plan if s.get("url")]
+    if eager:
+        first = eager[0]
+        return {**out, "fulltext_tier": first["tier"], "fulltext_url": first["url"],
+                "fulltext_source": first["source"], "fulltext_detail": first["detail"],
+                "fulltext_plan": plan}
+    detail = err or ("Unpaywall: not open access" if payload else
+                     ("Unpaywall: DOI unknown" if doi else "no DOI and no open-access URL"))
+    if plan:
+        detail += f" — {len(plan)} API route(s) still to try"
     return {**out, "fulltext_tier": "abstract_only", "fulltext_url": "",
-            "fulltext_detail": "no DOI and no open-access URL"}
+            "fulltext_source": "", "fulltext_detail": detail, "fulltext_plan": plan}
+
+
+# ── acquisition: the step that decides whether anything was actually read ────
+
+async def _lazy_url(source: str, doc: dict, patch: dict) -> tuple[str, str]:
+    """(url, why-not) for a plan step whose URL has to be asked for."""
+    doi = patch.get("doi", "")
+    if source == "crossref_tdm":
+        links = fs.tdm_links(await fs.crossref_work(doi))
+        return (links[0]["url"], "") if links else ("", "no text-mining link in Crossref")
+    if source == "citation_pdf_url":
+        u = await fs.citation_pdf_url(patch.get("landing_page", ""))
+        return (u, "") if u else ("", "no citation_pdf_url on the landing page")
+    if source == "core":
+        return await fs.core_pdf_url(doi)
+    if source == "wayback":
+        return await fs.wayback_snapshot(patch.get("fulltext_url")
+                                         or patch.get("landing_page", ""))
+    if source == "chemrxiv":
+        u = await fs.chemrxiv_pdf_url(doi)
+        return (u, "") if u else ("", "not found on ChemRxiv")
+    if source == "elife":
+        u = await fs.elife_pdf_url(doi)
+        return (u, "") if u else ("", "not found in the eLife API")
+    return "", f"no fetcher for {source}"
+
+
+async def acquire(doc: dict, patch: dict, max_steps: int = 14) -> dict:
+    """Walk the plan until something comes back, and say honestly what came.
+
+    Returns {"pdf": bytes|None, "text": str, "fulltext_download", "fulltext_source",
+    "fulltext_detail", "attempts": [...]}. `fulltext_download` is `ok` for a PDF,
+    `ok_text` for full text through an API, `failed` when every step was tried
+    and none produced anything, `no_url` when there was nothing to try.
+
+    A step counts as a success only when the bytes start with `%PDF` or the text
+    is long enough to be an article. A Cloudflare challenge page served as
+    `application/pdf` has been observed (N7b, onlinelibrary.wiley.com), so the
+    content type is never the evidence.
+    """
+    attempts: list[dict] = []
+    plan = patch.get("fulltext_plan") or []
+    if not plan:
+        return {"pdf": None, "text": "", "fulltext_download": "no_url",
+                "fulltext_source": "", "fulltext_detail": patch.get("fulltext_detail", ""),
+                "attempts": attempts}
+
+    for step in plan[:max_steps]:
+        src = step["source"]
+        if src == "bioc_pmc":
+            text, why = await fs.bioc_pmc_text(patch.get("doi", ""))
+            attempts.append({"source": src, "ok": bool(text), "detail": why or f"{len(text)} chars"})
+            if text:
+                return {"pdf": None, "text": text, "fulltext_download": "ok_text",
+                        "fulltext_source": src, "attempts": attempts,
+                        "fulltext_detail": f"{step['detail']} ({len(text)} chars)"}
+            continue
+        if src == "elsevier_tdm":
+            text, why = await fs.elsevier_tdm_text(patch.get("doi", ""))
+            attempts.append({"source": src, "ok": bool(text), "detail": why or f"{len(text)} chars"})
+            if text:
+                return {"pdf": None, "text": text, "fulltext_download": "ok_text",
+                        "fulltext_source": src, "attempts": attempts,
+                        "fulltext_detail": f"{step['detail']} ({len(text)} chars)"}
+            continue
+        if src == "wiley_tdm":
+            data, why = await fs.wiley_tdm_pdf(patch.get("doi", ""))
+            attempts.append({"source": src, "ok": bool(data), "detail": why})
+            if data:
+                return {"pdf": data, "text": "", "fulltext_download": "ok",
+                        "fulltext_source": src, "attempts": attempts,
+                        "fulltext_detail": f"{step['detail']} ({why})"}
+            continue
+
+        url = step.get("url", "")
+        if not url and step.get("lazy"):
+            url, why = await _lazy_url(src, doc, patch)
+            if not url:
+                attempts.append({"source": src, "ok": False, "detail": why})
+                continue
+        if not url:
+            continue
+        data, why = await fs.get_pdf(url)
+        attempts.append({"source": src, "ok": bool(data), "url": url[:160], "detail": why})
+        if data:
+            return {"pdf": data, "text": "", "fulltext_download": "ok",
+                    "fulltext_source": src, "attempts": attempts,
+                    "fulltext_detail": f"{step['detail']} ({why})"}
+
+    tried = ", ".join(f"{a['source']}: {a['detail']}" for a in attempts[:4])
+    return {"pdf": None, "text": "", "fulltext_download": "failed" if attempts else "no_url",
+            "fulltext_source": "", "attempts": attempts,
+            "fulltext_detail": f"every open-access route failed — {tried}"[:400]}
 
 
 async def resolve_many(docs: list[dict], use_unpaywall: bool = True) -> list[dict]:

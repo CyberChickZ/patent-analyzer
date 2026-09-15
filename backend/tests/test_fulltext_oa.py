@@ -81,14 +81,36 @@ def test_resolve_prefers_arxiv_without_any_network_call(monkeypatch):
 
 
 def test_resolve_uses_the_channel_oa_field_before_unpaywall(monkeypatch):
-    async def _boom(doi):
-        raise AssertionError("an OA URL was already on the candidate")
-    monkeypatch.setattr(ft, "unpaywall", _boom)
+    async def _none(doi):
+        return None, None
+    monkeypatch.setattr(ft, "unpaywall", _none)
     p = asyncio.run(ft.resolve({"pub_num": "10.1145/3292500.3330701",
                                 "pdf_link": "https://oa.example/paper.pdf", "title": "t"}))
     assert p["fulltext_tier"] == "oa"
     assert p["fulltext_url"] == "https://oa.example/paper.pdf"
     assert p["doi"] == "10.1145/3292500.3330701"
+
+
+def test_resolve_still_asks_unpaywall_when_the_channel_url_is_a_publisher_one(monkeypatch):
+    """Changed deliberately on 2026-09-19 (N7b). The chain used to stop at the
+    URL a channel had already put on the candidate, which is almost always the
+    publisher's copy — the one host class that has bot management in front of
+    it. Unpaywall is free and cached, so it is worth one call to find out
+    whether a repository copy of the same article exists, and that copy goes
+    first."""
+    async def _repo(doi):
+        return ({"is_oa": True,
+                 "best_oa_location": {"url_for_pdf": "https://pub.example/a.pdf",
+                                      "host_type": "publisher"},
+                 "oa_locations": [{"url_for_pdf": "https://repo.example/a.pdf",
+                                   "host_type": "repository"}]}, None)
+    monkeypatch.setattr(ft, "unpaywall", _repo)
+    p = asyncio.run(ft.resolve({"pub_num": "10.1145/3292500.3330701",
+                                "pdf_link": "https://publisher.example/paper.pdf", "title": "t"}))
+    assert p["fulltext_url"] == "https://repo.example/a.pdf"
+    assert p["fulltext_source"] == "repository"
+    srcs = [s["source"] for s in p["fulltext_plan"]]
+    assert srcs.index("repository") < srcs.index("publisher")
 
 
 def test_resolve_falls_to_unpaywall_then_abstract_only(monkeypatch):
