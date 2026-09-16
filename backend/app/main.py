@@ -917,7 +917,7 @@ def _job_artifact(job_id: str, name: str, what: str):
 
 
 @app.get("/api/jobs/{job_id}/funnel")
-async def get_funnel(job_id: str, user: dict | None = Depends(optional_auth)):
+async def get_funnel(job_id: str, user: dict = Depends(require_auth)):
     """The per-document search funnel, split out of results.json because it is
     most of its size (job 075b99c1: 12.0 MB of a 20.5 MB file) and almost nobody
     reads it — the Express proxy re-serialises whatever it forwards, so the
@@ -927,7 +927,7 @@ async def get_funnel(job_id: str, user: dict | None = Depends(optional_auth)):
 
 
 @app.get("/api/jobs/{job_id}/usage")
-async def get_usage(job_id: str, user: dict | None = Depends(optional_auth)):
+async def get_usage(job_id: str, user: dict = Depends(require_auth)):
     """Per-phase LLM / external / BigQuery counts for one job.
 
     The job record is the source: app.llm.usage is a process-wide meter, so
@@ -967,7 +967,7 @@ async def get_usage(job_id: str, user: dict | None = Depends(optional_auth)):
 
 
 @app.get("/api/quota")
-async def get_quota(user: dict | None = Depends(optional_auth)):
+async def get_quota(user: dict = Depends(require_auth)):
     """What is left on every external source, in one shape.
 
     Not per job: these counters are shared by every job on the deployment, and

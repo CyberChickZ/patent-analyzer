@@ -41,6 +41,25 @@ async def require_auth(request: Request) -> dict:
 
 
 async def optional_auth(request: Request) -> dict | None:
+    """A token if one came, otherwise None — the route decides.
+
+    This is a deliberate hole and it belongs to exactly three routes:
+    /status/{id}, /report/{id} and /results/{id}. A report is shared by sending
+    somebody its URL, so requiring a login there would break the only way
+    anybody outside the team reads one (see leader_deploy.md §3.2, where the
+    report URL is handed out exactly like that).
+
+    Everything that is about the DEPLOYMENT rather than one shared job now uses
+    require_auth: /api/quota exposed what is left on every external key, and
+    /api/jobs/{id}/usage and /funnel expose one job's spend and its whole search
+    funnel. Those were never meant to be public; they were `optional_auth` only
+    because it was the default in that block. Measured before the change: an
+    unauthenticated /api/quota returned the full quota JSON and
+    /api/status/99a35c00 the full job record (cloud_smoke.md §4, 2026-09-19).
+
+    A job id is 8 hex characters, so "public with the link" is the honest way to
+    describe these three, not "private".
+    """
     token = request.headers.get("X-Firebase-Token")
     if not token:
         return None
