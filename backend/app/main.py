@@ -69,7 +69,18 @@ OUTPUT_BASE.mkdir(exist_ok=True)
 GCS_BUCKET = os.getenv("GCS_BUCKET", "aime-hello-world-amie-uswest1")
 GCS_PREFIX = os.getenv("GCS_PREFIX", "patent-analyzer/jobs/")
 
-app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
+# StaticFiles raises at import time when the directory is missing, and
+# `app/static/` is empty — git cannot store an empty directory, so it exists in
+# a working tree that has ever had it and in no fresh checkout at all. Every
+# deploy so far uploaded the developer's working tree and therefore carried it
+# along by accident; the first deploy made from `git archive HEAD` died on
+# startup with `RuntimeError: Directory '/app/app/static' does not exist`
+# (revision patent-analyzer-00080-9c4, 2026-09-19). The repository could not
+# build itself from its own contents, and nothing said so until the upload
+# stopped including a file nobody had committed.
+_STATIC_DIR = Path(__file__).parent / "static"
+_STATIC_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
 # Job store — in-memory cache + GCS persistence
 jobs: dict[str, dict] = {}
