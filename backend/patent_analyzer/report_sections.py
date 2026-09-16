@@ -18,6 +18,21 @@ def _e(s) -> str:
     return html.escape(str(s if s is not None else ""))
 
 
+def _clip(text: str, n: int) -> str:
+    """Cut on a word boundary, and say that it was cut.
+
+    A hard slice produced "...via communicati; ...communication pul; ...a
+    contrastiv" in the missing-elements sentence — a list of claim limitations
+    chopped mid-word, which reads as a bug (Harry, 2026-09-20, job 99a35c00).
+    """
+    t = " ".join(str(text or "").split())
+    if len(t) <= n:
+        return t
+    cut = t[:n]
+    sp = cut.rfind(" ")
+    return (cut[:sp] if sp > n * 0.6 else cut).rstrip(" ,;:") + "\u2026"
+
+
 # ── 1. candidate inventions / elements / evidence ──
 
 def extraction_html(extraction: dict | None) -> str:
@@ -767,9 +782,13 @@ def draft_md(draft: dict | None, extraction: dict | None = None) -> list[str]:
 # ── 4. prior-art determination (rule output of patent_analyzer.adjudicate + claim chart) ──
 
 _RISK_STYLE = {"blocking": ("#fee2e2", "#991b1b"), "relevant": ("#fef3c7", "#92400e"), "related": ("#e0f2fe", "#075985")}
-_LABEL_TEXT = {"102": "Blocking risk (§102): a single reference discloses every element",
-               "103": "§103 screening flag: the elements are disclosed across a combination of references",
-               "ALLOW": "No blocking art found among the evaluated documents"}
+# Plain sentence first, statute in brackets. "§102" and "§103 flags" on their own told a
+# reader nothing about what this report was claiming (Harry, 2026-09-20, on job 99a35c00):
+# the label has to say what was found before it says which section it lives under.
+_LABEL_TEXT = {"102": "One document already shows everything (§102, anticipation)",
+               "103": "Two or three documents together show everything "
+                      "(§103 screen — a flag for review, not a legal obviousness finding)",
+               "ALLOW": "No document or combination we read shows all the elements"}
 _SCORE_TEXT = {2: "Present", 1: "Partial", 0: "–"}
 _DETERMINATION_NOTE = ("Deterministic rule over the verified evidence: an element counts as disclosed by a reference only when "
                        "the evaluator scored it and at least one verbatim quote was located in that reference's text. One "
@@ -826,9 +845,43 @@ def determination_label(adj: dict | None) -> str:
     suffix = f" — {asserted_rationale(adj)}" if asserted_rationale(adj) else ""
     label = adj.get("label")
     if label == "103" and adj.get("basis") == "primary_partial":
-        return ("§103 screening flag: a primary reference discloses most of the elements; the gap is small "
-                "enough that an examiner would look for a secondary reference" + suffix)
+        thr = ((adj.get("params") or {}).get("single_partial_103") or 0.7)
+        return (f"Best single document shows most of it (≥{thr:.0%} — screening flag)" + suffix)
     return _LABEL_TEXT.get(label, str(label or "")) + suffix
+
+
+def coverage_lines(adj: dict | None) -> list[str]:
+    """The two numbers the verdict rests on, as sentences.
+
+    They replace `Rule: best single coverage 25%; union of 1 documents covers
+    2/8`, which is the rule's own log line: correct, and unreadable by the
+    person the report is for. The rule text is still in the report, under "How
+    this was decided" — moved, not dropped.
+    """
+    if not adj or not adj.get("n_elements"):
+        return []
+    n = adj["n_elements"]
+    per = adj.get("per_doc_coverage") or []
+    best_n = per[0]["n_covered"] if per else 0
+    combo_n = ((adj.get("combo") or {}).get("n_covered")) or 0
+    k = (adj.get("params") or {}).get("max_combo", 3)
+    return [f"Best single document: {best_n} of {n} elements.",
+            f"Best combination (up to {k} documents): {combo_n} of {n}."]
+
+
+def how_it_was_decided(adj: dict | None, chart: dict | None = None) -> list[str]:
+    """Everything an attorney needs and nobody else reads, in one place.
+
+    It used to be the first thing on the verdict card: a single paragraph
+    carrying BRI, 2131, 2141, 2143, 2143.01, 2143.02 and PANORAMA C.5.3 before
+    the reader got to the answer. Same words, folded.
+    """
+    parts = [asserted_rationale_note(adj), construction_note(adj), _DETERMINATION_NOTE,
+             abstract_only_note(chart)]
+    reason = (adj or {}).get("reason") or ""
+    if reason:
+        parts.append("Rule output, verbatim: " + reason)
+    return [p for p in parts if p]
 
 
 def _combo_lines(chart: dict | None) -> list[tuple[str, list[str], str]]:
@@ -844,7 +897,13 @@ def claim_chart_html(chart: dict | None) -> str:
     if not chart or not chart.get("rows") or not chart.get("docs"):
         return ""
     n = chart.get("n_elements", len(chart["rows"]))
-    out = ['<div style="overflow-x:auto"><table class="tbl claim-chart"><thead><tr><th>Element</th>']
+    # The legend goes above the table. Under it, a reader hits "Partial · 1✓" with
+    # nothing to read it against and has to scroll past the whole chart to find out.
+    out = ['<div class="sec-note" style="margin-bottom:.4rem">How to read this: <b>Present</b> / <b>Partial</b> is the '
+           'evaluator\'s score for that element, and <b>n\u2713</b> is how many verbatim quotes were located in that '
+           'document. <b>"quote not located"</b> means it was scored but no quote could be found, so it does not count. '
+           'Hover any cell for the quote.</div>',
+           '<div style="overflow-x:auto"><table class="tbl claim-chart"><thead><tr><th>Element</th>']
     for d in chart["docs"]:
         name = _e((d.get("pub_num") or d.get("title") or d.get("key") or "")[:28])
         name = f'<a href="{_e(d["url"])}" target="_blank">{name}</a>' if d.get("url") else name
@@ -853,7 +912,7 @@ def claim_chart_html(chart: dict | None) -> str:
                    f'{d.get("n_covered", 0)}/{n} elements{tag}</span></th>')
     out.append("</tr></thead><tbody>")
     for r in chart["rows"]:
-        out.append(f'<tr><td>{_e(r["element"][:140])}</td>')
+        out.append(f'<tr><td>{_e(_clip(r["element"], 140))}</td>')
         for c in r["cells"]:
             score = int(c.get("score") or 0)
             if c.get("covered"):
@@ -866,8 +925,7 @@ def claim_chart_html(chart: dict | None) -> str:
             out.append(f'<td style="background:{bg};text-align:center;white-space:nowrap" title="{_e(tip)}">{txt}</td>')
         out.append("</tr>")
     out.append("</tbody></table></div>")
-    out.append('<div class="sec-note">Present / Partial = evaluator score; n✓ = verbatim quotes located in the reference; '
-               '"quote not located" = scored but no quote could be found, so it does not count. Hover a cell for the quote.</div>')
+
     return "\n".join(out)
 
 
@@ -881,10 +939,18 @@ def determination_html(adj: dict | None, chart: dict | None = None, explanation:
     bg, fg = _RISK_STYLE.get(adj.get("risk", "related"), _RISK_STYLE["related"])
     n = adj["n_elements"]
     label = adj.get("label")
+    # Three lines and nothing else above the fold: the answer, and the two numbers it
+    # rests on. Everything with an MPEP section number in it is one click away.
+    cov = "".join(f'<div style="font-size:.92em">{_e(l)}</div>' for l in coverage_lines(adj))
     out = ['<div class="sec det-sec" style="border-left:3px solid ' + fg + '"><div class="sec-t sec-t-lg">Prior-Art Determination</div>',
-           f'<div class="sec-note">{_e(" ".join(x for x in (asserted_rationale_note(adj), construction_note(adj), _DETERMINATION_NOTE, abstract_only_note(chart)) if x))}</div>',
            f'<div class="sec-b det-verdict"><span class="badge" style="background:{bg};color:{fg}">{_e(adj.get("risk", ""))}</span> '
-           f'<b>{_e(determination_label(adj))}</b><br><span style="font-size:.85em">Rule: {_e(adj.get("reason", ""))}</span></div>']
+           f'<b>{_e(determination_label(adj))}</b>{cov}</div>']
+    how = how_it_was_decided(adj, chart)
+    if how:
+        out.append('<details class="det-how" style="margin:.6rem 0"><summary style="cursor:pointer;color:var(--text2)">'
+                   'How this was decided (for attorneys)</summary>'
+                   + "".join(f'<div class="sec-note" style="margin-top:.4rem">{_e(x)}</div>' for x in how)
+                   + '</details>')
     out.append(claim_chart_html(chart))
     combos = _combo_lines(chart)
     if label == "103":
@@ -896,12 +962,12 @@ def determination_html(adj: dict | None, chart: dict | None = None, explanation:
         out.append('<div class="sec-b det-103" style="margin-top:.6rem"><b>§103 combination relied on:</b><ul>')
         for name, els, url in rel:
             nm = f'<a href="{_e(url)}" target="_blank">{_e(name)}</a>' if url else _e(name)
-            out.append(f'<li>{nm} — {len(els)}/{n} elements: {_e("; ".join(e[:70] for e in els[:6]))}{" …" if len(els) > 6 else ""}</li>')
+            out.append(f'<li>{nm} — {len(els)}/{n} elements: {_e("; ".join(_clip(e, 70) for e in els[:6]))}{" …" if len(els) > 6 else ""}</li>')
         out.append("</ul>")
         unc = (chart or {}).get("uncovered") or (adj.get("combo") or {}).get("missing") or []
         if unc:
             out.append(f'<div><b>Not disclosed by any reference (would need a secondary reference or a routine modification):</b> '
-                       f'{_e("; ".join(u[:70] for u in unc[:6]))}{" …" if len(unc) > 6 else ""}</div>')
+                       f'{_e("; ".join(_clip(u, 70) for u in unc[:6]))}{" …" if len(unc) > 6 else ""}</div>')
         if explanation:
             out.append('<div style="margin-top:.5rem"><b>Why this combination reads as obvious — or not</b> '
                        '<span style="color:var(--text2)">(written from the rule output above; the determination itself is not the model\'s):</span>'
@@ -915,12 +981,10 @@ def determination_html(adj: dict | None, chart: dict | None = None, explanation:
     else:
         unc = (chart or {}).get("uncovered") or []
         per = adj.get("per_doc_coverage") or []
-        out.append(f'<div class="sec-b" style="margin-top:.6rem"><b>Why no blocking art:</b> best single reference discloses '
-                   f'{adj.get("best_coverage", 0):.0%} of the elements; the best union of up to three discloses '
-                   f'{((adj.get("combo") or {}).get("n_covered") or (per[0]["n_covered"] if per else 0))}/{n}. '
-                   + (f'Elements with no verified disclosure in any evaluated document: {_e("; ".join(u[:70] for u in unc[:8]))}'
-                      f'{" …" if len(unc) > 8 else ""}. ' if unc else "")
-                   + 'This is a statement about the evaluated documents, not a prediction about examination.</div>')
+        out.append(f'<div class="sec-b" style="margin-top:.6rem"><b>What is missing:</b> '
+                   + (f'{len(unc)} of the {n} elements have no verified disclosure in any document we read — '
+                      f'{_e("; ".join(_clip(u, 70) for u in unc[:8]))}{" …" if len(unc) > 8 else ""}. ' if unc else "")
+                   + 'This is a statement about the documents evaluated here, not a prediction about examination.</div>')
     out.append("</div>")
     return "\n".join(out)
 
@@ -930,15 +994,18 @@ def determination_md(adj: dict | None, chart: dict | None = None, explanation: s
         return []
     n = adj["n_elements"]
     lines = ["## Prior-Art Determination", "",
-             f"**{adj.get('risk', '')}** — {determination_label(adj)}.", "", f"_Rule: {adj.get('reason', '')}_", "",
-             "_Blocking risk from the documents evaluated here only; not a prediction of grant._", ""]
-    if asserted_rationale_note(adj):
-        lines += [f"**{asserted_rationale_note(adj)}**", ""]
-    if construction_note(adj):
-        lines += [f"_{construction_note(adj)}_", ""]
-    if abstract_only_note(chart):
-        lines += [f"_{abstract_only_note(chart)}_", ""]
+             f"**{adj.get('risk', '')}** — {determination_label(adj)}.", ""]
+    cov = coverage_lines(adj)
+    if cov:
+        lines += [f"- {l}" for l in cov] + [""]
+    how = how_it_was_decided(adj, chart)
+    if how:
+        lines += ["### How this was decided (for attorneys)", ""]
+        lines += [x + "\n" for x in how]
     if chart and chart.get("rows") and chart.get("docs"):
+        lines += ["How to read this table: **Present** / **Partial** is the evaluator's score for that element, "
+                  "and **n✓** is how many verbatim quotes were located in that document. "
+                  '**"quote not located"** means it was scored but no quote could be found, so it does not count.', ""]
         head = "| Element | " + " | ".join(
             f"{(d.get('pub_num') or d.get('title') or d.get('key') or '')[:24]} ({d.get('n_covered', 0)}/{n}"
             + (", abstract only)" if d.get("abstract_only") else ")") for d in chart["docs"]) + " |"
@@ -953,7 +1020,7 @@ def determination_md(adj: dict | None, chart: dict | None = None, explanation: s
                     cells.append(f"{_SCORE_TEXT.get(score, score)} (quote not located)")
                 else:
                     cells.append("–")
-            lines.append(f"| {r['element'][:90]} | " + " | ".join(cells) + " |")
+            lines.append(f"| {_clip(r['element'], 90)} | " + " | ".join(cells) + " |")
         lines.append("")
     combos = _combo_lines(chart)
     if adj.get("label") == "103":
@@ -964,10 +1031,10 @@ def determination_md(adj: dict | None, chart: dict | None = None, explanation: s
             rel = rel[:1]
         lines.append("**§103 combination relied on:**")
         for name, els, _ in rel:
-            lines.append(f"- {name} — {len(els)}/{n} elements: {'; '.join(e[:70] for e in els[:6])}{' …' if len(els) > 6 else ''}")
+            lines.append(f"- {name} — {len(els)}/{n} elements: {'; '.join(_clip(e, 70) for e in els[:6])}{' …' if len(els) > 6 else ''}")
         unc = (chart or {}).get("uncovered") or (adj.get("combo") or {}).get("missing") or []
         if unc:
-            lines.append(f"- Not disclosed by any reference: {'; '.join(u[:70] for u in unc[:6])}{' …' if len(unc) > 6 else ''}")
+            lines.append(f"- Not disclosed by any reference: {'; '.join(_clip(u, 70) for u in unc[:6])}{' …' if len(unc) > 6 else ''}")
         if explanation:
             lines += ["", "**Why this combination reads as obvious — or not** (written from the rule output; the determination is not the model's):", "",
                       explanation.strip()]
@@ -976,8 +1043,10 @@ def determination_md(adj: dict | None, chart: dict | None = None, explanation: s
         lines += [f"**Anticipating reference:** {combos[0][0]} discloses all {n} elements with located quotes.", ""]
     else:
         unc = (chart or {}).get("uncovered") or []
-        lines += [f"**Why no blocking art:** best single reference discloses {adj.get('best_coverage', 0):.0%} of the elements"
-                  + (f"; no verified disclosure for: {'; '.join(u[:70] for u in unc[:8])}{' …' if len(unc) > 8 else ''}" if unc else "") + ".", ""]
+        lines += ["**What is missing:** "
+                  + (f"{len(unc)} of the {n} elements have no verified disclosure in any document we read — "
+                     f"{'; '.join(_clip(u, 70) for u in unc[:8])}{' …' if len(unc) > 8 else ''}. " if unc else "")
+                  + "This is a statement about the documents evaluated here, not a prediction about examination.", ""]
     return lines
 
 

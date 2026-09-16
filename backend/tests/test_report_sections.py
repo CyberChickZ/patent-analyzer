@@ -115,16 +115,69 @@ def test_determination_three_verdict_wordings():
     one = [d("US-A", E)]
     adj = adjudicate(E, one)
     h = determination_html(adj, claim_chart(adj, E, one))
-    assert "Blocking risk (§102)" in h and "Anticipating reference:" in h and "US-A</a> discloses all 4 elements" in h
+    assert "One document already shows everything (§102, anticipation)" in h
+    assert "Anticipating reference:" in h and "US-A</a> discloses all 4 elements" in h
     part = [d("US-A", E[:3])]
     adj = adjudicate(E, part, single_partial_103=0.7)
     h = determination_html(adj, claim_chart(adj, E, part), "Routine.")
-    assert "primary reference discloses most of the elements" in h and "Not disclosed by any reference" in h and "a housing" in h and "<p>Routine.</p>" in h
+    assert "Best single document shows most of it (≥70% — screening flag)" in h
+    assert "Not disclosed by any reference" in h and "a housing" in h and "<p>Routine.</p>" in h
     none = [d("US-A", E[:1]), d("US-B", E[1:2])]
     adj = adjudicate(E, none, single_partial_103=0.7)
     h = determination_html(adj, claim_chart(adj, E, none))
-    assert "No blocking art found" in h and "Why no blocking art:" in h and "a sensor; a housing" in h
+    assert "No document or combination we read shows all the elements" in h
+    assert "What is missing:" in h and "a sensor; a housing" in h
     assert "§103 combination relied on" not in h and "grant" not in h.split("not a prediction")[0].lower().replace("not a prediction of grant", "")
+
+
+def test_the_verdict_comes_before_the_statutes_not_after_them():
+    """Harry, 2026-09-20, on job 99a35c00: the card opened with a paragraph
+    carrying BRI, 2131, 2141, 2143, 2143.01, 2143.02 and PANORAMA C.5.3, and the
+    answer was underneath it. The MPEP text is still in the report — folded."""
+    from patent_analyzer.adjudicate import adjudicate, claim_chart
+    from patent_analyzer.report_sections import coverage_lines, determination_html, determination_md
+    E = ["a lens", "a mirror", "a sensor", "a housing"]
+    d = _docs(E)
+    docs = [d("US-A", E[:1]), d("US-B", E[1:2])]
+    adj = adjudicate(E, docs, single_partial_103=0.7)
+    adj["construction"] = "bri"          # BRI is on by default in production
+    ch = claim_chart(adj, E, docs)
+    h = determination_html(adj, ch)
+
+    verdict = h.index("No document or combination we read shows all the elements")
+    for section in ("MPEP 2111", "MPEP 2131", "MPEP 2141", "2143.01", "2143.02", "C.5.3"):
+        assert section in h, section
+        assert h.index(section) > verdict, f"{section} sits above the verdict"
+        assert h.index(section) > h.index("How this was decided (for attorneys)"), section
+    assert "<details" in h and "Rule output, verbatim:" in h
+    # the two numbers, on the card itself
+    assert coverage_lines(adj) == ["Best single document: 1 of 4 elements.",
+                                   "Best combination (up to 3 documents): 2 of 4."]
+    for line in coverage_lines(adj):
+        assert line in h and h.index(line) < h.index("How this was decided")
+    # the machine sentence is not what the reader meets first
+    assert h.index("best single coverage") > h.index("How this was decided")
+
+    md = "\n".join(determination_md(adj, ch))
+    mv = md.index("No document or combination we read shows all the elements")
+    assert md.index("### How this was decided (for attorneys)") > mv
+    for line in coverage_lines(adj):
+        assert f"- {line}" in md and md.index(line) < md.index("### How this was decided")
+    for section in ("MPEP 2111", "MPEP 2131", "2143.02"):
+        assert md.index(section) > mv, section
+
+
+def test_the_cell_legend_is_above_the_table():
+    """Under the table it explains "Partial · 1✓" to somebody who has already
+    scrolled past every one of them."""
+    from patent_analyzer.adjudicate import adjudicate, claim_chart
+    from patent_analyzer.report_sections import claim_chart_html
+    E = ["a lens", "a mirror"]
+    d = _docs(E)
+    docs = [d("US-A", E[:1])]
+    h = claim_chart_html(claim_chart(adjudicate(E, docs), E, docs))
+    assert h.index("How to read this:") < h.index("<table")
+    assert h.count("quote not located") >= 1
 
 
 def _results(E, docs, adj, chart, explanation=""):
@@ -148,7 +201,8 @@ def test_generate_html_leads_with_the_determination_and_drops_the_old_novelty_ch
     ch = claim_chart(adj, E, docs)
     h = generate_html(_results(E, docs, adj, ch, "Because.\n\nNothing cuts against it."))
     assert h.index('class="sec det-sec"') < h.index("Invention Summary")
-    assert "§103 screening flag" in h and "<p>Because.</p>" in h and 'class="tbl claim-chart"' in h
+    assert "Two or three documents together show everything" in h and "§103 screen — a flag for review" in h
+    assert "<p>Because.</p>" in h and 'class="tbl claim-chart"' in h
     low = h.lower()
     for gone in ("innovation landscape", "novelty score", "novelty assessment", "combination analysis", "ewss", "css=",
                  "old llm novelty text", "old combo text"):
@@ -174,7 +228,7 @@ def test_generate_markdown_leads_with_the_determination_and_drops_scores():
     adj = adjudicate(E, docs)
     md = generate_markdown(_results(E, docs, adj, claim_chart(adj, E, docs)))
     assert md.startswith("# Prior Art Search Report: T")
-    assert "**Determination:** Blocking risk (§102)" in md
+    assert "**Determination:** One document already shows everything (§102, anticipation)" in md
     assert md.index("## Prior-Art Determination") < md.index("## Invention Summary") < md.index("## Evaluation Criteria")
     assert "| 1 | Title US-A | Doc | 4/4 |" in md and "**Elements disclosed (quote located):** 4/4" in md
     low = md.lower()
