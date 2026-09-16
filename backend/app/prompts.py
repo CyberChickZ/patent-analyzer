@@ -1,10 +1,16 @@
 """Prompt registry: versioned prompt templates that nodes fetch at run time.
 
 A prompt's version 0 is the template in code (registered at import). Saved
-versions live in backend/prompts/<name>.json locally or under
-gs://<GCS_BUCKET>/prompts/ on Cloud Run (PROMPT_STORE=gcs). A job can pin a
-version or supply inline text through `prompt_overrides` (set by the runner
-in a ContextVar so nodes and subgraph nodes see it without plumbing).
+versions live in backend/prompts/<name>.json locally and under
+gs://<GCS_BUCKET>/prompts/<name>.json on Cloud Run, which is the default there
+(see `_want_gcs`) rather than something a deploy has to remember to switch on.
+One object per prompt holds every version and which one is current; nothing
+reads a prompt without going through `store()`, so there is no second copy to
+keep in step.
+
+A job can pin a version or supply inline text through `prompt_overrides` (set
+by the runner in a ContextVar so nodes and subgraph nodes see it without
+plumbing).
 Templates are str.format_map templates: literal braces are doubled.
 """
 
@@ -59,12 +65,45 @@ class _GCSStore:
 
 
 _store = None
+store_note = ""
+
+
+def _want_gcs() -> bool:
+    """Where saved prompts live, and why the default is not a file.
+
+    A file store on Cloud Run writes inside the container: an edited prompt
+    survives until the next deploy and is invisible to every other instance
+    while it lasts. That is not persistence, and nothing reported it — the
+    prompt simply went back to the built-in default (Harry, 2026-09-20).
+
+    PROMPT_STORE still decides when it is set. When it is not, Cloud Run is
+    detected by K_SERVICE, which the runtime always injects (Cloud Run docs,
+    "Container runtime contract"), so a deployment cannot lose its prompts by
+    forgetting an environment variable.
+    """
+    v = os.environ.get("PROMPT_STORE", "").strip().lower()
+    if v:
+        return v == "gcs"
+    return bool(os.environ.get("K_SERVICE"))
 
 
 def store():
-    global _store
+    """The store, with the reason for it. A GCS store that cannot be built
+    falls back to the file store rather than taking the process down — but it
+    says so in `store_note`, because a silent fallback here is the original bug
+    wearing a different hat."""
+    global _store, store_note
     if _store is None:
-        _store = _GCSStore() if os.environ.get("PROMPT_STORE") == "gcs" else _FileStore()
+        if _want_gcs():
+            try:
+                _store = _GCSStore()
+                store_note = "gcs"
+            except Exception as exc:
+                _store = _FileStore()
+                store_note = f"file (GCS unavailable: {type(exc).__name__}: {exc})"[:200]
+        else:
+            _store = _FileStore()
+            store_note = "file"
     return _store
 
 
