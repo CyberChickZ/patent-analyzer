@@ -25,10 +25,20 @@ PUBLIC_WITH_THE_LINK = ["/status/nosuchjob", "/report/nosuchjob", "/results/nosu
 
 
 @pytest.fixture
-def client(monkeypatch):
-    monkeypatch.delenv("AUTH_DISABLED", raising=False)
+def app_module(monkeypatch):
+    """A FastAPI app carries dependency_overrides on the module-level object, so
+    one test that overrides require_auth and does not undo it signs in every
+    test after it. Clear it here too: this file is the one that would otherwise
+    pass while asserting nothing."""
     import app.main as m
-    return TestClient(m.app)
+    monkeypatch.delitem(m.app.dependency_overrides, m.require_auth, raising=False)
+    return m
+
+
+@pytest.fixture
+def client(monkeypatch, app_module):
+    monkeypatch.delenv("AUTH_DISABLED", raising=False)
+    return TestClient(app_module.app)
 
 
 @pytest.mark.parametrize("path", PRIVATE)
@@ -46,22 +56,20 @@ def test_a_shared_job_url_still_answers_without_one(client, path):
 
 
 @pytest.mark.parametrize("path", PRIVATE[1:])
-def test_auth_disabled_still_opens_them_for_local_development(monkeypatch, path):
+def test_auth_disabled_still_opens_them_for_local_development(monkeypatch, app_module, path):
     monkeypatch.setenv("AUTH_DISABLED", "1")
-    import app.main as m
-    r = TestClient(m.app).get(path)
+    r = TestClient(app_module.app).get(path)
     assert r.status_code == 404, f"{path} answered {r.status_code} under AUTH_DISABLED"
 
 
-def test_auth_disabled_opens_the_quota_panel_too(monkeypatch):
+def test_auth_disabled_opens_the_quota_panel_too(monkeypatch, app_module):
     monkeypatch.setenv("AUTH_DISABLED", "1")
-    import app.main as m
     from patent_analyzer import quota
 
     async def fake_snapshot():
         return {"sources": []}
     monkeypatch.setattr(quota, "snapshot", fake_snapshot)
-    r = TestClient(m.app).get("/api/quota")
+    r = TestClient(app_module.app).get("/api/quota")
     assert r.status_code == 200 and r.json() == {"sources": []}
 
 

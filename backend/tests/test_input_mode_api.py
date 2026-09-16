@@ -12,7 +12,10 @@ def _client(monkeypatch, tmp_path):
     monkeypatch.setattr(m, "_enqueue_job", lambda jid: None)
     monkeypatch.setattr(m, "OUTPUT_BASE", tmp_path)
     monkeypatch.setattr(m, "_get_gcs", lambda: _FakeGCS())
-    m.app.dependency_overrides[m.require_auth] = lambda: {"email": "t@x"}
+    # setitem, not plain assignment: dependency_overrides lives on the module-level
+    # app object, so an override written here outlives this test and every later
+    # test runs signed in. test_route_auth caught exactly that.
+    monkeypatch.setitem(m.app.dependency_overrides, m.require_auth, lambda: {"email": "t@x"})
     return TestClient(m.app), m
 
 
