@@ -44,6 +44,52 @@ def _rows(job, timeout: float | None = None):
                         f"{timeout if timeout is not None else BQ_TIMEOUT_S:.0f}s; cancelled") from None
 
 
+class BQJobBudgetSpent(Exception):
+    """This job has spent its BigQuery allowance. Not an error in the query."""
+
+
+def job_budget() -> tuple[float, int]:
+    """(GiB, queries) one job may spend on BigQuery. Read per call so an eval
+    run can raise it for itself."""
+    def _f(name, default):
+        try:
+            return float(os.environ.get(name, default))
+        except ValueError:
+            return float(default)
+    return _f("BQ_MAX_GIB_PER_JOB", 200), int(_f("BQ_MAX_QUERIES_PER_JOB", 200))
+
+
+def job_spend() -> dict:
+    """What this job has spent so far, from the same counters the cost card
+    reads — there is no second tally to drift."""
+    gib = float(metering.bq.get("bytes_billed", 0)) / 2 ** 30
+    n = int(metering.bq.get("queries", 0))
+    cap_gib, cap_n = job_budget()
+    return {"gib": round(gib, 2), "queries": n, "cap_gib": cap_gib, "cap_queries": cap_n,
+            "over": gib >= cap_gib or n >= cap_n}
+
+
+def _check_job_budget(what: str) -> None:
+    """Stop this job's BigQuery spending, loudly.
+
+    One job scanning 7 GiB per point lookup is normal; a loop that does it two
+    thousand times is what 2026-09-18 looked like ($55 of BigQuery in a day).
+    The ceiling is per job so a single runaway cannot take the month, and it
+    raises rather than returning empty: every caller in this module already
+    treats an exception as "this channel produced nothing", and an empty list
+    would be indistinguishable from a real miss — the failure would be counted
+    as a result again.
+    """
+    sp = job_spend()
+    if not sp["over"]:
+        return
+    msg = (f"BigQuery budget for this job is spent: {sp['gib']:.1f} GiB of {sp['cap_gib']:.0f} GiB "
+           f"and {sp['queries']} of {sp['cap_queries']} queries. Refusing {what}. "
+           f"Raise BQ_MAX_GIB_PER_JOB / BQ_MAX_QUERIES_PER_JOB to allow more.")
+    metering.incident("bigquery", metering.EXHAUSTED, msg)
+    raise BQJobBudgetSpent(msg)
+
+
 def guarded_query(client, sql: str, params=None, max_gib: float | None = None):
     """Dry-run first; refuse anything above max_gib and hard-cap billing.
 
@@ -53,6 +99,7 @@ def guarded_query(client, sql: str, params=None, max_gib: float | None = None):
     here so a single call can never burn the monthly free tier again.
     """
     from google.cloud import bigquery
+    _check_job_budget("a metadata lookup")
     cap = max_gib if max_gib is not None else BQ_MAX_GIB
     params = params or []
     dry = client.query(sql, job_config=bigquery.QueryJobConfig(
@@ -93,6 +140,7 @@ def capped_query(client, sql: str, params=None, max_gib: float = 10.0):
     ~$0.6 full-column scan instead of paying for it.
     """
     from google.cloud import bigquery
+    _check_job_budget("a SEARCH query")
     job = client.query(sql, job_config=bigquery.QueryJobConfig(
         query_parameters=params or [], maximum_bytes_billed=int(max_gib * 2 ** 30)))
     rows = _rows(job)

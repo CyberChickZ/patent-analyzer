@@ -8,6 +8,7 @@
 
 import { getQuota, type QuotaRow, type QuotaSnapshot } from "../api";
 import { esc, errorBox, empty, num, fmtDate, fmtDay } from "../ui";
+import { fmtUSD } from "../pricing";
 
 let timer: number | null = null;
 
@@ -45,7 +46,7 @@ async function paint(): Promise<void> {
     body.innerHTML = empty("No sources configured", "The backend reported no external sources at all.");
     return;
   }
-  body.innerHTML = headline(snap) + table(snap) + reservedTable(snap) + rateCard(snap) + footer(snap);
+  body.innerHTML = spendBar(snap) + headline(snap) + table(snap) + reservedTable(snap) + rateCard(snap) + footer(snap);
 }
 
 // ─── Reserved keys ───
@@ -233,13 +234,18 @@ const BASIS_STYLE: Record<string, string> = {
   "INFORMATION_SCHEMA": "pill-tag",
   "local counter": "pill-paused",
   "no counter": "pill-flat",
+  "unknown": "pill-flat",
 };
 
 function basisCell(r: QuotaRow): string {
-  const b = r.basis || "no counter";
+  // A backend older than this column sends no `basis` at all. Printing
+  // "no counter" there would be this page inventing an answer — which is the
+  // exact failure the column exists to stop.
+  const b = r.basis || "unknown";
   return `<span class="pill ${BASIS_STYLE[b] || "pill-flat"} pill-flat"
     title="${b === "local counter" ? "this deployment's own tally — never reconciled with the provider"
       : b === "no counter" ? "there is no allowance to count"
+      : b === "unknown" ? "this backend is older than the column and did not say"
       : "the provider's own answer"}">${esc(b)}</span>`;
 }
 
@@ -247,6 +253,39 @@ const HEAD = `<thead><tr>
   <th>Source</th><th style="width:7rem">Used</th><th class="right">Remaining</th>
   <th>Resets</th><th>Source of this number</th><th>Limits</th>
 </tr></thead>`;
+
+/** Money, before allowances.
+ *
+ *  9-18 cost $230 in a day and nothing on any screen said so while it
+ *  happened (Harry, 2026-09-20). This is the first thing on the page now, and
+ *  it says "ledger estimate (not a bill)" in as many words: it is priced from
+ *  the tokens and bytes this deployment metered, and the billing account is
+ *  the only thing that can settle the argument.
+ */
+function spendBar(s: QuotaSnapshot): string {
+  const sp = s.spend;
+  if (!sp) return "";
+  if (sp.error && sp.today_usd === undefined) {
+    return `<div class="notice notice-warn">Today's spend could not be read — ${esc(sp.error)}</div>`;
+  }
+  const today = sp.today_usd ?? 0;
+  const cap = sp.cap_usd ?? 0;
+  const pct = cap ? Math.min(100, Math.round((today / cap) * 100)) : 0;
+  const over = !!sp.over_cap;
+  return `<div class="panel" style="margin-bottom:1rem"><div class="panel-body">
+    <div class="row" style="justify-content:space-between;align-items:baseline">
+      <div><strong style="font-size:1.25rem">${esc(fmtUSD(today))}</strong>
+        <span class="muted"> today of ${esc(fmtUSD(cap))} cap</span>
+        ${over ? ` <span class="pill pill-failed">new jobs refused until ${esc(fmtDate(sp.resets_at || ""))}</span>` : ""}</div>
+      <div class="small muted">This month ${esc(fmtUSD(sp.month_usd ?? 0))}</div>
+    </div>
+    <div class="meter" style="margin-top:.4rem"><div class="meter-fill${over ? " is-spent" : ""}"
+      style="width:${pct}%"></div></div>
+    <div class="tiny muted" style="margin-top:.3rem">${esc(sp.basis)} · the cap is
+      <code>DAILY_SPEND_CAP_USD</code>; running jobs are never stopped by it${
+        sp.error ? ` · ${esc(sp.error)}` : ""}</div>
+  </div></div>`;
+}
 
 function table(s: QuotaSnapshot): string {
   const rows = s.sources.filter((r) => !isReserved(r));

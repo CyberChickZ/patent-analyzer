@@ -292,11 +292,26 @@ export interface RateCard {
   note: string;
 }
 
+/** Today against the self-imposed ceiling, and the month so far. An estimate
+ *  from list prices — nobody on this team can read the billing account, which
+ *  is why the application meters itself (see patent_analyzer/spend.py). */
+export interface SpendBlock {
+  today_usd?: number;
+  cap_usd?: number;
+  over_cap?: boolean;
+  resets_at?: string;
+  month_usd?: number;
+  by_kind?: Record<string, number>;
+  basis: string;
+  error?: string;
+}
+
 export interface QuotaSnapshot {
   generated_at: string;
   month: string;
   week: string;
   sources: QuotaRow[];
+  spend?: SpendBlock;
   prices: RateCard;
   exhausted: string[];
   expiring_soon: string[];

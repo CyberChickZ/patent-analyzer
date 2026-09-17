@@ -1021,6 +1021,22 @@ function ledgerBlock(): string {
     </div></details>`;
 }
 
+/** What this job actually scanned, not what a TiB costs.
+ *
+ *  The tile used to show the rate card's $/TiB, which is a price list and not
+ *  a fact about this job — and BigQuery is where a day went to $55 without
+ *  anything on a screen saying so (2026-09-20). The per-job ceiling is
+ *  BQ_MAX_GIB_PER_JOB; this is the number it is checked against.
+ */
+function bqSpent(): string {
+  const b = ((R.cost || {}).totals || {}).bigquery;
+  if (!b) return `${EMDASH}<small> no BigQuery in this job's record</small>`;
+  const gib = Number(b.gib_billed || 0);
+  const rate = QUOTA?.other.find((o) => /bigquery/i.test(o.item))?.price || "";
+  return `${num(Math.round(gib))} GiB<small> billed · ${num(b.queries)} quer${b.queries === 1 ? "y" : "ies"}`
+    + ` · ${esc(fmtUSD(Number(b.cost_usd || 0)))}${rate ? ` at ${esc(rate)}` : ""}</small>`;
+}
+
 function costSection(sr: any[]): string {
   const s = (R.search || {}).summary || {};
   const rounds: any[] = s.loop_rounds || [];
@@ -1050,7 +1066,7 @@ function costSection(sr: any[]): string {
         <div><div class="k">This job cost</div><div class="v">${measuredCost()}</div></div>
         <div><div class="k">Documents evaluated</div><div class="v">${num((R.eval_stats || {}).evaluated ?? sr.length)}</div></div>
         <div><div class="k">Quotes verified</div><div class="v">${num(((R.eval_stats || {}).quote_stats || {}).verified)}<small> of ${num(((R.eval_stats || {}).quote_stats || {}).quotes)}</small></div></div>
-        <div><div class="k">BigQuery</div><div class="v">${esc(QUOTA?.other.find((o) => /bigquery/i.test(o.item))?.price || EMDASH)}<small> ${QUOTA?.available ? "from /api/quota" : "no rate card"}</small></div></div>
+        <div><div class="k">BigQuery this job</div><div class="v">${bqSpent()}</div></div>
       </div>
       ${ledgerBlock()}
       <div class="tbl-wrap"><div class="tw"><table class="tbl">
