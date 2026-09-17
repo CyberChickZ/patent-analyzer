@@ -377,6 +377,18 @@ async def _run_langgraph_pipeline(job_id: str):
                 for pk, pd in patch.get("phase_results", {}).items():
                     job.setdefault("phases", {})[pk] = pd.get("data", {})
                     job["phase"] = pk
+                    # The day's tally, at every phase boundary rather than at the
+                    # end: a job that runs for half an hour should be visible in
+                    # the ceiling while it runs, not after it has spent the money.
+                    # record_job_total takes the job's total so far and adds only
+                    # the difference, so reporting a phase twice cannot double it.
+                    try:
+                        from patent_analyzer import metering, spend
+                        await asyncio.to_thread(
+                            spend.record_job_total, job_id,
+                            float((metering.totals(job.get("phases")) or {}).get("cost_usd", 0.0)))
+                    except Exception as exc:
+                        print(f"[spend] tally failed for {job_id}: {exc}", flush=True)
                 if patch.get("search_stats"):
                     job.setdefault("phases", {})["phase3"] = slim_search_stats(patch["search_stats"], job_id)
                 if patch.get("scoring_report"):
@@ -648,6 +660,23 @@ def _input_mode(value) -> str:
     return v if v in INPUT_MODES else ""
 
 
+def _spend_gate() -> None:
+    """Refuse a new job once today's estimated spend has reached the ceiling.
+
+    Harry cannot set a GCP budget alert — that needs the billing account — so
+    the only place that can stop a runaway is the application, and it already
+    prices every LLM call and every BigQuery job. 429 is the honest code: the
+    request is fine, there is simply no allowance left this day.
+
+    Jobs already running are not touched. Killing work that has already been
+    paid for saves nothing and loses the result.
+    """
+    from patent_analyzer import spend
+    r = spend.refusal()
+    if r:
+        raise HTTPException(429, r["detail"], headers={"Retry-After": str(int(r["resets_in_hours"] * 3600))})
+
+
 @app.post("/analyze")
 async def start_analysis(
     file: UploadFile = File(...),
@@ -658,6 +687,7 @@ async def start_analysis(
     input_mode: str = Form(""),
     user: dict = Depends(require_auth),
 ):
+    _spend_gate()
     job_id = str(uuid.uuid4())[:8]
     job_dir = OUTPUT_BASE / job_id
     job_dir.mkdir(parents=True)
@@ -739,6 +769,7 @@ async def start_analysis_from_gcs(
     user: dict = Depends(require_auth),
 ):
     """Start analysis with a file already uploaded to GCS via signed URL."""
+    _spend_gate()
     job_id = payload.get("job_id") or str(uuid.uuid4())[:8]
     gcs_uri = payload.get("gcs_uri")
     filename = payload.get("filename", "upload.pdf")

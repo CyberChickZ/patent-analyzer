@@ -371,6 +371,27 @@ async def snapshot() -> dict:
     sources.sort(key=lambda r: ("serpapi lens uspto_odp bigquery".split() + [r["source"]]).index(r["source"])
                  if r["source"] in "serpapi lens uspto_odp bigquery".split() else 99)
 
+    # What the day has cost so far, against the ceiling the app enforces on
+    # itself. An estimate from list prices, and the panel says so — nobody here
+    # can read the billing account.
+    try:
+        from . import spend
+        day = spend.today()
+        month_usd, month_err = spend.month_usd()
+        spend_block = {
+            "today_usd": round(float(day.get("usd", 0.0)), 2),
+            "cap_usd": day["cap_usd"],
+            "over_cap": day["over_cap"],
+            "resets_at": day["resets_at"],
+            "month_usd": month_usd,
+            "by_kind": day.get("by_kind", {}),
+            "basis": "ledger estimate (not a bill)",
+            "error": (day.get("error") or "") or month_err,
+        }
+    except Exception as exc:
+        spend_block = {"basis": "ledger estimate (not a bill)",
+                       "error": f"{type(exc).__name__}: {exc}"[:160]}
+
     exhausted = [s["name"] for s in sources if s["exhausted"]]
     expiring = [s["name"] for s in sources
                 if s["expires_in_days"] is not None and 0 <= s["expires_in_days"] <= 14]
@@ -378,6 +399,7 @@ async def snapshot() -> dict:
         "generated_at": _now().isoformat(),
         "month": month_key(), "week": week_key(),
         "sources": sources,
+        "spend": spend_block,
         # The rate card travels with the panel because it is the same question
         # asked forwards: what a call costs, and how many are left. One source
         # for both means the UI never has to keep its own copy of a price.

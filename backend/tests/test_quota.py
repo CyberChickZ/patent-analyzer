@@ -29,7 +29,7 @@ def _by_name(snap, name):
 
 
 @pytest.fixture(autouse=True)
-def _no_live_providers(monkeypatch):
+def _no_live_providers(monkeypatch, tmp_path):
     """`snapshot()` now asks two providers for their own figures: SerpAPI's
     /account and BigQuery's INFORMATION_SCHEMA. Both are network calls, and on
     a developer machine with credentials they quietly succeed — so the suite
@@ -38,6 +38,8 @@ def _no_live_providers(monkeypatch):
     tally; the reconciled paths have their own tests with the call stubbed."""
     monkeypatch.setattr(quota, "_bq_billed_mib_this_month", lambda: (None, "not asked in tests"))
     monkeypatch.setattr(sp, "sync_account", lambda: [{"key": "test", "error": "not asked in tests"}])
+    monkeypatch.setenv("SPEND_STORE", "local")
+    monkeypatch.setenv("SPEND_LOCAL_DIR", str(tmp_path / "spend"))
 
 
 def test_a_month_resets_on_the_first_and_an_iso_week_on_monday():

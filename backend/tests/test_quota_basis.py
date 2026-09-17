@@ -2,9 +2,19 @@ import asyncio
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from patent_analyzer import quota
+
+
+@pytest.fixture(autouse=True)
+def _local_spend(monkeypatch, tmp_path):
+    """snapshot() reads the day's spend object; without this it reads the real
+    one out of the shared bucket, which is a network call and shared state."""
+    monkeypatch.setenv("SPEND_STORE", "local")
+    monkeypatch.setenv("SPEND_LOCAL_DIR", str(tmp_path / "spend"))
 
 
 def test_every_row_says_where_its_number_came_from(monkeypatch):
