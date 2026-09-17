@@ -43,9 +43,21 @@ def _next_week(now: datetime | None = None) -> datetime:
     return start + timedelta(days=8 - now.isoweekday())   # Monday=1 -> a week out
 
 
+#: Where a number on the panel actually came from. Harry asked whether the
+#: figures had been checked against each provider, and the answer was no — they
+#: were this process's own counters, every one of them (2026-09-20). A counter
+#: that has never been reconciled reads exactly like one that has, so the panel
+#: now says which it is, per row, in these words and no others.
+BASIS_ACCOUNT_API = "account API"
+BASIS_RESPONSE_HEADER = "response header"
+BASIS_INFORMATION_SCHEMA = "INFORMATION_SCHEMA"
+BASIS_LOCAL = "local counter"
+BASIS_NONE = "no counter"
+
+
 def _row(source: str, name: str, *, used=None, cap=None, unit="requests",
          period="none", resets_at: datetime | None = None, limits=None,
-         note="", error="", expires_on: str = "") -> dict:
+         note="", error="", expires_on: str = "", basis: str = BASIS_LOCAL) -> dict:
     now = _now()
     remaining = None if (used is None or cap is None) else max(0, cap - used)
     row = {
@@ -57,6 +69,8 @@ def _row(source: str, name: str, *, used=None, cap=None, unit="requests",
         "exhausted": bool(remaining == 0 and cap),
         "limits": limits or [],
         "note": note, "error": error,
+        # One of the BASIS_* strings. Never blank, never a guess.
+        "basis": basis if (used is not None or cap is not None) else BASIS_NONE,
         "expires_on": expires_on or None, "expires_in_days": None,
     }
     if expires_on:
@@ -71,11 +85,43 @@ def _row(source: str, name: str, *, used=None, cap=None, unit="requests",
     return row
 
 
-def _serpapi() -> list[dict]:
+SYNC_CACHE_S = 60.0
+
+
+async def _serpapi() -> list[dict]:
+    """SerpAPI's own /account, not our tally.
+
+    The local counter drifts: it moved from ~55 to 272 the first time anyone
+    asked the provider (2026-09-19), because a run that failed after taking a
+    slot, and a cached answer that never spent one, pull it in opposite
+    directions. /account is free and not billed, so the only cost of asking is
+    latency — hence the 60 s cache, which is also what stops a panel refresh
+    from making four HTTP calls per key.
+    """
+    import asyncio
+
+    from .cache import kv
     from .recall import serpapi as sp
+    if not sp._all_keys():
+        return [_row("serpapi", "SerpAPI", error="SERPAPI_KEYS not set", basis=BASIS_NONE)]
+
+    basis, sync_err = BASIS_ACCOUNT_API, ""
+    store = kv()
+    fresh = store.get("runtime", "serpapi_account_sync", max_age_days=SYNC_CACHE_S / 86400.0)
+    if fresh is None:
+        try:
+            got = await asyncio.to_thread(sp.sync_account)
+            bad = [g for g in got if g.get("error")]
+            if bad or not got:
+                basis = BASIS_LOCAL
+                sync_err = (bad[0]["error"] if bad else "no keys answered")[:160]
+            store.put("runtime", "serpapi_account_sync", {"basis": basis, "error": sync_err})
+        except Exception as exc:
+            basis, sync_err = BASIS_LOCAL, f"{type(exc).__name__}: {exc}"[:160]
+    else:
+        basis, sync_err = fresh.get("basis", BASIS_LOCAL), fresh.get("error", "")
+
     keys = sp.quota_status()
-    if not keys:
-        return [_row("serpapi", "SerpAPI", error="SERPAPI_KEYS not set")]
     # The note goes on the first key only: it is true of the account, not of one
     # key, and repeating it down the table buries the numbers.
     rows = []
@@ -88,9 +134,12 @@ def _serpapi() -> list[dict]:
         if k.get("reserved"):
             note = ("Reserved for demos and production jobs — evaluation runs never rotate onto "
                     "this key. " + note).strip()
+        if basis == BASIS_LOCAL:
+            note = (f"local counter — SerpAPI's account API did not answer ({sync_err}). " + note).strip()
         row = _row("serpapi", f"SerpAPI key {k['key']}" + (" (reserved)" if k.get("reserved") else ""),
                    used=k["used"], cap=k["cap"], unit="searches", period="month",
-                   resets_at=_next_month(), limits=[f"{k['cap']}/key/month (free tier)"], note=note)
+                   resets_at=_next_month(), limits=[f"{k['cap']}/key/month (free tier)"], note=note,
+                   basis=basis)
         row["reserved"] = bool(k.get("reserved"))
         rows.append(row)
     return rows
@@ -101,7 +150,12 @@ def _uspto_odp() -> list[dict]:
     rows = [_row("uspto_odp", f"USPTO ODP {q['kind']}", used=q["used"], cap=q["cap"],
                  unit="requests", period="week", resets_at=_next_week(),
                  limits=[f"{odp.PER_MINUTE} req/min", "concurrency 1"],
-                 note=(f"ISO week {q['week']}; the weekly caps come from the key's registration"
+                 basis=BASIS_LOCAL,
+                 note=(f"ISO week {q['week']}; the weekly caps come from the key's registration. "
+                       "Local counter: a live call to api.uspto.gov on 2026-09-20 returned no "
+                       "rate-limit or remaining header at all (only AWS API-Gateway trace "
+                       "headers), and ODP publishes no usage endpoint, so there is nothing to "
+                       "reconcile against."
                        if i == 0 else ""))
             for i, q in enumerate(odp.quota_status())]
     if not os.environ.get("USPTO_ODP_API_KEY"):
@@ -178,6 +232,7 @@ async def _lens() -> list[dict]:
                 note = ("the usage endpoint answered in a shape this code does not recognise; "
                         "the figure is this instance's own count")
         rows.append(_row("lens", f"Lens {ep} API", used=used, cap=cap,
+                         basis=BASIS_ACCOUNT_API if note.startswith("from the provider") else BASIS_LOCAL,
                          unit="requests", period="month", resets_at=resets,
                          limits=[f"{q['per_minute']} req/min",
                                  f"max {q['max_records_per_request']} records/request"],
@@ -189,25 +244,73 @@ def _semantic_scholar() -> list[dict]:
     from .recall import semantic_scholar as s2
     keyed = bool(os.environ.get("SEMANTIC_SCHOLAR_KEY") or os.environ.get("S2_API_KEY"))
     return [_row("semantic_scholar", "Semantic Scholar",
-                 unit="requests", period="none",
+                 unit="requests", period="none", basis=BASIS_NONE,
                  limits=[f"1 request per {s2.MIN_INTERVAL_KEYED if keyed else s2.MIN_INTERVAL_ANON:.1f}s, "
                          "across all endpoints"],
                  note="a rate, not an allowance: there is no monthly counter to run out of. "
                       + ("API key in use." if keyed else "No key — the anonymous limit applies."))]
 
 
-def _bigquery() -> list[dict]:
+#: The free tier is an account-wide allowance, so the number that matters is the
+#: whole project's billed bytes this month — not this deployment's. That is what
+#: INFORMATION_SCHEMA.JOBS_BY_PROJECT holds, and it is the only place it exists:
+#: there is no "how much have I used" API for BigQuery.
+#: https://cloud.google.com/bigquery/docs/information-schema-jobs, read 2026-09-20.
+#: The view itself is free to query (it reads metadata, not table data), and it
+#: keeps 180 days, so a month always fits.
+_BQ_MONTH_SQL = """
+SELECT COALESCE(SUM(total_bytes_billed), 0) AS b
+FROM `region-us`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+WHERE creation_time >= TIMESTAMP_TRUNC(CURRENT_TIMESTAMP(), MONTH)
+  AND job_type = 'QUERY' AND state = 'DONE'
+"""
+_BQ_CACHE_S = 300.0
+
+
+def _bq_billed_mib_this_month() -> tuple[int | None, str]:
+    """(MiB billed across the project this month, error). None means ask the
+    local tally instead — and say so, rather than printing our own number under
+    a heading that claims to be the project's."""
     from .cache import kv
-    used = int((kv().get("runtime", f"usage:bigquery_mib:{month_key()}") or {}).get("n", 0))
+    store = kv()
+    hit = store.get("runtime", "bq_month_billed", max_age_days=_BQ_CACHE_S / 86400.0)
+    if hit is not None:
+        return hit.get("mib"), hit.get("error", "")
+    try:
+        from google.cloud import bigquery
+        client = bigquery.Client()
+        rows = list(client.query(_BQ_MONTH_SQL).result())
+        mib = int(int(rows[0]["b"]) / (1024 * 1024)) if rows else 0
+        store.put("runtime", "bq_month_billed", {"mib": mib, "error": ""})
+        return mib, ""
+    except Exception as exc:
+        err = f"{type(exc).__name__}: {exc}"[:160]
+        store.put("runtime", "bq_month_billed", {"mib": None, "error": err})
+        return None, err
+
+
+def _bigquery() -> list[dict]:
     from . import metering
+    from .cache import kv
+    local = int((kv().get("runtime", f"usage:bigquery_mib:{month_key()}") or {}).get("n", 0))
+    mib, err = _bq_billed_mib_this_month()
+    if mib is None:
+        used, basis = local, BASIS_LOCAL
+        note = ("local counter — INFORMATION_SCHEMA could not be read (" + err + "). Counted from "
+                "the bytes this deployment's own queries were billed for, starting when the tally "
+                "was added: bytes spent before that, or by anything else on the project, are not "
+                "in it. ")
+    else:
+        used, basis = mib, BASIS_INFORMATION_SCHEMA
+        note = (f"the whole project's billed bytes this month, from "
+                f"region-us.INFORMATION_SCHEMA.JOBS_BY_PROJECT — which is what the free tier is "
+                f"measured against. This deployment's own tally says {local} MiB; the difference "
+                f"is everything else on the project. ")
     return [_row("bigquery", "BigQuery free tier", used=used, cap=BQ_FREE_MIB_PER_MONTH,
-                 unit="MiB scanned", period="month", resets_at=_next_month(),
+                 unit="MiB scanned", period="month", resets_at=_next_month(), basis=basis,
                  limits=[f"${metering.BQ_USD_PER_TIB}/TiB above the free tier"],
-                 note="not a hard limit — past this the project is billed rather than blocked, "
-                      "which is why it is the one BigQuery number worth watching. Counted from "
-                      "the bytes this deployment's own queries were billed for, starting when "
-                      "the tally was added: bytes spent before that, or by anything else on the "
-                      "project, are not in it.")]
+                 note=note + "Not a hard limit — past this the project is billed rather than "
+                             "blocked, which is why it is the one BigQuery number worth watching.")]
 
 
 _FREE = [("openalex", "OpenAlex", "polite pool; no key, no counter"),
@@ -254,17 +357,19 @@ async def snapshot() -> dict:
     """Every source, with each one's failure kept local: a panel that 500s
     because one provider is down tells you nothing about the other seven."""
     sources: list[dict] = []
-    for label, fn in (("serpapi", _serpapi), ("uspto_odp", _uspto_odp),
-                      ("semantic_scholar", _semantic_scholar), ("bigquery", _bigquery),
-                      ("free", _uncapped)):
+    for label, fn in (("uspto_odp", _uspto_odp), ("semantic_scholar", _semantic_scholar),
+                      ("bigquery", _bigquery), ("free", _uncapped)):
         try:
             sources.extend(fn())
         except Exception as exc:
-            sources.append(_row(label, label, error=f"{type(exc).__name__}: {exc}"))
-    try:
-        sources.extend(await _lens())
-    except Exception as exc:
-        sources.append(_row("lens", "Lens", error=f"{type(exc).__name__}: {exc}"))
+            sources.append(_row(label, label, error=f"{type(exc).__name__}: {exc}", basis=BASIS_NONE))
+    for label, afn in (("serpapi", _serpapi), ("lens", _lens)):
+        try:
+            sources.extend(await afn())
+        except Exception as exc:
+            sources.append(_row(label, label, error=f"{type(exc).__name__}: {exc}", basis=BASIS_NONE))
+    sources.sort(key=lambda r: ("serpapi lens uspto_odp bigquery".split() + [r["source"]]).index(r["source"])
+                 if r["source"] in "serpapi lens uspto_odp bigquery".split() else 99)
 
     exhausted = [s["name"] for s in sources if s["exhausted"]]
     expiring = [s["name"] for s in sources
@@ -279,6 +384,8 @@ async def snapshot() -> dict:
         "prices": _prices(),
         "exhausted": exhausted,
         "expiring_soon": expiring,
-        "note": "Counters are this deployment's own unless a row says otherwise; a source "
-                "whose quota is shared with another tool will read low here.",
+        "note": "Every row says where its number came from. \"account API\" and "
+                "\"INFORMATION_SCHEMA\" are the provider's own answer; \"local counter\" is this "
+                "deployment's tally, which will read low when the same quota is spent by anything "
+                "else.",
     }

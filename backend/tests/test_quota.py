@@ -28,6 +28,18 @@ def _by_name(snap, name):
     return next(s for s in snap["sources"] if s["name"] == name)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_providers(monkeypatch):
+    """`snapshot()` now asks two providers for their own figures: SerpAPI's
+    /account and BigQuery's INFORMATION_SCHEMA. Both are network calls, and on
+    a developer machine with credentials they quietly succeed — so the suite
+    would pass here and report different numbers anywhere else, while the
+    SerpAPI probe spent 15 s per fake key timing out. Tests read the local
+    tally; the reconciled paths have their own tests with the call stubbed."""
+    monkeypatch.setattr(quota, "_bq_billed_mib_this_month", lambda: (None, "not asked in tests"))
+    monkeypatch.setattr(sp, "sync_account", lambda: [{"key": "test", "error": "not asked in tests"}])
+
+
 def test_a_month_resets_on_the_first_and_an_iso_week_on_monday():
     wed = datetime(2026, 9, 16, 13, 0, tzinfo=timezone.utc)
     assert quota._next_month(wed) == datetime(2026, 10, 1, tzinfo=timezone.utc)
@@ -128,5 +140,6 @@ def test_bigquery_reports_what_is_left_of_the_free_tibibyte():
     metering.count_bq(64 * 2 ** 20)                          # 64 MiB
     row = _by_name(asyncio.run(quota.snapshot()), "BigQuery free tier")
     assert row["cap"] == quota.BQ_FREE_MIB_PER_MONTH
+    # the local tally, because the fixture denies it INFORMATION_SCHEMA
     assert row["used"] == 64 and row["remaining"] == quota.BQ_FREE_MIB_PER_MONTH - 64
-    assert row["unit"] == "MiB scanned"
+    assert row["unit"] == "MiB scanned" and row["basis"] == quota.BASIS_LOCAL

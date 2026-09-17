@@ -264,6 +264,11 @@ export interface QuotaRow {
   error: string;
   expires_on: string | null;
   expires_in_days: number | null;
+  /** Where the number came from: "account API", "response header",
+   *  "INFORMATION_SCHEMA", "local counter", or "no counter". A reconciled
+   *  figure and one this process merely tallied look identical on a page, so
+   *  the page has to say which it is (Harry, 2026-09-20). */
+  basis: string;
   /** SerpAPI only: a key held back for demos and production jobs, which
    *  evaluation runs never rotate onto. Present on nothing else, hence
    *  optional — a source that does not set it is not "not reserved", it is a

@@ -218,13 +218,34 @@ function row(r: QuotaRow): string {
     <td>${meter(r)}<div class="tiny muted nowrap">${r.cap === null ? "" : `${num(r.used)} / ${num(r.cap)}`}</div></td>
     <td class="right nowrap">${left(r)}</td>
     <td class="small">${resets(r)}</td>
+    <td class="small nowrap">${basisCell(r)}</td>
     <td class="tiny muted">${r.limits.map((l) => esc(l)).join("<br>") || "—"}</td>
   </tr>`;
 }
 
+/** The provider's own answer and our tally are different kinds of fact, and
+ *  until 2026-09-20 every row was the second one while looking like the first.
+ *  Checked figures are marked; an unchecked one is marked too, in as many
+ *  words, because a blank would read as "fine". */
+const BASIS_STYLE: Record<string, string> = {
+  "account API": "pill-tag",
+  "response header": "pill-tag",
+  "INFORMATION_SCHEMA": "pill-tag",
+  "local counter": "pill-paused",
+  "no counter": "pill-flat",
+};
+
+function basisCell(r: QuotaRow): string {
+  const b = r.basis || "no counter";
+  return `<span class="pill ${BASIS_STYLE[b] || "pill-flat"} pill-flat"
+    title="${b === "local counter" ? "this deployment's own tally — never reconciled with the provider"
+      : b === "no counter" ? "there is no allowance to count"
+      : "the provider's own answer"}">${esc(b)}</span>`;
+}
+
 const HEAD = `<thead><tr>
   <th>Source</th><th style="width:7rem">Used</th><th class="right">Remaining</th>
-  <th>Resets</th><th>Limits</th>
+  <th>Resets</th><th>Source of this number</th><th>Limits</th>
 </tr></thead>`;
 
 function table(s: QuotaSnapshot): string {
