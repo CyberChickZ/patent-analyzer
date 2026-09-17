@@ -1,5 +1,5 @@
 import { getStatus, getEvents, reportUrl, type JobEvent, type JobStatus } from "../api";
-import { esc, clip, pill, fmtTime, errorBox, empty, openModal, md, promptBlocks, on } from "../ui";
+import { esc, clip, pill, fmtTime, errorBox, empty, openModal, md, promptBlocks, on, LOCALE } from "../ui";
 import { STEPS, stepOfEvent, stepStates, PAUSE_LABEL, PAUSE_STEP, llmCallsByStep, dedupeEvents, isLegacyEvent } from "../phases";
 import { mountReview, queriesTable } from "../hitl";
 import { rememberJob } from "../main";
@@ -22,20 +22,24 @@ export function disposeRun(): void {
   cursor = 0; seenKeys = new Set<string>(); inFlight = false;
 }
 
-export function renderRun(host: HTMLElement, jobId: string): void {
+/** `embedded` drops the page heading: the same timeline, live events and HITL
+ *  review panel are mounted inside the Results page's Event log tab, where the
+ *  page already has a heading and a job. One implementation, two places — the
+ *  polling and the review panel are the hard parts and must not be forked. */
+export function renderRun(host: HTMLElement, jobId: string, opts: { embedded?: boolean } = {}): void {
   disposeRun();
   if (!jobId) {
-    host.innerHTML = `<div class="page-head"><div class="kicker">Step 2</div><h1>In progress</h1></div>
-      ${empty("No job selected", `Pick one from <a href="#/submit">Submit</a>, or start a new analysis.`)}`;
+    host.innerHTML = `<div class="page-head"><div class="kicker">Step 2</div><h1>Run</h1></div>
+      ${empty("No job selected", `Pick one from <a href="#/results">Results</a>, or start a new analysis.`)}`;
     return;
   }
   rememberJob(jobId);
   host.innerHTML = `
-    <div class="page-head">
+    ${opts.embedded ? "" : `<div class="page-head">
       <div class="kicker">Step 2</div>
       <h1 id="run-title">Job <span class="mono">${esc(jobId)}</span></h1>
       <div class="lede" id="run-lede">Connecting…</div>
-    </div>
+    </div>`}
     <div id="run-error"></div>
     <section class="section"><header><h2>Pipeline</h2><span class="hint" id="run-hint"></span></header>
       <div id="timeline" class="timeline"></div></section>
@@ -205,7 +209,7 @@ function wireEventClicks(root: ParentNode): void {
 
 function showEvent(e: JobEvent): void {
   const p = e.payload || {};
-  let h = `<div class="small muted" style="margin-bottom:.6rem">${esc(new Date(e.ts).toLocaleString())} · phase <code>${esc(e.phase)}</code> · kind <code>${esc(e.kind)}</code></div>`;
+  let h = `<div class="small muted" style="margin-bottom:.6rem">${esc(new Date(e.ts).toLocaleString(LOCALE))} · phase <code>${esc(e.phase)}</code> · kind <code>${esc(e.kind)}</code></div>`;
   if (p.system) h += `<div class="subhead">System prompt <span class="pill pill-tag">hardcoded</span></div><pre>${esc(p.system)}</pre>`;
   if (p.user) h += `<div class="subhead">User prompt</div>${promptBlocks(p.user)}`;
   if (p.response) h += `<div class="subhead">Response <span class="pill pill-tag">LLM output</span></div><div class="prose">${md(p.response)}</div>`;

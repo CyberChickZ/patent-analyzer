@@ -1,15 +1,17 @@
 import {
   getResults, getStatus, reportUrl, getFulltextGaps, uploadFulltext, dropFulltextUpload,
-  rerunEvidence, getLedger, type JobEvent, type FulltextGaps, type FulltextGapRow,
-  type Ledger,
+  rerunEvidence, getLedger, listJobs, deleteJob, isNotSignedIn,
+  type JobEvent, type FulltextGaps, type FulltextGapRow, type JobSummary, type Ledger,
 } from "../api";
-import { esc, clip, pill, num, empty, errorBox, openModal, md, on, plainTitle } from "../ui";
+import { esc, clip, pill, num, empty, errorBox, openModal, md, on, plainTitle, fmtDate } from "../ui";
 import { queriesTable } from "../hitl";
 import { dedupeEvents, isLegacyEvent } from "../phases";
 import { loadQuota, perM, quotaNote, upcomingBlock, fmtUSD, EMDASH, type Quota } from "../pricing";
 import { rememberJob } from "../main";
+import { renderRun, disposeRun } from "./run";
 
 let R: any = null;            // results.json
+let LOADED = "";              // which job R holds, so switching tab does not refetch it
 let EVENTS: JobEvent[] = [];
 let showAllDocs = false;
 /** Which collapsible blocks the reader has opened, so a repaint (Show every
@@ -47,8 +49,17 @@ function isCovered(doc: any, criterion: string): boolean {
   return (doc.checklist_results?.[criterion]?.score ?? 0) >= 2;   // no adjudication on this job
 }
 
+/** The router disposes on every navigation, and switching tab IS a navigation
+ *  (the tab is in the hash). So dispose only drops what is per-paint; the
+ *  results.json itself — tens of MB on a full run — is kept and thrown away in
+ *  `resetResults` when the job id actually changes. */
 export function disposeResults(): void {
-  R = null; EVENTS = []; showAllDocs = false; QUOTA = null; GAPS = null; showAllGaps = false;
+  spy?.disconnect(); spy = null;
+  disposeRun();          // the Event log tab mounts the run page; its poll has to stop
+}
+
+function resetResults(): void {
+  R = null; LOADED = ""; EVENTS = []; showAllDocs = false; QUOTA = null; GAPS = null; showAllGaps = false;
   LEDGER = null; LEDGER_WHY = "";
   opened = new Set<string>();
   spy?.disconnect(); spy = null;
@@ -67,15 +78,15 @@ function markOpen(key: string, open: boolean): void {
   opened.add(open ? key : `!${key}`);
 }
 
-interface Sec { id: string; label: string; }
+interface Sec { key: string; id: string; label: string; }
 
-export async function renderResults(host: HTMLElement, jobId: string): Promise<void> {
+export async function renderResults(host: HTMLElement, arg: string): Promise<void> {
+  const [jobId = "", tab = ""] = String(arg || "").split("/");
   disposeResults();
-  if (!jobId) {
-    host.innerHTML = `<div class="page-head"><div class="kicker">Step 3</div><h1>Results</h1></div>
-      ${empty("No job selected", `Pick a completed job from <a href="#/submit">Submit</a>.`)}`;
-    return;
-  }
+  if (jobId !== LOADED) resetResults();
+  // Same job, already loaded: this is a tab switch. Repaint, do not refetch.
+  if (jobId && R && jobId === LOADED) { paint(host, jobId, tab); return; }
+  if (!jobId) { await renderJobList(host); return; }
   rememberJob(jobId);
   host.innerHTML = `<div class="page-head"><div class="kicker">Step 3</div>
     <h1>Results <span class="mono small muted">${esc(jobId)}</span></h1>
@@ -108,10 +119,60 @@ export async function renderResults(host: HTMLElement, jobId: string): Promise<v
           : empty("No results yet", `This job has not produced a results.json. <a href="#/run/${esc(jobId)}">Watch it run →</a>`));
     return;
   }
-  paint(host, jobId);
+  LOADED = jobId;
+  paint(host, jobId, tab);
 }
 
-function paint(host: HTMLElement, jobId: string): void {
+/** Every job, newest first, with the running ones floated to the top.
+ *
+ *  This is the page's front door. It used to be a dead end that said "No job
+ *  selected", while the topbar's "In progress" quietly pointed at whatever job
+ *  was last opened — which was usually one that had finished (Harry,
+ *  2026-09-20). A list of jobs cannot go stale in that way.
+ */
+async function renderJobList(host: HTMLElement): Promise<void> {
+  host.innerHTML = `<div class="page-head"><div class="kicker">Step 3</div><h1>Jobs</h1>
+    <div class="lede"><span class="spinner"></span> Loading…</div></div>`;
+  let jobs: JobSummary[];
+  try {
+    jobs = await listJobs();
+  } catch (e: any) {
+    host.innerHTML = `<div class="page-head"><div class="kicker">Step 3</div><h1>Jobs</h1></div>`
+      + (isNotSignedIn(e)
+        ? empty("Sign in to see your jobs", "Once you are signed in, every job you submitted shows up here.")
+        : errorBox(`Could not load the job list — ${String(e?.message || e)}`));
+    return;
+  }
+  const rank = (j: JobSummary) => (j.status === "running" || j.status === "queued" || j.status === "waiting_for_hitl" ? 0 : 1);
+  jobs.sort((a, b) => rank(a) - rank(b) || (b.created_at || "").localeCompare(a.created_at || ""));
+
+  host.innerHTML = `<div class="page-head"><div class="kicker">Step 3</div>
+    <h1>Jobs <span class="small muted">${jobs.length}</span></h1>
+    <div class="lede">Pick one to see its verdict, its evidence and its event log. <a href="#/submit">Start a new analysis →</a></div>
+  </div>` + (jobs.length
+    ? `<section class="section"><div class="tbl-wrap"><div class="tw"><table class="tbl">
+        <thead><tr><th>Job</th><th>Status</th><th>Phase</th><th class="nowrap">Created</th><th></th></tr></thead>
+        <tbody>${jobs.map((j) => `<tr>
+          <td><a href="#/results/${esc(j.id)}">${esc(j.title || j.filename || j.id)}</a>
+            <div class="mono tiny muted">${esc(j.id)}${j.title && j.filename ? ` · ${esc(clip(j.filename, 48))}` : ""}</div></td>
+          <td>${pill(j.status, j.status === "waiting_for_hitl" ? "paused" : undefined)}</td>
+          <td class="small muted">${esc(j.phase || "—")}${rank(j) === 0 ? ` <span class="spinner"></span>` : ""}</td>
+          <td class="small muted nowrap">${esc(fmtDate(j.created_at))}</td>
+          <td class="right nowrap"><button class="icon-btn del" data-id="${esc(j.id)}" title="Delete job">✕</button></td>
+        </tr>`).join("")}</tbody></table></div></div></section>`
+    : empty("No jobs yet", `Submit a document on <a href="#/submit">Submit</a> and it will show up here.`));
+
+  on(host, "a[href^='#/results/']", (el) => rememberJob((el as HTMLAnchorElement).hash.split("/")[2] || ""));
+  on(host, "button.del", async (el, ev) => {
+    ev.stopPropagation();
+    const id = el.dataset.id!;
+    if (!confirm(`Delete job ${id}? This removes its files from GCS.`)) return;
+    await deleteJob(id);
+    await renderJobList(host);
+  });
+}
+
+function paint(host: HTMLElement, jobId: string, tab = ""): void {
   buildCoverage();
   const p1 = R.phase1 || {};
   const cands: any[] = (R.extraction || {}).candidate_inventions || [];
@@ -119,34 +180,52 @@ function paint(host: HTMLElement, jobId: string): void {
   const sr: any[] = (R.evaluation || {}).scoring_report || [];
   const adj = R.adjudication || {};
 
+  const secs = sections(R.user_edits || []);
+  const active = secs.find((x) => x.key === tab) || secs[0];
+  const build: Record<string, () => string> = {
+    verdict: () => determinationSection(adj, sr),
+    candidates: () => candidatesSection(cands, checklist, sr),
+    search: () => searchSection(),
+    fulltext: () => fulltextSection(),
+    evidence: () => matrixSection(cands, checklist, sr),
+    draft: () => draftSection(R.draft_claims || {}),
+    edits: () => editsSection(R.user_edits || []),
+    cost: () => costSection(sr),
+    // filled after the page is in the DOM: the run page mounts itself
+    events: () => `<section class="section" id="sec-events"><div id="run-mount"></div></section>`,
+  };
+  // One section at a time. A full run rendered all eight at once — ~15,000px
+  // of page that nobody reads, where the nav was only a scroll-to (Harry,
+  // 2026-09-20). The tab lives in the hash, so a refresh or a shared link
+  // lands on the same one.
+  const body = (build[active.key] || build.verdict)();
+
   host.innerHTML = `
   <div class="page-head">
-    <div class="kicker">Step 3 · ${esc(R.job_id || jobId)}</div>
+    <div class="kicker"><a href="#/results">← All jobs</a> · ${esc(R.job_id || jobId)}</div>
     <h1>${esc(clip(plainTitle(R.source_title) || R.source_filename || "Results", 140))}</h1>
     <div class="lede">
       ${pill("completed")} ${esc(p1.status_determination || "—")} ·
       ${esc(p1.input_mode || "—")} · CPC ${esc(p1.cpc_subclass || "—")} ·
       <a href="${reportUrl(jobId)}" target="_blank" rel="noopener">Full HTML report ↗</a> ·
-      <a href="/api/results/${esc(jobId)}" target="_blank" rel="noopener">results.json ↗</a> ·
-      <a href="#/run/${esc(jobId)}">Event log →</a>
+      <a href="/api/results/${esc(jobId)}" target="_blank" rel="noopener">results.json ↗</a>
     </div>
   </div>
 
-  ${secNav(R.user_edits || [])}
-  ${determinationSection(adj, sr)}
-  ${candidatesSection(cands, checklist, sr)}
-  ${searchSection()}
-  ${fulltextSection()}
-  ${matrixSection(cands, checklist, sr)}
-  ${draftSection(R.draft_claims || {})}
-  ${editsSection(R.user_edits || [])}
-  ${costSection(sr)}
+  ${secNav(R.user_edits || [], jobId, active)}
+  ${body}
   `;
 
-  wireSecNav(host);
   host.querySelectorAll<HTMLDetailsElement>("details[data-keep]").forEach((d) => {
     d.addEventListener("toggle", () => markOpen(d.dataset.keep!, d.open));
   });
+
+  // The Event log tab is the run page, mounted here: same timeline, same live
+  // poll, same HITL review panel. It polls only while this tab is open, and
+  // disposeResults stops it.
+  const mount = host.querySelector<HTMLElement>("#run-mount");
+  if (mount) renderRun(mount, jobId, { embedded: true });
+  else disposeRun();
 
   on(host, "[data-cell]", (el) => {
     const [pub, crit] = el.dataset.cell!.split("||");
@@ -177,46 +256,26 @@ function paint(host: HTMLElement, jobId: string): void {
 
 function sections(edits: any[]): Sec[] {
   return [
-    { id: "sec-verdict", label: "Verdict" },
-    { id: "sec-candidates", label: "Candidates" },
-    { id: "sec-search", label: "Search" },
-    ...(GAPS && GAPS.rows.length ? [{ id: "sec-fulltext", label: "Full text" }] : []),
-    { id: "sec-evidence", label: "Evidence" },
-    { id: "sec-draft", label: "Draft" },
-    ...(edits.length ? [{ id: "sec-edits", label: "Reviewer edits" }] : []),
-    { id: "sec-cost", label: "Cost" },
+    { key: "verdict", id: "sec-verdict", label: "Verdict" },
+    { key: "candidates", id: "sec-candidates", label: "Candidates" },
+    { key: "search", id: "sec-search", label: "Search" },
+    ...(GAPS && GAPS.rows.length ? [{ key: "fulltext", id: "sec-fulltext", label: "Full text" }] : []),
+    { key: "evidence", id: "sec-evidence", label: "Evidence" },
+    { key: "draft", id: "sec-draft", label: "Draft" },
+    ...(edits.length ? [{ key: "edits", id: "sec-edits", label: "Reviewer edits" }] : []),
+    { key: "cost", id: "sec-cost", label: "Cost" },
+    { key: "events", id: "sec-events", label: "Event log" },
   ];
 }
 
-function secNav(edits: any[]): string {
-  return `<nav class="secnav" aria-label="Sections of this report">
-    ${sections(edits).map((x) => `<a href="#${x.id}" data-sec="${x.id}">${esc(x.label)}</a>`).join("")}
+function secNav(edits: any[], jobId: string, active: Sec): string {
+  return `<nav class="secnav" role="tablist" aria-label="Sections of this report">
+    ${sections(edits).map((x) => `<a href="#/results/${encodeURIComponent(jobId)}/${x.key}" data-sec="${x.key}"
+       role="tab" aria-selected="${x.key === active.key}" class="${x.key === active.key ? "on" : ""}">${esc(x.label)}</a>`).join("")}
   </nav>`;
 }
 
-function wireSecNav(host: HTMLElement): void {
-  const links = new Map<string, HTMLElement>();
-  host.querySelectorAll<HTMLElement>(".secnav a[data-sec]").forEach((a) => {
-    links.set(a.dataset.sec!, a);
-    // the hash is the router's, so the anchor scrolls by hand
-    a.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      document.getElementById(a.dataset.sec!)?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
-  });
-  spy?.disconnect();
-  // Mark the section whose heading last crossed the top of the reading area.
-  spy = new IntersectionObserver((entries) => {
-    for (const en of entries) {
-      if (!en.isIntersecting) continue;
-      links.forEach((el, id) => el.classList.toggle("on", id === en.target.id));
-    }
-  }, { rootMargin: "-25% 0px -70% 0px", threshold: 0 });
-  links.forEach((_, id) => {
-    const el = document.getElementById(id);
-    if (el) spy!.observe(el);
-  });
-}
+
 
 // ─── Determination ───
 
@@ -242,6 +301,42 @@ function wireSecNav(host: HTMLElement): void {
  *  requirement was met without a quote instead of only being told that one
  *  was. On a job old enough to have no `label_text` the reader still gets
  *  `adj.reason`, the same author's full sentence. */
+/** The verdict in a sentence, worked out from `label` here rather than read
+ *  from `adjudication.label_text`.
+ *
+ *  `label_text` is written into results.json when the job runs
+ *  (graph/eval_subgraph.py), so a wording fix in the backend would never reach
+ *  a job that had already finished — this page would keep showing "§102" to
+ *  the end of time. Computing it means every past job gets the new sentence.
+ *  `label_text` stays as the fallback for a label this page does not know.
+ *
+ *  Kept word-for-word in step with patent_analyzer/report_sections._LABEL_TEXT
+ *  so the page and the HTML report cannot say different things about the same
+ *  verdict. */
+function verdictHeadline(adj: any): string {
+  const thr = Math.round(((adj.params || {}).single_partial_103 ?? 0.7) * 100);
+  if (adj.label === "102") return "One document already shows everything (§102, anticipation)";
+  if (adj.label === "103") {
+    return adj.basis === "primary_partial"
+      ? `Best single document shows most of it (≥${thr}% — screening flag)`
+      : "Two or three documents together show everything (§103 screen — a flag for review, not a legal obviousness finding)";
+  }
+  if (adj.label === "ALLOW") return "No document or combination we read shows all the elements";
+  return adj.label_text || "";
+}
+
+/** The two numbers the verdict rests on, in the report's words. */
+function coverageLines(adj: any): string[] {
+  const n = adj.n_elements || 0;
+  if (!n) return [];
+  const per: any[] = adj.per_doc_coverage || [];
+  const bestN = per.length ? (per[0].n_covered ?? 0) : 0;
+  const comboN = (adj.combo || {}).n_covered ?? 0;
+  const k = (adj.params || {}).max_combo ?? 3;
+  return [`Best single document: ${bestN} of ${n} elements.`,
+          `Best combination (up to ${k} documents): ${comboN} of ${n}.`];
+}
+
 function determinationSection(adj: any, sr: any[]): string {
   if (!adj || !adj.label) {
     return `<section class="section" id="sec-verdict"><header><h2>Determination</h2></header>
@@ -259,8 +354,11 @@ function determinationSection(adj: any, sr: any[]): string {
         <span class="pill ${adj.risk === "blocking" ? "pill-failed" : "pill-paused"}">${esc(adj.risk || "")}</span>
         <span class="small muted">${esc(adj.n_elements || 0)} elements · best single reference covers ${adj.best_coverage != null ? Math.round(adj.best_coverage * 100) + "%" : "—"}</span>
       </div>
-      ${adj.label_text ? `<div class="verdict-headline">${esc(adj.label_text)}</div>` : ""}
-      <div class="prose">${esc(adj.reason || "")}</div>
+      <div class="verdict-headline">${esc(verdictHeadline(adj))}</div>
+      ${coverageLines(adj).map((l) => `<div class="small">${esc(l)}</div>`).join("")}
+      <details class="box" data-keep="how"${isOpen("how", false) ? " open" : ""}>
+        <summary>How this was decided (for attorneys)</summary>
+        <div class="box-body prose">${esc(adj.reason || "")}</div></details>
       ${unevidencedBlock(adj)}
       ${adj.obviousness_explanation ? `<details class="box" open>
         <summary>Obviousness explanation <span class="pill pill-tag">model narrative, not the rule's output</span></summary>
@@ -337,7 +435,7 @@ function candidatesSection(cands: any[], checklist: any[], sr: any[]): string {
       const els: any[] = c.elements || [];
       const best = bestDocFor(own, sr);
       const key = `cand:${c.id}`;
-      return `<details class="cand" data-keep="${esc(key)}" ${isOpen(key, i === 0) ? "open" : ""}>
+      return `<details class="cand" data-keep="${esc(key)}" ${isOpen(key, false) ? "open" : ""}>
         <summary class="cand-head">
           <div class="row">
             <span class="cid">${esc(c.id)}</span>
@@ -405,7 +503,9 @@ function searchSection(): string {
         <div><div class="k">Unique pool</div><div class="v">${num(s.total_unique)}</div></div>
         <div><div class="k">Downloaded</div><div class="v">${num(s.downloaded)}</div></div>
       </div>
-      ${queriesTable(qs)}
+      ${qs.length ? `<details class="box" data-keep="queries"${isOpen("queries", false) ? " open" : ""}>
+        <summary>${qs.length} quer${qs.length === 1 ? "y" : "ies"} across ${rounds.length} round${rounds.length === 1 ? "" : "s"}</summary>
+        <div class="box-body">${queriesTable(qs)}</div></details>` : ""}
       ${rounds.length ? `<div class="tbl-wrap"><div class="tw"><table class="tbl">
         <thead><tr><th>Round</th><th>Mode</th><th class="right">Queries</th><th class="right">SerpAPI</th><th class="right">Google Patents</th><th class="right">Seeds</th><th class="right">Cited expansion</th><th class="right">Pool</th><th>Uncovered after</th></tr></thead>
         <tbody>${rounds.map((r: any) => `<tr>
@@ -802,16 +902,24 @@ function draftSection(dc: any): string {
       ${flags.length ? `<span class="pill pill-failed">${flags.length} open 112(b)</span>` : ""}
     </header>
     <div class="panel"><div class="panel-body">
-      ${claims.map((c: any) => `<div style="margin-bottom:.9rem">
-        <div class="subhead">Claim ${esc(c.no)} <span class="pill pill-tag">${esc(c.form || "")}</span>
-          ${c.depends_on != null ? `<span class="small muted">depends on ${esc(c.depends_on)}</span>` : ""}</div>
+      ${claims.map((c: any) => {
+        const key = `claim:${c.no}`;
+        return `<details class="cand" data-keep="${esc(key)}" ${isOpen(key, false) ? "open" : ""}>
+        <summary class="cand-head"><div class="row">
+          <span class="cid">Claim ${esc(c.no)}</span>
+          <span class="pill pill-tag">${esc(c.form || "")}</span>
+          ${c.depends_on != null ? `<span class="small muted">depends on ${esc(c.depends_on)}</span>` : ""}
+          <span class="small muted nowrap">${(c.limitations || []).length} limitation${(c.limitations || []).length === 1 ? "" : "s"}</span>
+        </div><div class="concept">${esc(clip(c.preamble || "", 160))}</div></summary>
+        <div class="cand-body">
         <div class="prose">${esc(c.preamble || "")}</div>
         <ul class="prose">${(c.limitations || []).map((l: any) => {
           const cov = l.coverage || {};
           const star = cov.verified && !(cov.covered_by || []).length ? ` <b title="no charted reference covers this limitation">★</b>` : "";
           return `<li><span class="mono tiny muted">${esc(l.lid || "")}</span> ${esc(l.text)}${star}</li>`;
         }).join("")}</ul>
-      </div>`).join("")}
+        </div></details>`;
+      }).join("")}
       ${dc.avoidance?.reason ? `<div class="small muted">Avoidance: ${esc(dc.avoidance.reason)}</div>` : ""}
     </div></div>
   </section>`;

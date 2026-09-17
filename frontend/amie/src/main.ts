@@ -23,7 +23,6 @@ root.innerHTML = `
       <div class="brand"><span class="mark">▨</span> AMIE <span class="sub">patent analyzer</span></div>
       <nav class="nav" id="nav">
         <a href="#/submit" data-route="submit">Submit</a>
-        <a href="#/run" data-route="run">In progress</a>
         <a href="#/results" data-route="results">Results</a>
         <a href="#/prompts" data-route="prompts">Prompts</a>
         <a href="#/quota" data-route="quota">Quota</a>
@@ -92,8 +91,10 @@ let currentName = "";
 
 function parse(): { name: string; arg: string } {
   const h = location.hash.replace(/^#\/?/, "");
-  const [name = "submit", arg = ""] = h.split("/");
-  return { name: PAGES[name] ? name : "submit", arg: decodeURIComponent(arg) };
+  // Everything after the page name belongs to the page: the results page reads
+  // "<job>/<tab>" so a tab is a real URL, shareable and survivable by refresh.
+  const [name = "submit", ...rest] = h.split("/");
+  return { name: PAGES[name] ? name : "submit", arg: rest.map(decodeURIComponent).join("/") };
 }
 
 function markNav(): void {
@@ -101,8 +102,7 @@ function markNav(): void {
   nav.querySelectorAll<HTMLAnchorElement>("a[data-route]").forEach((a) => {
     const r = a.dataset.route!;
     a.classList.toggle("on", r === name);
-    if ((r === "run" || r === "results") && lastJob) a.href = `#/${r}/${lastJob}`;
-    else a.href = `#/${r}`;
+    a.href = `#/${r}`;
   });
 }
 
@@ -114,7 +114,10 @@ function route(): void {
   currentPage = PAGES[name];
   markNav();
   view.innerHTML = "";
-  void currentPage.render(view, arg || (name === "run" || name === "results" ? lastJob : ""));
+  // Results opens on its job list, so it must NOT be given lastJob — that is
+  // how the old "In progress" tab kept opening a job that had finished hours
+  // ago (Harry, 2026-09-20).
+  void currentPage.render(view, arg || (name === "run" ? lastJob : ""));
 }
 
 window.addEventListener("hashchange", route);
@@ -148,7 +151,9 @@ async function boot(): Promise<void> {
       return;
     }
     const dev = await isDeveloper();
-    authSlot.innerHTML = `<span class="small muted nowrap">${esc(user.email || "")}${dev ? " · dev" : ""}</span>`;
+    authSlot.innerHTML = `<span class="small muted nowrap">${esc(user.email || "")}`
+      + (dev ? `<span title="developer account — a Firebase custom claim on this user, not the deployment's environment"> · developer</span>` : "")
+      + `</span>`;
     const out = document.createElement("button");
     out.className = "icon-btn";
     out.textContent = "Sign out";
