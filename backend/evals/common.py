@@ -270,3 +270,96 @@ def format_cited(patent: dict) -> str:
     parts.append("# Claims")
     parts += [c for c in (patent.get("claims") or []) if c]
     return "\n".join(parts)
+
+
+# ── spend guard for eval runs ───────────────────────────────────────────────
+#
+# 2026-09-18 cost $230 in a day, most of it Vertex, and every dollar of it came
+# from an eval script that nobody had told how much it was allowed to spend.
+# The runtime has a daily ceiling now (patent_analyzer.spend); this is the same
+# idea one level up, because an eval is where the money actually goes and
+# because a script that prints its price before it starts is one a person can
+# say no to.
+
+class BudgetExceeded(RuntimeError):
+    """Stopped because the run reached its --budget-usd, not because it broke."""
+
+
+class Budget:
+    """Priced up front, checked as it goes.
+
+    `per_item` is the last MEASURED cost of one item, not a guess: pass what
+    the previous run's ledger reported. The estimate is printed before the
+    first call so a run that cannot possibly fit is refused before it spends
+    anything, and the running total is checked after every item so one that
+    drifts over is stopped where it stands — with the item number, because
+    "it stopped" and "it finished" must not look the same in the output.
+    """
+
+    def __init__(self, budget_usd: float, n_items: int, per_item_usd: float, label: str = "run"):
+        self.budget = float(budget_usd)
+        self.n = int(n_items)
+        self.per_item = float(per_item_usd)
+        self.label = label
+        self.spent = 0.0
+        self.done = 0
+
+    @property
+    def estimate(self) -> float:
+        return round(self.n * self.per_item, 2)
+
+    def start(self, out=print) -> None:
+        out(f"[budget] {self.label}: {self.n} items x ${self.per_item:.2f} measured "
+            f"= ${self.estimate:.2f} estimated, budget ${self.budget:.2f}")
+        if self.estimate > self.budget:
+            raise BudgetExceeded(
+                f"estimated ${self.estimate:.2f} for {self.n} items is over the ${self.budget:.2f} "
+                f"budget. Raise --budget-usd, or cut the item count to "
+                f"{int(self.budget // self.per_item) if self.per_item else 0}.")
+
+    def charge(self, usd: float, out=print) -> None:
+        """Add what the item actually cost and stop if the run is now over."""
+        self.spent += float(usd or 0)
+        self.done += 1
+        if self.spent > self.budget:
+            msg = (f"[budget] STOPPED after item {self.done} of {self.n}: spent "
+                   f"${self.spent:.2f} of ${self.budget:.2f}. The remaining "
+                   f"{self.n - self.done} items were NOT run.")
+            out(msg)
+            raise BudgetExceeded(msg)
+
+    def observe(self, total_usd: float, out=print) -> None:
+        """Set the running total from the process meter instead of adding a
+        per-item figure. Concurrent runs need this: two items finishing at the
+        same time would each add their own delta and double-count."""
+        self.spent = float(total_usd or 0)
+        self.done += 1
+        if self.spent > self.budget:
+            msg = (f"[budget] STOPPED after item {self.done} of {self.n}: spent "
+                   f"${self.spent:.2f} of ${self.budget:.2f}. The remaining "
+                   f"{self.n - self.done} items were NOT run.")
+            out(msg)
+            raise BudgetExceeded(msg)
+
+    def finish(self, out=print) -> None:
+        out(f"[budget] {self.label}: {self.done}/{self.n} items, ${self.spent:.2f} spent "
+            f"of ${self.budget:.2f}")
+
+
+def add_budget_arg(parser, required: bool = True) -> None:
+    """--budget-usd, required on anything that calls a model.
+
+    Read-only scripts (funnel.py, the report renderers) do not take it: making
+    a script that spends nothing ask permission to spend nothing trains people
+    to type a number without reading it.
+    """
+    parser.add_argument("--budget-usd", type=float, required=required,
+                        help="hard ceiling for this run in USD; the run refuses to start if its "
+                             "estimate is over it and stops where it stands if the actual spend "
+                             "passes it")
+
+
+def job_cost_usd() -> float:
+    """What the run has spent so far, from the same meter the cost card reads."""
+    from patent_analyzer import metering
+    return float((metering.totals() or {}).get("cost_usd", 0.0))

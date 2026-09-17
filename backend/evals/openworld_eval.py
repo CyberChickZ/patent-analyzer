@@ -352,6 +352,8 @@ async def main():
     ap.add_argument("--bundle", default=os.environ.get("E4_BUNDLE", ""), help="gs:// bundle to pull (Cloud Run Job)")
     ap.add_argument("--push-bundle", default="", help="gs:// path to build+upload the bundle to")
     ap.add_argument("--upload", default=os.environ.get("E4_UPLOAD", ""), help="gs:// prefix to upload results to")
+    from common import add_budget_arg
+    add_budget_arg(ap)
     args = ap.parse_args()
     RUN_DIR.mkdir(parents=True, exist_ok=True)
     if args.bundle:
@@ -391,14 +393,34 @@ async def main():
     todo = [(k, g) for k, g in gold.items() if g["gold_families"] and (not only or k in only)][:args.limit]
     sem = asyncio.Semaphore(args.concurrency)
 
+    # Priced before the first call, checked after every paper. USD_PER_PAPER is
+    # the last measured full run (job 0cd09e0d, 2026-09-20: $2.81 over 238 LLM
+    # calls), not a guess; override it when the last run says otherwise.
+    from common import Budget, BudgetExceeded, job_cost_usd
+    per_paper = float(os.environ.get("E4_USD_PER_PAPER", "2.81"))
+    budget = Budget(args.budget_usd, len(todo), per_paper, "E4 pipeline")
+    budget.start()
+    stopped = False
+
     async def one(k, g):
+        nonlocal stopped
         async with sem:
+            if stopped:
+                return k, None
             try:
-                return k, await run_pipeline_one(k, g)
+                r = k, await run_pipeline_one(k, g)
             except Exception as exc:
                 print(f"[{k}] FAILED {type(exc).__name__}: {exc}")
-                return k, None
+                r = k, None
+            try:
+                budget.observe(job_cost_usd())
+            except BudgetExceeded:
+                stopped = True
+            return r
     recs = {k: r for k, r in await asyncio.gather(*(one(k, g) for k, g in todo)) if r}
+    budget.finish()
+    if stopped:
+        print(f"[budget] the numbers below cover {budget.done} of {len(todo)} papers — NOT the whole set")
     res = await score_pipeline(gold, recs)
     (RUN_DIR / "pipeline_result.json").write_text(json.dumps(res, indent=1))
     print(json.dumps({k: v for k, v in res.items() if k != "per_query"}, indent=1))
