@@ -1,5 +1,12 @@
 /** Rendering helpers shared by every page. */
 
+/** The UI is written in English, so its dates and numbers are formatted in
+ *  English too. Passing [] takes the browser's locale instead, which is how a
+ *  Chinese date turned up on the Quota page of an otherwise English page
+ *  (Harry, 2026-09-20) — the strings were never translated, the formatter was
+ *  just following whoever was looking at it. */
+export const LOCALE = "en-US";
+
 export function esc(s: unknown): string {
   return String(s ?? "").replace(/[&<>"']/g, (c) => (
     { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!
@@ -35,7 +42,7 @@ export function tag(text: string): string {
 export function fmtTime(ts: string): string {
   const d = new Date(ts);
   // 24h so the column stays one line at every width
-  return isNaN(d.getTime()) ? "" : d.toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  return isNaN(d.getTime()) ? "" : d.toLocaleTimeString(LOCALE, { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
 /** Titles come straight off the document, markdown heading marks and all. */
@@ -46,7 +53,7 @@ export function plainTitle(s: unknown): string {
 export function fmtDate(ts?: string): string {
   if (!ts) return "—";
   const d = new Date(ts);
-  return isNaN(d.getTime()) ? "—" : d.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return isNaN(d.getTime()) ? "—" : d.toLocaleString(LOCALE, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 /** A calendar day, no clock, in UTC.
@@ -61,13 +68,13 @@ export function fmtDay(ts?: string | null): string {
   const d = new Date(ts);
   return isNaN(d.getTime())
     ? "—"
-    : d.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
+    : d.toLocaleDateString(LOCALE, { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
 }
 
 export function num(n: unknown, fallback = "—"): string {
   if (n === null || n === undefined || n === "") return fallback;
   const v = Number(n);
-  return isNaN(v) ? String(n) : v.toLocaleString();
+  return isNaN(v) ? String(n) : v.toLocaleString(LOCALE);
 }
 
 export function pct(n: unknown, digits = 0): string {

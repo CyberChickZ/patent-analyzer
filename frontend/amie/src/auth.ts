@@ -13,20 +13,21 @@ const auth = getAuth(app);
 const provider = new GoogleAuthProvider();
 provider.setCustomParameters({ hd: 'oregonstate.edu' });
 
-// Firebase 只给错误码，不给人话。域名未授权是部署时最容易漏的一步：
-// 新的 Cloud Run 前端域名必须手动加进 Firebase Auth 的 Authorized domains，
-// 否则登录弹窗直接报 auth/unauthorized-domain，用户看到的只是一串码。
+// Firebase hands back a code and nothing else. auth/unauthorized-domain is the
+// one every deployment forgets: a new Cloud Run host has to be added to
+// Firebase Auth's authorized domains by hand, and until it is, every sign-in
+// fails with a string that names neither the fix nor who can apply it.
 const AUTH_ERRORS: Record<string, string> = {
-  'auth/unauthorized-domain': `域名未授权：${location.hostname} 不在 Firebase Auth 的授权域名列表里，请联系管理员在 Firebase 控制台 Authentication → Settings → Authorized domains 添加。`,
-  'auth/operation-not-allowed': '登录方式未启用：请联系管理员在 Firebase 控制台开启 Google 登录。',
-  'auth/popup-blocked': '登录弹窗被浏览器拦截了，请允许本站弹窗后重试。',
-  'auth/popup-closed-by-user': '登录弹窗被关闭了，没有完成登录。',
-  'auth/network-request-failed': '网络请求失败，请检查网络后重试。',
+  'auth/unauthorized-domain': `This site is not authorized to sign you in: ${location.hostname} is missing from Firebase Auth's authorized domains. An administrator has to add it (Firebase console → Authentication → Settings → Authorized domains).`,
+  'auth/operation-not-allowed': 'Google sign-in is turned off for this project. An administrator has to enable it in the Firebase console.',
+  'auth/popup-blocked': 'Your browser blocked the sign-in window. Allow pop-ups for this site and try again.',
+  'auth/popup-closed-by-user': 'The sign-in window was closed before sign-in finished.',
+  'auth/network-request-failed': 'The sign-in request could not reach Google. Check your connection and try again.',
 };
 
 export function authErrorMessage(e: any): string {
   const code = e?.code || '';
-  return AUTH_ERRORS[code] || e?.message || '登录失败';
+  return AUTH_ERRORS[code] || e?.message || 'Sign-in failed.';
 }
 
 export async function login(): Promise<User> {
@@ -38,7 +39,7 @@ export async function login(): Promise<User> {
   }
   if (!result.user.email?.endsWith('@oregonstate.edu')) {
     await signOut(auth);
-    throw new Error(`只允许 @oregonstate.edu 的 Google 账号登录，当前账号是 ${result.user.email || '未知'}。`);
+    throw new Error(`Only @oregonstate.edu Google accounts can sign in. You signed in as ${result.user.email || 'an unknown account'}.`);
   }
   return result.user;
 }
