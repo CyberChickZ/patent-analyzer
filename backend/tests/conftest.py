@@ -21,3 +21,20 @@ def _never_shared_spend_state(tmp_path_factory, monkeypatch):
         monkeypatch.setenv("SPEND_STORE", "local")
     if os.environ.get("SPEND_LOCAL_DIR") is None:
         monkeypatch.setenv("SPEND_LOCAL_DIR", str(tmp_path_factory.mktemp("spend")))
+
+
+@pytest.fixture(autouse=True)
+def _no_accidental_urlopen(monkeypatch):
+    """`_search` now reconciles with SerpAPI's /account before spending a key,
+    which with the suite's fake keys is a real request per key, each waiting
+    out a 15 s timeout for an answer nobody reads.
+
+    The guard is on the socket, not on the function: a test that wants that
+    path patches `urllib.request.urlopen` itself and its patch wins, so this
+    catches the calls nobody meant to make without blocking the ones they did.
+    """
+    import urllib.request
+
+    def _refuse(*a, **k):
+        raise OSError("urllib.request.urlopen is blocked in tests; patch it if the test needs it")
+    monkeypatch.setattr(urllib.request, "urlopen", _refuse)

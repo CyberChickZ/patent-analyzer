@@ -100,6 +100,38 @@ def sync_account() -> list[dict]:
     return out
 
 
+SYNC_EVERY_S = 60.0
+
+
+def _maybe_sync() -> None:
+    """Reconcile the local counters with SerpAPI's own before spending a key.
+
+    The local counter is per instance — cache.kv() on Cloud Run is a SQLite
+    file inside the container, and the service runs up to three of them — and
+    it is reset by every deploy. It has been wrong in both directions: it read
+    ~55 when the account said 272 (2026-09-19), which is a key refused for no
+    reason, and it can equally read low on a key another instance has already
+    spent, which is a 401 in the middle of a search.
+
+    /account is free and not billed, so the only cost is latency, and the
+    timestamp is shared with the quota panel so a job and a panel refresh do
+    not each pay for it. A failure here is not fatal: the local counter is
+    still a counter, it is just no better than it was.
+    """
+    try:
+        from ..cache import kv
+        store = kv()
+        if store.get("runtime", "serpapi_account_sync", max_age_days=SYNC_EVERY_S / 86400.0) is not None:
+            return
+        got = sync_account()
+        bad = [g for g in got if g.get("error")]
+        store.put("runtime", "serpapi_account_sync",
+                  {"basis": "local counter" if (bad or not got) else "account API",
+                   "error": (bad[0]["error"] if bad else "")[:160]})
+    except Exception:
+        pass
+
+
 _NO_RESULTS = "hasn't returned any results"
 
 
@@ -129,6 +161,7 @@ async def _search(engine: str, query: str, max_pages: int, num: int, match_type:
     keys = _keys()
     if not keys:
         return [], "SERPAPI_KEY not set"
+    _maybe_sync()
     last_err = None
     for key in keys:
         q = _quota(key)
