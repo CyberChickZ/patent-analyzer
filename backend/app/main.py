@@ -372,6 +372,8 @@ async def _run_langgraph_pipeline(job_id: str):
                     job.setdefault("events", []).append(slim_event(evt))
                     if evt.get("phase"):
                         job["phase"] = evt["phase"]
+                if patch.get("source_title") and not job.get("title"):
+                    job["title"] = short_title(patch["source_title"])
                 for pk, pd in patch.get("phase_results", {}).items():
                     job.setdefault("phases", {})[pk] = pd.get("data", {})
                     job["phase"] = pk
@@ -1037,13 +1039,35 @@ async def get_feedback(job_id: str):
     return []
 
 
+def short_title(text: str, max_words: int = 8) -> str:
+    """A name a person can pick out of a list.
+
+    Job ids are 8 hex characters: fine as an address, useless as a name. IDCA
+    already reads the document's own title into `source_title`, so the label
+    costs nothing extra — clipping it beats spending an LLM call per job on a
+    caption (decision recorded in leader_deploy.md §G).
+    """
+    words = " ".join(str(text or "").split()).split(" ")
+    if not words or not words[0]:
+        return ""
+    out = " ".join(words[:max_words])
+    return out + ("\u2026" if len(words) > max_words else "")
+
+
+def job_title(j: dict) -> str:
+    """What to show instead of the id. Jobs from before `title` existed, and
+    jobs that failed before IDCA finished, fall back to the file name."""
+    return j.get("title") or short_title(j.get("filename", "")) or j.get("id", "")
+
+
 @app.get("/jobs")
 async def list_jobs(user: dict = Depends(require_auth)):
     _list_jobs_from_gcs()
     _reap_zombie_jobs()
     user_email = user.get("email", "")
     dev = is_developer(user)
-    return [{"id": j["id"], "status": j["status"], "phase": j["phase"], "filename": j["filename"], "created_at": j.get("created_at")}
+    return [{"id": j["id"], "status": j["status"], "phase": j["phase"], "filename": j["filename"],
+             "title": job_title(j), "created_at": j.get("created_at")}
             for j in jobs.values()
             if dev or j.get("submitted_by", "") == user_email]
 

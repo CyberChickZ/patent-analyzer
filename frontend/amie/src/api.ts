@@ -5,6 +5,10 @@ export interface JobSummary {
   status: string;
   phase: string;
   filename: string;
+  /** What to call it in a list: the document's own title, clipped to eight
+   *  words by the backend (app.main.job_title). Absent on a job that ran
+   *  before the field existed, and the file name stands in. */
+  title?: string;
   created_at?: string;
 }
 
@@ -82,7 +86,7 @@ export async function loadConfig(): Promise<{ dev: boolean }> {
  *  (Harry, 2026-09-19, cloud login screen). */
 export class NotSignedIn extends Error {
   constructor() {
-    super("请先登录：这一页的数据要登录后才能读。");
+    super("Sign in to see this — the page needs an account before it can load anything.");
     this.name = "NotSignedIn";
   }
 }

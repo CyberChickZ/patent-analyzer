@@ -78,7 +78,8 @@ export function renderSubmit(host: HTMLElement): void {
   <div id="submit-error"></div>
 
   <section class="section">
-    <header><h2>Recent jobs</h2><button class="icon-btn" id="refresh-jobs">Refresh</button></header>
+    <header><h2>Recent jobs</h2><span class="hint">the last ${RECENT} · <a href="#/results">all jobs →</a></span>
+      <button class="icon-btn" id="refresh-jobs">Refresh</button></header>
     <div id="jobs"><div class="small muted"><span class="spinner"></span> Loading…</div></div>
   </section>
   `;
@@ -210,6 +211,10 @@ function budgetBody(q: Quota | null): string {
       Pausing is free; each <b>Rerun this phase</b> re-charges that phase.</div>`;
 }
 
+/** How many jobs the submit page lists. It is a place to start a job from,
+ *  not the place to browse them: the full list lives on Results. */
+const RECENT = 5;
+
 async function loadJobs(): Promise<void> {
   const host = document.getElementById("jobs");
   if (!host) return;
@@ -218,7 +223,7 @@ async function loadJobs(): Promise<void> {
     jobs = await listJobs();
   } catch (e: any) {
     host.innerHTML = isNotSignedIn(e)
-      ? empty("请先登录", "登录后这里会列出你提交过的分析任务。")
+      ? empty("Sign in to see your jobs", "Once you are signed in, the jobs you submitted show up here.")
       : errorBox(`Could not load jobs — ${e?.message || e}`);
     return;
   }
@@ -227,18 +232,21 @@ async function loadJobs(): Promise<void> {
     return;
   }
   jobs.sort((a, b) => (b.created_at || "").localeCompare(a.created_at || ""));
+  const shown = jobs.slice(0, RECENT);
   host.innerHTML = `<div class="tbl-wrap"><div class="tw"><table class="tbl">
-    <thead><tr><th>Job</th><th>Document</th><th>Status</th><th>Phase</th><th class="nowrap">Created</th><th></th></tr></thead>
-    <tbody>${jobs.map((j) => `<tr>
-      <td><a class="mono" href="#/run/${esc(j.id)}">${esc(j.id)}</a></td>
-      <td>${esc(j.filename || "—")}</td>
+    <thead><tr><th>Job</th><th>Status</th><th>Phase</th><th class="nowrap">Created</th><th></th></tr></thead>
+    <tbody>${shown.map((j) => `<tr>
+      <td><a href="#/results/${esc(j.id)}">${esc(j.title || j.filename || j.id)}</a>
+        <div class="mono tiny muted">${esc(j.id)}</div></td>
       <td>${pill(j.status)}</td>
       <td class="small muted">${esc(j.phase || "—")}</td>
       <td class="small muted nowrap">${esc(fmtDate(j.created_at))}</td>
       <td class="right nowrap">
-        ${j.status === "completed" ? `<a class="icon-btn" href="#/results/${esc(j.id)}">Results</a> ` : ""}
         <button class="icon-btn del" data-id="${esc(j.id)}" title="Delete job">✕</button></td>
-    </tr>`).join("")}</tbody></table></div></div>`;
+    </tr>`).join("")}</tbody></table></div></div>`
+    + (jobs.length > RECENT
+      ? `<div class="small muted" style="margin-top:.4rem">Showing ${RECENT} of ${jobs.length}. <a href="#/results">See them all →</a></div>`
+      : "");
 
   on(host, "a[href^='#/run/'], a[href^='#/results/']", (el) => {
     rememberJob((el as HTMLAnchorElement).hash.split("/").pop()!);
