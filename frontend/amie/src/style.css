@@ -587,3 +587,10 @@ tr.is-reserved > td { background: var(--neutral-soft); }
    not compete with the content it is attached to. */
 .fb-btn { font-size: .72rem; opacity: .45; }
 .fb-btn:hover, .fb-btn:focus { opacity: 1; }
+
+
+/* The in-place "we could not read this one" slot, in the evidence grid's
+   reference key. It is deliberately small: it is an offer, not a demand. */
+.ask-slot { margin-top: .3rem; padding: .35rem .45rem; border-left: 2px solid var(--warn, #b45309);
+            background: var(--bg2, #f6f6f4); border-radius: 3px; }
+.ask-slot .file-in { max-width: 15rem; }

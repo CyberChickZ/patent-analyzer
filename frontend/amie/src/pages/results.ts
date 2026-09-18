@@ -825,6 +825,16 @@ function wireFulltext(host: HTMLElement, jobId: string): void {
     say(`<div class="notice notice-info"><span class="spinner"></span> Uploading ${esc(file.name)}…</div>`);
     try {
       await uploadFulltext(jobId, ref, file);
+      // Queue the deep read for this reference alone. Uploading a PDF and
+      // then having to find a button to make it count is two steps where
+      // the second one is the whole point.
+      try {
+        await rerunEvidence(jobId, [ref]);
+        say(`<div class="notice notice-info">Uploaded. Re-reading ${esc(file.name)} now —
+          <a href="#/results/${esc(jobId)}/events">watch it run →</a></div>`);
+      } catch (e2: any) {
+        say(errorBox(`Uploaded, but the re-run did not start — ${String(e2?.message || e2)}`));
+      }
       await refresh();
     } catch (e: any) {
       (el as HTMLButtonElement).disabled = false;
@@ -872,6 +882,34 @@ function isAbstractOnly(doc: any): boolean {
     .find((d: any) => String(d.pub_num || d.title || "") === key);
   if (per && typeof per.abstract_only === "boolean") return per.abstract_only;
   return String(doc.source || "").startsWith("abstract") || doc.fulltext_tier === "abstract_only";
+}
+
+/** The gap row for a charted reference, when we have one. */
+function gapFor(doc: any): FulltextGapRow | null {
+    const pub = String(doc.pub_num || "").toUpperCase();
+    const title = String(doc.title || "").toLowerCase();
+    return (GAPS?.rows || []).find((r) => (pub && String(r.pub_num || "").toUpperCase() === pub)
+      || (!pub && title && String(r.title || "").toLowerCase() === title)) || null;
+}
+
+
+/** Ask for the one thing that would fix this reference, where the reference is.
+
+ *  The Full text tab already had an upload table, and nobody goes looking for a
+ *  tab when they are reading an evidence grid and notice a column is blank
+ *  because we never read the paper (Harry, 2026-09-20). Same control, same
+ *  handlers — `wireFulltext` is delegated, so the markup works anywhere on the
+ *  page — put next to the row it is about. */
+function askForIt(doc: any): string {
+    if (!isAbstractOnly(doc)) return "";
+    const row = gapFor(doc);
+    if (!row) return "";
+    const link = row.landing_page || (row.doi ? `https://doi.org/${row.doi}` : "");
+    return `<div class="ask-slot">
+      <div class="tiny muted">We could not read this one${link
+        ? `: <a href="${esc(link)}" target="_blank" rel="noopener">open it</a>` : ""}.
+        If you have access, drop the PDF here and the evidence step reruns for this reference.</div>
+      ${uploadCell(row, false)}</div>`;
 }
 
 function matrixSection(cands: any[], checklist: any[], sr: any[]): string {
@@ -929,7 +967,8 @@ function matrixSection(cands: any[], checklist: any[], sr: any[]): string {
         <tbody>${docs.map((d: any, i: number) => `<tr><td>D${i + 1}</td>
           <td class="mono tiny">${esc(d.pub_num || "—")}</td>
           <td>${esc(clip(d.title, 150))}${isAbstractOnly(d)
-            ? ` <span class="pill pill-paused pill-flat">abstract only</span>` : ""}</td>
+            ? ` <span class="pill pill-paused pill-flat">abstract only</span>` : ""}
+            ${askForIt(d)}</td>
           <td class="right num">${d.similarity_score ?? ""}</td></tr>`).join("")}</tbody></table></div>
       </div>
     </details>`;
