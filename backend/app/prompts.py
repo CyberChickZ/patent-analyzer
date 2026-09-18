@@ -31,9 +31,32 @@ _cache: dict[str, tuple[float, dict]] = {}
 CACHE_S = 60.0
 
 
-def register_default(name: str, template: str) -> str:
+#: What each prompt is for, in plain English: what it does, what it must output,
+#: who reads that output, and what cannot be relaxed. Written next to the
+#: template so an editor — or the revise assistant — can tell a rewrite from a
+#: change. See app/prompt_style.md §5.
+_CONTRACTS: dict[str, str] = {}
+
+
+def register_default(name: str, template: str, contract: str = "") -> str:
     _DEFAULTS[name] = template
+    if contract:
+        _CONTRACTS[name] = contract.strip()
     return template
+
+
+def contract(name: str) -> str:
+    return _CONTRACTS.get(name, "")
+
+
+def style_guide() -> str:
+    """The house style, as the model is shown it. Same file the humans read."""
+    from pathlib import Path
+    p = Path(__file__).parent / "prompt_style.md"
+    try:
+        return p.read_text(encoding="utf-8")
+    except Exception:
+        return ""
 
 
 def names() -> list[str]:
@@ -121,6 +144,7 @@ def describe(name: str) -> dict:
         raise KeyError(name)
     d = _doc(name)
     return {"name": name, "current": d.get("current", 0), "default": _DEFAULTS[name],
+            "contract": contract(name),
             "versions": [{k: v for k, v in ver.items()} for ver in d.get("versions", [])]}
 
 

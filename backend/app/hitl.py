@@ -6,6 +6,7 @@ GET  /hitl-status/{job_id}   — check if pipeline is waiting for HITL input
 """
 
 import json
+import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
@@ -345,6 +346,77 @@ async def put_prompt(name: str, req: PromptPut):
     feedback_store.record_prompt_edit(name, v, req.by or "unknown", req.instruction,
                                       _diff_summary(before, req.text))
     return {"name": name, "version": v, "current": _prompts.describe(name)["current"]}
+
+
+class PromptRevise(BaseModel):
+    instruction: str
+
+
+@router.post("/prompts/{name}/revise")
+async def revise_prompt(name: str, req: PromptRevise):
+    """Rewrite a prompt to the house style, without changing what it asks for.
+
+    One turn, no state, nothing stored: the caller gets a proposal and decides.
+    The model is shown four things and nothing else — the style guide, the
+    prompt's contract, the current text verbatim, and what the editor asked
+    for — because a rewrite that cannot see the contract is a rewrite that will
+    quietly break it.
+
+    It returns the text and the reason, and it does NOT save: a prompt that
+    changed because somebody typed a sentence, with no one reading the result,
+    is how a pipeline stops working in a way nobody can date.
+    """
+    from app import llm
+    if not req.instruction.strip():
+        raise HTTPException(400, "empty instruction")
+    try:
+        current, ver = _prompts.get(name)
+    except KeyError:
+        raise HTTPException(404, f"unknown prompt {name}")
+
+    system = ("You rewrite prompt templates to a house style. You never change what the prompt "
+              "asks the model to do, what it outputs, or the fields it names — only how it is "
+              "written. If the instruction would change behaviour, say so in `rationale` and "
+              "return the text unchanged.")
+    contract = _prompts.contract(name) or "(no contract recorded for this prompt)"
+    user = (f"# House style\n\n{_prompts.style_guide()}\n\n"
+            f"# Contract for `{name}`\n\n{contract}\n\n"
+            f"# Current template (version {ver})\n\n{current}\n\n"
+            f"# What the editor asked for\n\n{req.instruction.strip()}\n\n"
+            "# Output\n\n"
+            'Return JSON only: {"text": "<the full rewritten template>", '
+            '"rationale": "<=80 words on what you changed and what you deliberately left alone"}. '
+            "The template uses str.format_map: keep every {placeholder} exactly as it is, and keep "
+            "literal braces doubled.")
+    model = os.environ.get("PROMPT_REVISE_MODEL", "gemini-3.1-pro-preview")
+    try:
+        raw = await llm.call_llm(system, user, model=model, max_tokens=16384)
+    except Exception as exc:
+        raise HTTPException(502, f"the model did not answer: {type(exc).__name__}: {exc}")
+    import json as _json
+    import re as _re
+    m = _re.search(r"\{.*\}", raw, _re.DOTALL)
+    if not m:
+        raise HTTPException(502, "the model did not return JSON")
+    try:
+        out = _json.loads(m.group())
+    except Exception:
+        raise HTTPException(502, "the model returned JSON this endpoint could not parse")
+    text = str(out.get("text") or "")
+    if not text.strip():
+        raise HTTPException(502, "the model returned an empty template")
+    # A rewrite that drops a placeholder breaks the prompt at render time, which
+    # is a long way from here. Check it now and hand the check back.
+    holes = set(_re.findall(r"(?<!\{)\{([a-zA-Z_][a-zA-Z0-9_]*)\}(?!\})", current))
+    kept = set(_re.findall(r"(?<!\{)\{([a-zA-Z_][a-zA-Z0-9_]*)\}(?!\})", text))
+    return {"name": name, "from_version": ver, "text": text,
+            "rationale": str(out.get("rationale") or ""),
+            "model": model,
+            "placeholders_lost": sorted(holes - kept),
+            "placeholders_added": sorted(kept - holes),
+            "note": ("nothing was saved; PUT /prompts/{name} with this text to create a version"
+                     if not (holes - kept) else
+                     "NOT SAFE TO SAVE: the rewrite dropped a placeholder the template renders with")}
 
 
 class PromptCurrent(BaseModel):

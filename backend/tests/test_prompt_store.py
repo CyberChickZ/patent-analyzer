@@ -73,3 +73,27 @@ def test_a_saved_version_round_trips_through_whatever_store_is_active(env, tmp_p
     finally:
         pr._DEFAULTS.pop("t.example", None)
         pr._cache.pop("t.example", None)
+
+
+def test_a_prompt_can_carry_its_contract(env):
+    """The contract is what a rewrite must not break — what the prompt does,
+    what it outputs, who reads it, what cannot be relaxed (app/prompt_style.md
+    §5). Without it, "rewrite this to the house style" is an instruction the
+    model has no way to bound."""
+    pr.register_default("t.contract", "hello {x}", contract="Does: greet.\nMust output: nothing.")
+    try:
+        assert pr.contract("t.contract").startswith("Does: greet.")
+        assert pr.describe("t.contract")["contract"].startswith("Does: greet.")
+        assert pr.contract("t.no.such") == ""
+    finally:
+        pr._DEFAULTS.pop("t.contract", None)
+        pr._CONTRACTS.pop("t.contract", None)
+
+
+def test_the_style_guide_ships_with_the_image():
+    """The revise endpoint sends this to the model. If it is missing from the
+    container the endpoint silently asks for a rewrite against no style at
+    all, which is worse than refusing."""
+    g = pr.style_guide()
+    assert "# Prompt style" in g and "Static before dynamic" in g
+    assert "contract" in g.lower()

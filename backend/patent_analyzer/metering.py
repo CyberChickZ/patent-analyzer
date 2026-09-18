@@ -132,8 +132,13 @@ embed: dict[str, dict] = {}            # model -> {"requests": n, "texts": n, "e
 # degraded"), and it is the one no counter can reconstruct after the fact.
 # Sliced by index between two snapshots, so a phase gets exactly its own.
 incidents: list[dict] = []
+#: Models seen without a price, so the incident is raised once and not per call.
+_unpriced: set[str] = set()
 
 RETRY, FAILED, DEGRADED, EXHAUSTED = "retry", "failed", "degraded", "exhausted"
+#: A model whose spend cannot be priced. Not a failure of the call — a hole in
+#: the accounting, which is worse if it stays quiet.
+UNPRICED = "unpriced"
 
 
 def incident(source: str, kind: str, detail: str = "") -> None:
@@ -202,6 +207,13 @@ def cost_usd(model: str, prompt_tokens: int, output_tokens: int, thought_tokens:
     model carried that day is the one that gets billed."""
     price = price_of(model, on)
     if price is None:
+        # A model with no rate would otherwise cost $0 in the ledger, which is
+        # the same shape as a call that did not happen. Record it, once per
+        # model, so an unpriced model shows up as a gap rather than as free.
+        if model not in _unpriced:
+            _unpriced.add(model)
+            incident("vertex", UNPRICED, f"{model} has no entry in PRICES; its spend is missing "
+                                         f"from every total until one is added")
         return 0.0
     pin, pout = price
     return (prompt_tokens * pin + (output_tokens + thought_tokens) * pout) / 1_000_000
