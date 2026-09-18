@@ -282,7 +282,10 @@ async def main():
     ap.add_argument("--findings", action="store_true",
                     help="stage 1.5: one call per instance for the MPEP 2143.01 / 2143.02 / 2141.01(a) findings, "
                          "then score every variant a second time with the rule gated on them")
+    from common import add_budget_arg, arm_budget
+    add_budget_arg(ap)
     args = ap.parse_args()
+    arm_budget(args)
 
     import llm_cache
     install_budget(args.max_live_calls)

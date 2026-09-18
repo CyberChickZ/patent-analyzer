@@ -76,7 +76,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=100)
     ap.add_argument("--mode", default="regex", choices=["regex"])
+    from common import add_budget_arg, arm_budget
+    add_budget_arg(ap)
     args = ap.parse_args()
+    arm_budget(args)
 
     samples = load_samples(args.limit)
     n_feat = sum(len(s["features"]) for s in samples)

@@ -262,7 +262,10 @@ async def main():
     ap.add_argument("--jobs", default="/tmp/outputs")
     ap.add_argument("--out", default="/tmp/fig_png_ab.json")
     ap.add_argument("--mode", choices=("eval", "numerals"), default="eval")
+    from common import add_budget_arg, arm_budget
+    add_budget_arg(ap)
     args = ap.parse_args()
+    arm_budget(args)
 
     if args.mode == "numerals":
         await run_numerals(args)

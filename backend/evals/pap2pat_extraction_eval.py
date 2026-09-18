@@ -219,7 +219,10 @@ async def main():
     ap.add_argument("--max-live-calls", type=int, default=40)
     ap.add_argument("--no-control", action="store_true", help="skip the SSR control column")
     ap.add_argument("--no-errors", action="store_true")
+    from common import add_budget_arg, arm_budget
+    add_budget_arg(ap)
     args = ap.parse_args()
+    arm_budget(args)
 
     data = ensure_data()
     install_budget(args.max_live_calls)

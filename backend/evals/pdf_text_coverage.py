@@ -152,7 +152,10 @@ def main():
     ap.add_argument("--layers", default=",".join(LAYERS))
     ap.add_argument("--out", default=str(RUN_DIR / "coverage.json"))
     ap.add_argument("--build_doc_json", action="store_true", help="call Gemini for missing Doc JSONs first")
+    from common import add_budget_arg, arm_budget
+    add_budget_arg(ap)
     args = ap.parse_args()
+    arm_budget(args)
     pdfs = sorted(PDF_DIR.glob("*.pdf"))
     if args.pairs:
         keep = set(args.pairs.split(","))

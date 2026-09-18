@@ -296,7 +296,10 @@ async def main():
     ap.add_argument("--gate", required=True, choices=list(STAGE_OF))
     ap.add_argument("--model", required=True)
     ap.add_argument("--tag", default="h1d", help="screen gate: e4 run tag whose stage-1 survivors are re-screened")
+    from common import add_budget_arg, arm_budget
+    add_budget_arg(ap)
     args = ap.parse_args()
+    arm_budget(args)
 
     stage = STAGE_OF[args.gate]
     os.environ[f"LLM_MODEL_{stage.upper()}"] = args.model

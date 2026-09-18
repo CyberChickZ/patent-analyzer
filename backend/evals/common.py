@@ -359,6 +359,51 @@ def add_budget_arg(parser, required: bool = True) -> None:
                              "passes it")
 
 
+def arm_budget(args, label: str = "", run_dir=None) -> None:
+    """Turn --budget-usd into a ceiling the whole process obeys, and make the
+    run leave a cost record behind.
+
+    The ceiling is enforced in app.llm._check_eval_budget, under every model
+    call, rather than in each script's loop: the loops are all different and
+    the calls that cost money are several frames deep inside the pipeline.
+    Wiring it per loop guards only the loops somebody remembered to wire.
+
+    The cost record is why 2026-09-18's $169 of Vertex cannot be attributed to
+    a script today — `metering` is a process counter and the process is gone
+    (outputs/eval_status/cost_2026-09.md). One file per run fixes that, and it
+    is written on the way out whether the run finished, was stopped by the
+    ceiling, or crashed.
+    """
+    import atexit
+    import json
+    import os
+    import sys
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    cap = getattr(args, "budget_usd", None)
+    if cap is None:
+        return
+    os.environ["EVAL_BUDGET_USD"] = str(float(cap))
+    name = label or Path(sys.argv[0]).stem
+    base = Path(run_dir) if run_dir else Path(__file__).parent.parent / "eval_data" / "runs" / name
+    started = datetime.now(timezone.utc)
+
+    def _write():
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            spent = job_cost_usd()
+            (base / "cost.json").write_text(json.dumps({
+                "script": name, "argv": sys.argv[1:], "usd": round(spent, 4),
+                "budget_usd": float(cap), "stopped_by_budget": spent >= float(cap),
+                "started_at": started.isoformat(),
+                "ended_at": datetime.now(timezone.utc).isoformat(),
+            }, indent=1))
+        except Exception as exc:
+            print(f"[budget] could not write cost.json: {exc}")
+    atexit.register(_write)
+
+
 def job_cost_usd() -> float:
     """What the run has spent so far, from the same meter the cost card reads."""
     from patent_analyzer import metering

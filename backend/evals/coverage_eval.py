@@ -560,7 +560,10 @@ async def main():
                     help="fine protocol, single quotes: re-score existing runs with this verifier (0 calls)")
     ap.add_argument("--concurrency", type=int, default=3)
     ap.add_argument("--summary", default=None, help="append aggregate rows to this json")
+    from common import add_budget_arg, arm_budget
+    add_budget_arg(ap)
     args = ap.parse_args()
+    arm_budget(args)
 
     apps = select_apps(args.limit, args.sample)
     summary = {}

@@ -230,7 +230,10 @@ async def main():
     ap.add_argument("--threshold", type=float, default=0.5)
     ap.add_argument("--max-live-calls", type=int, default=200)
     ap.add_argument("--out", default="")
+    from common import add_budget_arg, arm_budget
+    add_budget_arg(ap)
     args = ap.parse_args()
+    arm_budget(args)
     load_env_yaml()
     if args.llm:
         from draft_eval import install_budget

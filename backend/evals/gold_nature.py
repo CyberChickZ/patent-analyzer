@@ -525,7 +525,10 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--stage", default="attribute", choices=["claims", "cos", "attribute", "npl"])
     ap.add_argument("--concurrency", type=int, default=4)
+    from common import add_budget_arg, arm_budget
+    add_budget_arg(ap)
     args = ap.parse_args()
+    arm_budget(args)
     from common import load_env_yaml
     load_env_yaml()
     OUT_DIR.mkdir(parents=True, exist_ok=True)

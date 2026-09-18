@@ -214,8 +214,42 @@ def _record_usage(model: str, resp, seconds: float = 0.0) -> None:
     m["thought_tokens"] += int(getattr(um, "thoughts_token_count", 0) or 0)
 
 
+class EvalBudgetExceeded(RuntimeError):
+    """This process has spent its EVAL_BUDGET_USD. Not a model error."""
+
+
+def _check_eval_budget() -> None:
+    """A ceiling for a whole process, checked at the one place every model call
+    passes through.
+
+    Wiring a budget into each eval script's loop only guards the loops somebody
+    remembered to wire, and the calls that cost money are several frames deep
+    inside the pipeline. This sits under all of them: set EVAL_BUDGET_USD and
+    the process stops when the meter says it has spent that much, whatever
+    script it is and wherever in the call stack it happens to be.
+
+    Unset (the server case) it does nothing at all. The server has its own
+    ceiling, which is a different thing — it refuses new jobs and never
+    interrupts a running one (patent_analyzer.spend).
+    """
+    raw = os.environ.get("EVAL_BUDGET_USD", "").strip()
+    if not raw:
+        return
+    try:
+        cap = float(raw)
+    except ValueError:
+        return
+    from patent_analyzer import metering
+    spent = float((metering.totals() or {}).get("cost_usd", 0.0))
+    if spent >= cap:
+        raise EvalBudgetExceeded(
+            f"spent ${spent:.2f} of the ${cap:.2f} EVAL_BUDGET_USD ceiling; refusing further model "
+            f"calls. Nothing after this point ran — treat the output as partial.")
+
+
 async def _smooth(model: str | None = None) -> None:
     """Shared per-minute gate across every process on this machine/instance, one per model."""
+    _check_eval_budget()
     model = model or MODEL
     gate = _llm_gates.get(model)
     if gate is None:

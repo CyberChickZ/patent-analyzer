@@ -84,7 +84,10 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=20)
     ap.add_argument("--model", default="", help="sets LLM_MODEL_IDCA for this run")
+    from common import add_budget_arg, arm_budget
+    add_budget_arg(ap)
     a = ap.parse_args()
+    arm_budget(a)
     if a.model:
         os.environ["LLM_MODEL_IDCA"] = a.model
     from common import load_env_yaml

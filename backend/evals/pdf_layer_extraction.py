@@ -114,7 +114,10 @@ async def main():
     ap.add_argument("--pairs", default="")
     ap.add_argument("--layers", default="docjson,fitz")
     ap.add_argument("--no_match", action="store_true")
+    from common import add_budget_arg, arm_budget
+    add_budget_arg(ap)
     args = ap.parse_args()
+    arm_budget(args)
     import llm_cache
     llm_cache.install()
     pdfs = sorted(PDF_DIR.glob("*.pdf"))

@@ -337,7 +337,10 @@ def main():
     d.add_argument("--runs", default="")
     d.add_argument("--rules-only", action="store_true")
     d.add_argument("--max-live-calls", type=int, default=150)
+    from common import add_budget_arg, arm_budget
+    add_budget_arg(ap)
     args = ap.parse_args()
+    arm_budget(args)
     load_env_yaml()
     from draft_eval import install_budget
     install_budget(args.max_live_calls)

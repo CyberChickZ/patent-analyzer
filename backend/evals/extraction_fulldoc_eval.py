@@ -135,7 +135,10 @@ async def main():
                     help="kept so old command lines still parse; the SSR extractor is gone")
     ap.add_argument("--max-live-calls", type=int, default=60, help="stop launching new samples past this many live Gemini calls")
     ap.add_argument("--no-errors", action="store_true", help="skip the omission/fabrication/misclassification columns")
+    from common import add_budget_arg, arm_budget
+    add_budget_arg(ap)
     args = ap.parse_args()
+    arm_budget(args)
 
     import llm_cache
     llm_cache.install()
