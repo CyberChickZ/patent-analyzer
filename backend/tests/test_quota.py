@@ -142,6 +142,6 @@ def test_bigquery_reports_what_is_left_of_the_free_tibibyte():
     metering.count_bq(64 * 2 ** 20)                          # 64 MiB
     row = _by_name(asyncio.run(quota.snapshot()), "BigQuery free tier")
     assert row["cap"] == quota.BQ_FREE_MIB_PER_MONTH
-    # the local tally, because the fixture denies it INFORMATION_SCHEMA
+    # our own tally, because the fixture denies it INFORMATION_SCHEMA
     assert row["used"] == 64 and row["remaining"] == quota.BQ_FREE_MIB_PER_MONTH - 64
-    assert row["unit"] == "MiB scanned" and row["basis"] == quota.BASIS_LOCAL
+    assert row["unit"] == "MiB scanned" and row["basis"] == quota.BASIS_OURS

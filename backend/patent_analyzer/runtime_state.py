@@ -1,17 +1,46 @@
-"""Cross-instance runtime state on the KV store: circuit breakers and
-monthly quotas. Cloud Run runs many instances; a block seen by one must
-stop the others, and SerpAPI's free tier (250/key/month) has to be
-counted in one place.
+"""Cross-instance runtime state: circuit breakers, quotas and rate gates.
+
+Everything that has to survive a request lives in `cloud_state` — one JSON
+object per key in GCS, written with a generation precondition. It used to live
+in `cache.kv()`, which on Cloud Run is a SQLite file inside the container: the
+service runs up to three instances, so every counter here was three counters,
+each certain it was the only one, and a deploy reset all three (Harry,
+2026-09-20: "不能有 local counter，必须云端").
+
+The one thing that is NOT shared is the pacing of a rate gate, and that is a
+deliberate, stated compromise rather than an oversight — see MinuteGate.
 """
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime, timezone
 
-from .cache import kv
+from . import cloud_state
 
 _NS = "runtime"
+
+
+def instance_share() -> int:
+    """How many instances may be running, so a per-instance rate can be set to
+    the share of the limit this one is entitled to.
+
+    A rate gate is not a counter: it decides whether to sleep for a fraction of
+    a second, and asking GCS that question on every request would cost more
+    latency than the gate saves. Dividing the allowance instead is conservative
+    — with fewer instances live we simply go slower than we are allowed — and
+    it is correct in the direction that matters: the provider never sees more
+    than its limit.
+
+    MAX_INSTANCES mirrors the service's autoscaling.knative.dev/maxScale (3 at
+    the time of writing). Locally there is one process and the default is 1.
+    """
+    try:
+        n = int(os.environ.get("MAX_INSTANCES", "3" if os.environ.get("K_SERVICE") else "1"))
+    except ValueError:
+        n = 1
+    return max(1, n)
 
 
 class Breaker:
@@ -28,7 +57,7 @@ class Breaker:
     def is_open(self) -> bool:
         now = time.time()
         if now - self._local_checked > self.local_ttl_s:
-            doc = kv().get(_NS, f"breaker:{self.name}") or {}
+            doc, _, _ = cloud_state.read(f"breaker:{self.name}")
             self._local_until = float(doc.get("blocked_until", 0))
             self._local_checked = now
         return now < self._local_until
@@ -36,10 +65,13 @@ class Breaker:
     def trip(self, reason: str = ""):
         until = time.time() + self.cooldown_s
         self._local_until, self._local_checked = until, time.time()
-        doc = kv().get(_NS, f"breaker:{self.name}") or {}
-        kv().put(_NS, f"breaker:{self.name}", {
-            "blocked_until": until, "reason": reason[:200],
-            "trips": int(doc.get("trips", 0)) + 1, "last_trip": time.time()})
+
+        def _f(doc):
+            doc["blocked_until"] = max(float(doc.get("blocked_until", 0)), until)
+            doc["reason"] = reason[:200]
+            doc["trips"] = int(doc.get("trips", 0)) + 1
+            doc["last_trip"] = time.time()
+        cloud_state.update(f"breaker:{self.name}", _f)
 
 
 def month_key(now: datetime | None = None) -> str:
@@ -67,30 +99,40 @@ class MonthlyQuota:
         return f"quota:{self.name}:{month_key()}"
 
     def used(self) -> int:
-        return int((kv().get(_NS, self._key()) or {}).get("n", 0))
+        return int(cloud_state.get(self._key()) or 0)
 
     def remaining(self) -> int:
         return max(0, self.cap - self.used())
 
     def take(self, n: int = 1) -> bool:
-        """Reserve n units; False (and no increment) if it would exceed cap."""
-        if self.used() + n > self.cap:
-            return False
-        kv().incr(_NS, self._key(), by=n)
-        return True
+        """Reserve n units; False (and no increment) if it would exceed cap.
+
+        The test and the increment are one conditional write, so two instances
+        cannot both see room and both take the last slot. Read-then-increment
+        is where an over-spend comes from.
+        """
+        taken = {"ok": False}
+
+        def _f(doc):
+            cur = int(doc.get("n", 0))
+            if cur + n > self.cap:
+                taken["ok"] = False
+                return
+            doc["n"] = cur + n
+            taken["ok"] = True
+        cloud_state.update(self._key(), _f)
+        return taken["ok"]
 
     def release(self, n: int = 1):
-        kv().incr(_NS, self._key(), by=-n)
+        cloud_state.incr(self._key(), by=-n)
 
     def set_used(self, n: int):
         """Overwrite the counter with the provider's own figure."""
-        kv().put(_NS, self._key(), {"n": int(n)})
+        cloud_state.update(self._key(), lambda d: d.__setitem__("n", int(n)))
 
     def exhaust(self):
-        """Mark the whole month as spent (provider said 401/429)."""
-        gap = self.cap - self.used()
-        if gap > 0:
-            kv().incr(_NS, self._key(), by=gap)
+        """Mark the whole period as spent (provider said 401/429)."""
+        cloud_state.update(self._key(), lambda d: d.__setitem__("n", int(self.cap)))
 
 
 class PeriodQuota(MonthlyQuota):
@@ -105,14 +147,29 @@ class PeriodQuota(MonthlyQuota):
 
 
 class MinuteGate:
-    """Cross-process request smoothing: at most `per_minute` takes per wall-clock
-    minute for `name`, counted in the shared KV (sqlite locally, Firestore on
-    Cloud Run). Vertex DSQ docs: "Avoid sending requests in sharp, second-level
-    spikes ... Distributing your API calls more evenly helps the system manage
-    your load predictably." Callers `await gate.wait()` before each request."""
+    """Request smoothing: at most `per_minute / instance_share()` takes per
+    wall-clock minute for `name`, counted in this process.
+
+    Vertex DSQ docs: "Avoid sending requests in sharp, second-level spikes ...
+    Distributing your API calls more evenly helps the system manage your load
+    predictably." Callers `await gate.wait()` before each request.
+
+    This is the one piece of state here that is NOT shared, and the reason is
+    in `instance_share`: it is a rate, not an allowance, and a gate that asks
+    GCS before every request costs more than it saves. Running fewer instances
+    than MAX_INSTANCES only makes us slower than we are entitled to be."""
 
     def __init__(self, name: str, per_minute: int):
-        self.name, self.per_minute = name, per_minute
+        self.name = name
+        # This instance's share of the allowance. The count itself stays in
+        # process memory on purpose: a gate answers "sleep or go" in the
+        # milliseconds before a request, and a GCS round trip per request would
+        # cost more than the gate saves. Dividing the allowance keeps the
+        # aggregate under the provider's limit without asking anyone, and errs
+        # towards going slower than permitted rather than faster.
+        self.per_minute = max(1, int(per_minute // instance_share())) if per_minute > 0 else 0
+        self.allowance = per_minute
+        self._counts: dict[str, int] = {}
 
     def _key(self, now: datetime | None = None) -> str:
         now = now or datetime.now(timezone.utc)
@@ -123,10 +180,14 @@ class MinuteGate:
         if self.per_minute <= 0:
             return 0.0
         now = datetime.now(timezone.utc)
-        n = kv().incr(_NS, self._key(now))
+        k = self._key(now)
+        if len(self._counts) > 4:                      # keep only the live minutes
+            for old in sorted(self._counts)[:-2]:
+                self._counts.pop(old, None)
+        n = self._counts.get(k, 0) + 1
         if n <= self.per_minute:
+            self._counts[k] = n
             return 0.0
-        kv().incr(_NS, self._key(now), by=-1)
         return 60.0 - now.second - now.microsecond / 1e6 + 0.05
 
     async def wait(self) -> float:

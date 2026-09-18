@@ -51,13 +51,19 @@ def _next_week(now: datetime | None = None) -> datetime:
 BASIS_ACCOUNT_API = "account API"
 BASIS_RESPONSE_HEADER = "response header"
 BASIS_INFORMATION_SCHEMA = "INFORMATION_SCHEMA"
+#: Our own tally — but stored in GCS, shared by every instance, and surviving a
+#: deploy (patent_analyzer.cloud_state). It is not the provider's answer, and it
+#: does not pretend to be; it is also not a number that lives in one container
+#: and disappears, which is what "local counter" used to mean here.
+BASIS_OURS = "our count, stored in cloud"
+#: Kept only so an older stored row still renders. Nothing writes it.
 BASIS_LOCAL = "local counter"
 BASIS_NONE = "no counter"
 
 
 def _row(source: str, name: str, *, used=None, cap=None, unit="requests",
          period="none", resets_at: datetime | None = None, limits=None,
-         note="", error="", expires_on: str = "", basis: str = BASIS_LOCAL) -> dict:
+         note="", error="", expires_on: str = "", basis: str = BASIS_OURS) -> dict:
     now = _now()
     remaining = None if (used is None or cap is None) else max(0, cap - used)
     row = {
@@ -113,13 +119,13 @@ async def _serpapi() -> list[dict]:
             got = await asyncio.to_thread(sp.sync_account)
             bad = [g for g in got if g.get("error")]
             if bad or not got:
-                basis = BASIS_LOCAL
+                basis = BASIS_OURS
                 sync_err = (bad[0]["error"] if bad else "no keys answered")[:160]
             store.put("runtime", "serpapi_account_sync", {"basis": basis, "error": sync_err})
         except Exception as exc:
-            basis, sync_err = BASIS_LOCAL, f"{type(exc).__name__}: {exc}"[:160]
+            basis, sync_err = BASIS_OURS, f"{type(exc).__name__}: {exc}"[:160]
     else:
-        basis, sync_err = fresh.get("basis", BASIS_LOCAL), fresh.get("error", "")
+        basis, sync_err = fresh.get("basis", BASIS_OURS), fresh.get("error", "")
 
     keys = sp.quota_status()
     # The note goes on the first key only: it is true of the account, not of one
@@ -134,8 +140,8 @@ async def _serpapi() -> list[dict]:
         if k.get("reserved"):
             note = ("Reserved for demos and production jobs — evaluation runs never rotate onto "
                     "this key. " + note).strip()
-        if basis == BASIS_LOCAL:
-            note = (f"local counter — SerpAPI's account API did not answer ({sync_err}). " + note).strip()
+        if basis == BASIS_OURS:
+            note = (f"our own count — SerpAPI's account API did not answer ({sync_err}). " + note).strip()
         row = _row("serpapi", f"SerpAPI key {k['key']}" + (" (reserved)" if k.get("reserved") else ""),
                    used=k["used"], cap=k["cap"], unit="searches", period="month",
                    resets_at=_next_month(), limits=[f"{k['cap']}/key/month (free tier)"], note=note,
@@ -150,9 +156,10 @@ def _uspto_odp() -> list[dict]:
     rows = [_row("uspto_odp", f"USPTO ODP {q['kind']}", used=q["used"], cap=q["cap"],
                  unit="requests", period="week", resets_at=_next_week(),
                  limits=[f"{odp.PER_MINUTE} req/min", "concurrency 1"],
-                 basis=BASIS_LOCAL,
+                 basis=BASIS_OURS,
                  note=(f"ISO week {q['week']}; the weekly caps come from the key's registration. "
-                       "Local counter: a live call to api.uspto.gov on 2026-09-20 returned no "
+                       "Our own count, stored in GCS and shared by every instance: a live call to "
+                       "api.uspto.gov on 2026-09-20 returned no "
                        "rate-limit or remaining header at all (only AWS API-Gateway trace "
                        "headers), and ODP publishes no usage endpoint, so there is nothing to "
                        "reconcile against."
@@ -232,7 +239,7 @@ async def _lens() -> list[dict]:
                 note = ("the usage endpoint answered in a shape this code does not recognise; "
                         "the figure is this instance's own count")
         rows.append(_row("lens", f"Lens {ep} API", used=used, cap=cap,
-                         basis=BASIS_ACCOUNT_API if note.startswith("from the provider") else BASIS_LOCAL,
+                         basis=BASIS_ACCOUNT_API if note.startswith("from the provider") else BASIS_OURS,
                          unit="requests", period="month", resets_at=resets,
                          limits=[f"{q['per_minute']} req/min",
                                  f"max {q['max_records_per_request']} records/request"],
@@ -295,8 +302,8 @@ def _bigquery() -> list[dict]:
     local = int((kv().get("runtime", f"usage:bigquery_mib:{month_key()}") or {}).get("n", 0))
     mib, err = _bq_billed_mib_this_month()
     if mib is None:
-        used, basis = local, BASIS_LOCAL
-        note = ("local counter — INFORMATION_SCHEMA could not be read (" + err + "). Counted from "
+        used, basis = local, BASIS_OURS
+        note = ("our own count — INFORMATION_SCHEMA could not be read (" + err + "). Counted from "
                 "the bytes this deployment's own queries were billed for, starting when the tally "
                 "was added: bytes spent before that, or by anything else on the project, are not "
                 "in it. ")
@@ -407,7 +414,7 @@ async def snapshot() -> dict:
         "exhausted": exhausted,
         "expiring_soon": expiring,
         "note": "Every row says where its number came from. \"account API\" and "
-                "\"INFORMATION_SCHEMA\" are the provider's own answer; \"local counter\" is this "
-                "deployment's tally, which will read low when the same quota is spent by anything "
-                "else.",
+                "\"INFORMATION_SCHEMA\" are the provider's own answer; \"our count, stored in cloud\" is our own "
+                "tally, shared by every instance and surviving a deploy, which will still read low "
+                "when the same quota is spent by another tool.",
     }

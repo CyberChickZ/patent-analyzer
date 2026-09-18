@@ -38,3 +38,15 @@ def _no_accidental_urlopen(monkeypatch):
     def _refuse(*a, **k):
         raise OSError("urllib.request.urlopen is blocked in tests; patch it if the test needs it")
     monkeypatch.setattr(urllib.request, "urlopen", _refuse)
+
+
+@pytest.fixture(autouse=True)
+def _never_shared_cloud_state(tmp_path_factory, monkeypatch):
+    """Quotas, breakers and gates live in GCS now. Every test gets its own
+    directory: a test that increments the real SerpAPI counter would refuse a
+    real key, and one that trips the real breaker would take a channel out of
+    production."""
+    if os.environ.get("CLOUD_STATE") is None:
+        monkeypatch.setenv("CLOUD_STATE", "local")
+    if os.environ.get("CLOUD_STATE_LOCAL_DIR") is None:
+        monkeypatch.setenv("CLOUD_STATE_LOCAL_DIR", str(tmp_path_factory.mktemp("state")))
