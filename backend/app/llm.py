@@ -1416,6 +1416,33 @@ async def evaluate_single_document_text(
             "source": "abstract_noparse"}
 
 
+# What the evaluation knew about a document but never passed on.
+#
+# The scoring report carried a score and a title and nothing else — no link, no
+# abstract, no reason the full text was missing. So a card for a paper nobody
+# could download showed a greyed-out download icon and stopped there, when we
+# had its abstract, its landing page and the reason in hand the whole time
+# (Harry, 2026-09-20). None of this is new information; it is information that
+# was being thrown away one frame before the report.
+_CARRY = ("pub_num", "url", "patent_link", "pdf_link", "doi", "year", "authors",
+          "assignee", "inventor", "filing_date", "grant_date", "snippet",
+          "fulltext_tier", "fulltext_download", "fulltext_why", "similarity_score")
+
+
+def _carry_through(res: dict, doc: dict, text_used: str = "") -> dict:
+    for k in _CARRY:
+        v = doc.get(k)
+        if v not in (None, "") and res.get(k) in (None, ""):
+            res[k] = v
+    # The text the verdict was actually formed on, so the card can show it
+    # rather than asserting that a document was read.
+    if text_used:
+        res["evaluated_text"] = text_used[:4000]
+    elif doc.get("abstract"):
+        res["evaluated_text"] = str(doc["abstract"])[:4000]
+    return res
+
+
 async def evaluate_batch(
     invention_summary: str,
     checklist: list[str],
@@ -1445,15 +1472,16 @@ async def evaluate_batch(
                         source_title=source_title,
                     )
                     res["source"] = "pdf"
-                    return res
+                    return _carry_through(res, doc)
                 text = (doc.get("abstract") or "").strip() or (doc.get("snippet") or "").strip()
                 if len(text) >= 120:
-                    return await evaluate_single_document_text(
+                    res = await evaluate_single_document_text(
                         invention_summary, checklist, text,
                         doc.get("title", ""), doc.get("match_type", "Paper"),
                     )
-                return {"title": doc.get("title", ""), "match_type": doc.get("match_type", ""),
-                        "checklist_results": {}, "source": "no_content"}
+                    return _carry_through(res, doc, text)
+                return _carry_through({"title": doc.get("title", ""), "match_type": doc.get("match_type", ""),
+                                       "checklist_results": {}, "source": "no_content"}, doc)
             finally:
                 if on_doc_done is not None:
                     try:

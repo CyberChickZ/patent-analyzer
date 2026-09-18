@@ -207,9 +207,13 @@ def test_generate_html_leads_with_the_determination_and_drops_the_old_novelty_ch
     for gone in ("innovation landscape", "novelty score", "novelty assessment", "combination analysis", "ewss", "css=",
                  "old llm novelty text", "old combo text"):
         assert gone not in low, gone
-    # card badge = verified coverage from the rule, tooltip says so
-    assert 'title="3/4 elements disclosed with a located verbatim quote">75%</span>' in h
-    assert 'title="1/4 elements disclosed with a located verbatim quote">25%</span>' in h
+    # The card names both quantities. "100%" next to "does not disclose the
+    # invention" read as a contradiction until it said which 100% it was
+    # (Harry, 2026-09-20): coverage is the one the determination rests on, so
+    # it leads, and relevance is labelled as the judge's confidence.
+    assert 'title="3/4 elements disclosed with a located verbatim quote">Covers 3 of 4 elements</span>' in h
+    assert 'title="1/4 elements disclosed with a located verbatim quote">Covers 1 of 4 elements</span>' in h
+    assert "Relevance " in h and "hit-rel" in h
     assert h.index("US-A") < h.index("US-B")            # ordered by verified coverage
     # the export script reads the determination, not the removed section
     assert ".det-sec .det-verdict" in h and ".eval-sec" not in h

@@ -307,6 +307,72 @@ _NO_PDF_ICON_SVG = (
 )
 
 
+_WHY_TEXT = {
+    "paywall": "the publisher requires a subscription",
+    "not_oa": "not open access",
+    "403": "the publisher's server refused the request (403)",
+    "no_url": "no source resolved a URL to fetch",
+    "download_failed": "a URL resolved but the download produced no readable PDF",
+}
+
+
+def _evidence_basis_block(m: dict, eval_source: str, abstract_only: bool, not_read: bool) -> str:
+    """What this verdict was formed on, and everything we hold when it was not
+    the full text.
+
+    A card for a paper nobody could download used to be a greyed-out download
+    icon and nothing else, while the abstract, the landing page and the reason
+    were all in hand (Harry, 2026-09-20). Showing them is not new work — it is
+    showing what had already been fetched and thrown away one frame early.
+    """
+    read_as = ("the full text" if eval_source in ("pdf", "full_text")
+               else "the abstract only" if abstract_only
+               else "no usable text" if not_read else "")
+    if not read_as:
+        return ""
+    bits = [f'<div class="basis-line"><b>Evaluated from:</b> {read_as}.</div>']
+    if abstract_only or not_read:
+        why = str(m.get("fulltext_why") or m.get("fulltext_download") or "").lower()
+        reason = next((v for k, v in _WHY_TEXT.items() if k in why), "")
+        if not reason and why:
+            reason = esc(why[:120])
+        if reason:
+            bits.append(f'<div class="basis-line"><b>Why:</b> {reason}.</div>')
+        link = m.get("url") or m.get("patent_link") or (
+            f'https://patents.google.com/patent/{m.get("pub_num")}' if m.get("pub_num") else "")
+        if link:
+            bits.append(f'<div class="basis-line"><b>Landing page:</b> '
+                        f'<a href="{esc(link)}" target="_blank" rel="noopener">{esc(link[:90])}</a></div>')
+            bits.append('<div class="basis-line basis-ask">We could not access this document. '
+                        'If you have access, download it and upload it on the Results page '
+                        '(Full text tab) — the evidence step reruns for that reference alone.</div>')
+    text = str(m.get("evaluated_text") or m.get("snippet") or "").strip()
+    if text:
+        bits.append('<div class="basis-line"><b>Text we hold:</b></div>'
+                    f'<div class="basis-text">{esc(text[:1500])}'
+                    f'{"&hellip;" if len(text) > 1500 else ""}</div>')
+    return f'<div class="detail-group basis-group">{"".join(bits)}</div>'
+
+def _score_badges(score_num, score_tip, n_covered, n_elements, hit_count, total, rel_pct) -> str:
+    """The card's right-hand numbers, each saying what it measures.
+
+    `Covers X of N elements` is verified coverage — scored AND quoted — and it
+    is what the determination is built from. `Relevance P%` is the judge's own
+    confidence that the document is worth reading, which is a different claim
+    and was the number being read as a contradiction.
+    """
+    if n_covered is not None and n_elements:
+        cover = (f'<span class="hit-cov" style="color:{score_color(score_num)}" title="{esc(score_tip)}">'
+                 f'Covers {n_covered} of {n_elements} elements</span>')
+    elif total:
+        cover = (f'<span class="hit-cov" style="color:{score_color(score_num)}" title="{esc(score_tip)}">'
+                 f'{hit_count} of {total} checklist items</span>')
+    else:
+        cover = '<span class="no-badge">&mdash;</span>'
+    rel = f'<span class="hit-rel" title="the relevance judge\'s confidence that this is worth reading — not coverage">Relevance {esc(rel_pct)}</span>' if rel_pct else ""
+    return cover + rel
+
+
 def generate_html(data: dict) -> str:
     from patent_analyzer.report_sections import determination_html
 
@@ -425,13 +491,39 @@ def generate_html(data: dict) -> str:
 
         hit_count = len(matched) + len(partial)
         total = len(evals) if evals else len(checklist)
+        # Two quantities, named, instead of one percentage that could be either.
+        # "100%" beside "does not disclose the invention" reads as a
+        # contradiction until you know the 100% was the relevance judge and the
+        # verdict was about element coverage (Harry, 2026-09-20). Coverage goes
+        # first because it is the one the determination rests on.
         cov = coverage_of.get(m.get("pub_num") or m.get("title") or "")
+        n_covered = cov.get("n_covered", 0) if cov else None
+        rel = m.get("similarity_score")
+        rel_pct = f"{float(rel):.0%}" if isinstance(rel, (int, float)) and rel else ""
         if cov and n_elements:
-            score_num = cov.get("n_covered", 0) / n_elements
-            score_tip = f"{cov.get('n_covered', 0)}/{n_elements} elements disclosed with a located verbatim quote"
+            score_num = n_covered / n_elements
+            score_tip = f"{n_covered}/{n_elements} elements disclosed with a located verbatim quote"
         else:
             score_num = hit_count / total if total > 0 else 0
             score_tip = f"{hit_count}/{total} checklist items scored Present or Partial"
+
+        # `eval_source` never existed. evaluate_batch writes `source`, so this read
+        # "pdf" for every document and the badge never appeared — 33 of the 60
+        # documents in job 99a35c00 were abstract-only or unread and the report
+        # showed no sign of it (2026-09-20). Read the field that is written, and
+        # keep the old name working for jobs that used it.
+        eval_source = m.get("source") or m.get("eval_source") or ""
+        abstract_only = eval_source in ("abstract", "abstract_only")
+        not_read = eval_source in ("abstract_failed", "abstract_noparse", "no_content")
+        if abstract_only:
+            source_badge = ('<span class="src-badge src-abs" title="Full text could not be obtained — '
+                            'this verdict was formed from the abstract alone.">'
+                            'Abstract only &mdash; full text not accessible</span>')
+        elif not_read:
+            source_badge = ('<span class="src-badge src-abs" title="No usable text was read for this '
+                            'document; its scores are empty, not zero.">no text could be read</span>')
+        else:
+            source_badge = ''
 
         hover_html = ""
         if matched or partial:
@@ -442,7 +534,7 @@ def generate_html(data: dict) -> str:
                 hover_html += f'<div class="hv-item"><span class="hv-icon hv-partial">&#x25D1;</span> {esc(full)}</div>'
             hover_html += '</div>'
 
-        detail_html = '<div class="detail-panel">'
+        detail_html = '<div class="detail-panel">' + _evidence_basis_block(m, eval_source, abstract_only, not_read)
         if matched:
             detail_html += '<div class="detail-group"><div class="detail-label">Present</div>'
             for short, full, analysis, *_ in matched:
@@ -478,12 +570,6 @@ def generate_html(data: dict) -> str:
 
         badge_type = "Patent" if mtype == "Patent" else "Paper"
         card_cls = "card card-hit" if hit_count > 0 else "card card-none"
-        eval_source = m.get("eval_source", "pdf")
-        abstract_only = (eval_source == "abstract")
-        source_badge = ('<span class="src-badge src-abs" '
-                        'title="PDF unavailable — evaluated against abstract/snippet only. '
-                        'Consider verifying with full text.">abstract only</span>'
-                        if abstract_only else '')
 
         filing = esc(m.get("filing_date", ""))
         grant = esc(m.get("grant_date", ""))
@@ -536,7 +622,7 @@ def generate_html(data: dict) -> str:
     <div class="card-right">
       {download_btn}
       <button class="md-btn" onclick="event.stopPropagation();showMd(this.closest(\'.card\'))" title="View as Markdown">MD</button>
-      {f'<span class="hit-pct" style="color:{score_color(score_num)}" title="{esc(score_tip)}">{score_num:.0%}</span>' if hit_count > 0 or score_num > 0 else '<span class="no-badge">&mdash;</span>'}
+      {_score_badges(score_num, score_tip, n_covered, n_elements, hit_count, total, rel_pct)}
     </div>
   </div>
   {hover_html}
@@ -733,6 +819,12 @@ a.card-title:hover{{color:var(--accent);text-decoration:underline}}
 .card-id{{font-size:0.72rem;color:var(--text2);font-family:"SF Mono",Monaco,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
 .card-right{{display:flex;align-items:center;gap:0.5rem;flex-shrink:0}}
 .hit-pct{{font-size:0.88rem;font-weight:700;white-space:nowrap}}
+.hit-cov{{font-size:0.82rem;font-weight:700;white-space:nowrap}}
+.hit-rel{{font-size:0.74rem;font-weight:500;white-space:nowrap;color:#6b7280;margin-left:.45rem}}
+.basis-group{{background:#fafafa;border-left:3px solid #d1d5db;padding:.5rem .7rem;margin-bottom:.6rem}}
+.basis-line{{font-size:.82rem;margin:.15rem 0}}
+.basis-ask{{color:#92400e}}
+.basis-text{{font-size:.78rem;color:#374151;white-space:pre-wrap;margin-top:.3rem;max-height:14rem;overflow:auto}}
 .no-badge{{color:var(--miss);font-size:0.78rem}}
 .pdf-link{{font-size:0.72rem;color:var(--accent);text-decoration:none}}
 .src-badge{{display:inline-block;font-size:0.65rem;padding:0.05rem 0.4rem;border-radius:99px;margin-left:0.35rem;vertical-align:middle;font-weight:500;letter-spacing:0.02em;text-transform:uppercase}}
@@ -965,7 +1057,7 @@ function buildReportMd(mode){{
   cards.forEach(c=>{{
     const t=c.querySelector('.card-title')?.textContent||'';
     const tp=c.querySelector('.card-id')?.textContent||'';
-    const pct=c.querySelector('.hit-pct')?.textContent||c.querySelector('.no-badge')?.textContent||'0';
+    const pct=[c.querySelector('.hit-cov')?.textContent,c.querySelector('.hit-rel')?.textContent].filter(Boolean).join(' · ')||c.querySelector('.no-badge')?.textContent||'0';
     out+=`| ${{idx++}} | ${{t}} | ${{tp}} | ${{pct}} |\\n`;
   }});
   out+='\\n---\\n\\n';
@@ -1013,7 +1105,7 @@ function buildFullMd(mode){{
   let idx=1;
   cards.forEach(c=>{{
     const t=c.querySelector('.card-title')?.textContent||'';
-    const pct=c.querySelector('.hit-pct')?.textContent||'—';
+    const pct=[c.querySelector('.hit-cov')?.textContent,c.querySelector('.hit-rel')?.textContent].filter(Boolean).join(' · ')||'—';
     out+=`| ${{idx++}} | ${{t}} | ${{pct}} |\\n`;
   }});
   out+='\\n---\\n\\n';
