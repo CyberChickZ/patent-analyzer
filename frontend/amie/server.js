@@ -373,6 +373,16 @@ app.put("/api/prompts/:name", async (req, res) => {
     res.status(status).json(data);
   } catch (e) { res.status(500).json({ error: "Proxy error" }); }
 });
+app.post("/api/prompts/:name/revise", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(`/api/prompts/${encodeURIComponent(req.params.name)}/revise`,
+      { method: "POST", data: req.body, firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: "Proxy error" });
+  }
+});
+
 app.put("/api/prompts/:name/current", async (req, res) => {
   try {
     const { status, data } = await proxyBackend(`/api/prompts/${encodeURIComponent(req.params.name)}/current`, { method: "PUT", data: req.body, firebaseToken: fbToken(req) });

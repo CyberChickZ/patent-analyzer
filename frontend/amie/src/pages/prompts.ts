@@ -1,4 +1,7 @@
-import { listPrompts, getPrompt, putPrompt, setPromptCurrent, type PromptSummary, type PromptDetail } from "../api";
+import {
+  listPrompts, getPrompt, putPrompt, revisePrompt, setPromptCurrent,
+  type PromptDetail, type PromptRevision, type PromptSummary,
+} from "../api";
 import { esc, empty, errorBox, fmtDate, on } from "../ui";
 
 let list: PromptSummary[] = [];
@@ -79,6 +82,61 @@ function textOf(d: PromptDetail, v: number): string {
   return (d.versions.find((x) => x.v === v) || ({} as any)).text || d.default;
 }
 
+/** A line-by-line diff, old against new. Not a library: the whole point is
+ *  that a person reads it before anything is saved, and three colours of
+ *  <div> does that. */
+function diffLines(before: string, after: string): string {
+  const a = before.split("\n");
+  const b = after.split("\n");
+  const out: string[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) {
+      out.push(`<div class="d-same">${esc(a[i])}</div>`);
+      i += 1; j += 1;
+      continue;
+    }
+    const nextSame = b.indexOf(a[i] ?? "\u0000", j);
+    if (i < a.length && nextSame === -1) {
+      out.push(`<div class="d-del">- ${esc(a[i])}</div>`);
+      i += 1;
+      continue;
+    }
+    if (j < b.length) {
+      out.push(`<div class="d-add">+ ${esc(b[j])}</div>`);
+      j += 1;
+      continue;
+    }
+    i += 1;
+  }
+  return `<pre class="prompt-diff">${out.join("")}</pre>`;
+}
+
+
+/** What the assistant proposed, next to what it would replace. Nothing is
+ *  saved until somebody presses the button under it. */
+function revisionBlock(r: PromptRevision, current: string): string {
+  const unsafe = r.placeholders_lost.length > 0;
+  return `<div class="panel" style="margin:.6rem 0"><div class="panel-body stack">
+    <div class="row"><b>Proposed rewrite</b>
+      <span class="pill pill-tag">${esc(r.model)}</span>
+      <span class="small muted">from ${typeof r.from_version === "number" && r.from_version ? `v${r.from_version}` : "the built-in default"}</span></div>
+    <div class="prose">${esc(r.rationale)}</div>
+    ${unsafe ? `<div class="notice notice-warn"><b>Not safe to save.</b> The rewrite dropped
+      ${r.placeholders_lost.map((p) => `<code>{${esc(p)}}</code>`).join(", ")}, which the template
+      renders with — it would fail at run time, not here.</div>` : ""}
+    ${r.placeholders_added.length ? `<div class="notice notice-warn">It added
+      ${r.placeholders_added.map((p) => `<code>{${esc(p)}}</code>`).join(", ")}, which nothing fills.</div>` : ""}
+    ${diffLines(current, r.text)}
+    <div class="row">
+      <button class="btn" id="revise-accept" ${unsafe ? "disabled" : ""}>Save as new version</button>
+      <button class="btn btn-ghost" id="revise-load">Load into the editor</button>
+      <button class="btn btn-ghost" id="revise-discard">Discard</button>
+    </div>
+  </div></div>`;
+}
+
 function paintDetail(): void {
   const host = document.getElementById("prompt-detail");
   if (!host || !detail) return;
@@ -109,6 +167,12 @@ function paintDetail(): void {
         <textarea id="prompt-text" rows="20">${esc(textOf(d, shown))}</textarea>
       </div>
       <div class="row">
+        <input id="revise-ask" placeholder="Ask for a rewrite — e.g. move the rules under one heading"
+          style="flex:1 1 20rem">
+        <button class="btn btn-ghost" id="revise-prompt">Revise</button>
+      </div>
+      <div id="revise-out"></div>
+      <div class="row">
         <button class="btn" id="save-prompt">Save as new version</button>
         <button class="btn btn-ghost" id="revert-prompt">Revert to the built-in default</button>
         <span class="small muted" id="prompt-msg"></span>
@@ -116,6 +180,27 @@ function paintDetail(): void {
     </div></div>`;
 
   on(host, "button.view", (el) => { viewing = +el.dataset.v!; paintDetail(); });
+
+  const askEl = () => document.getElementById("revise-ask") as HTMLInputElement;
+  const outEl = () => document.getElementById("revise-out")!;
+  const taEl = () => document.getElementById("prompt-text") as HTMLTextAreaElement;
+
+  document.getElementById("revise-prompt")!.addEventListener("click", async (ev) => {
+    const b = ev.currentTarget as HTMLButtonElement;
+    const instruction = askEl().value.trim();
+    if (!instruction) { msg("Say what you want changed."); return; }
+    b.disabled = true;
+    outEl().innerHTML = `<div class="small muted"><span class="spinner"></span> Asking…</div>`;
+    try {
+      const r = await revisePrompt(d.name, instruction);
+      lastRevision = r;
+      outEl().innerHTML = revisionBlock(r, taEl().value);
+      wireRevision(d.name, instruction);
+    } catch (e: any) {
+      outEl().innerHTML = "";
+      msg(`Revise failed: ${e?.message || e}`);
+    } finally { b.disabled = false; }
+  });
   on(host, "button.mkcur", async (el) => {
     const v = +el.dataset.v!;
     try {
@@ -147,4 +232,34 @@ function paintDetail(): void {
 function msg(text: string): void {
   const el = document.getElementById("prompt-msg");
   if (el) el.textContent = text;
+}
+
+
+let lastRevision: PromptRevision | null = null;
+
+function wireRevision(name: string, instruction: string): void {
+  const out = document.getElementById("revise-out")!;
+  const ta = () => document.getElementById("prompt-text") as HTMLTextAreaElement;
+  document.getElementById("revise-discard")?.addEventListener("click", () => {
+    out.innerHTML = ""; lastRevision = null;
+  });
+  document.getElementById("revise-load")?.addEventListener("click", () => {
+    if (lastRevision) ta().value = lastRevision.text;
+    msg("Loaded into the editor — nothing is saved until you press Save.");
+  });
+  document.getElementById("revise-accept")?.addEventListener("click", async (ev) => {
+    const b = ev.currentTarget as HTMLButtonElement;
+    if (!lastRevision) return;
+    b.disabled = true;
+    try {
+      // the instruction travels with the version, so the Feedback timeline
+      // can say why this prompt changed and not only that it did
+      const r = await putPrompt(name, lastRevision.text, "reviewer", true, instruction);
+      list = await listPrompts();
+      await select(name);
+      msg(`Saved as v${r.version} (now current).`);
+    } catch (e: any) {
+      msg(`Save failed: ${e?.message || e}`);
+    } finally { b.disabled = false; }
+  });
 }

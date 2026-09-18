@@ -324,10 +324,29 @@ export const getQuota = () => json<QuotaSnapshot>("/api/quota");
 
 export const listPrompts = () => json<PromptSummary[]>("/api/prompts");
 export const getPrompt = (name: string) => json<PromptDetail>(`/api/prompts/${encodeURIComponent(name)}`);
-export const putPrompt = (name: string, text: string, by = "reviewer", make_current = true) =>
+/** `instruction` is what the editor was trying to do, kept with the version
+ *  so the Feedback timeline can say why a prompt changed, not only that it
+ *  did. */
+export const putPrompt = (name: string, text: string, by = "reviewer", make_current = true,
+                          instruction = "") =>
   sendJson<{ name: string; version: number; current: number }>(
-    `/api/prompts/${encodeURIComponent(name)}`, "PUT", { text, by, make_current },
+    `/api/prompts/${encodeURIComponent(name)}`, "PUT", { text, by, make_current, instruction },
   );
+export interface PromptRevision {
+  name: string;
+  from_version: number | string;
+  text: string;
+  rationale: string;
+  model: string;
+  placeholders_lost: string[];
+  placeholders_added: string[];
+  note: string;
+}
+
+/** Proposes; never saves. The caller reads the diff and decides. */
+export const revisePrompt = (name: string, instruction: string) =>
+  sendJson<PromptRevision>(`/api/prompts/${encodeURIComponent(name)}/revise`, "POST", { instruction });
+
 export const setPromptCurrent = (name: string, version: number) =>
   sendJson<{ name: string; current: number }>(
     `/api/prompts/${encodeURIComponent(name)}/current`, "PUT", { version },

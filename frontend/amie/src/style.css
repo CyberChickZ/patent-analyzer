@@ -594,3 +594,17 @@ tr.is-reserved > td { background: var(--neutral-soft); }
 .ask-slot { margin-top: .3rem; padding: .35rem .45rem; border-left: 2px solid var(--warn, #b45309);
             background: var(--bg2, #f6f6f4); border-radius: 3px; }
 .ask-slot .file-in { max-width: 15rem; }
+
+
+/* A prompt diff is read before anything is saved, so it is plain and dense:
+   three colours, no chrome, wrapping preserved. */
+.prompt-diff { font-size: .76rem; line-height: 1.45; max-height: 26rem; overflow: auto;
+               background: var(--bg2, #f6f6f4); padding: .5rem .6rem; border-radius: 4px;
+               white-space: pre-wrap; word-break: break-word; }
+.prompt-diff .d-same { color: var(--text2, #6b7280); }
+.prompt-diff .d-add { background: #dcfce7; color: #14532d; }
+.prompt-diff .d-del { background: #fee2e2; color: #7f1d1d; }
+@media (prefers-color-scheme: dark) {
+  .prompt-diff .d-add { background: #14532d33; color: #86efac; }
+  .prompt-diff .d-del { background: #7f1d1d33; color: #fca5a5; }
+}
