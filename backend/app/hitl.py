@@ -308,6 +308,26 @@ class PromptPut(BaseModel):
     text: str
     by: str = ""
     make_current: bool = True
+    #: What the editor was trying to do, in their words. Kept with the version
+    #: so the timeline can say why a prompt changed, not only that it did.
+    instruction: str = ""
+
+
+def _diff_summary(before: str, after: str, width: int = 400) -> str:
+    """A few lines of unified diff, enough to recognise the change in a list."""
+    import difflib
+    lines = list(difflib.unified_diff(before.splitlines(), after.splitlines(),
+                                      lineterm="", n=1))[2:]
+    out, n = [], 0
+    for line in lines:
+        if not line.startswith(("+", "-")):
+            continue
+        out.append(line[:160])
+        n += len(out[-1])
+        if n > width:
+            out.append("…")
+            break
+    return "\n".join(out)
 
 
 @router.put("/prompts/{name}")
@@ -315,9 +335,15 @@ async def put_prompt(name: str, req: PromptPut):
     if not req.text.strip():
         raise HTTPException(400, "empty prompt")
     try:
+        before, _ = _prompts.get(name)
         v = _prompts.put(name, req.text, by=req.by, make_current=req.make_current)
     except KeyError:
         raise HTTPException(404, f"unknown prompt {name}")
+    # The audit line is best effort on purpose: losing it must not lose the
+    # prompt the person just wrote.
+    from app import feedback_store
+    feedback_store.record_prompt_edit(name, v, req.by or "unknown", req.instruction,
+                                      _diff_summary(before, req.text))
     return {"name": name, "version": v, "current": _prompts.describe(name)["current"]}
 
 

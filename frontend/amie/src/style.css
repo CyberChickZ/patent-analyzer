@@ -566,3 +566,24 @@ details.cand > summary.cand-head:focus-visible { outline: 2px solid var(--accent
 tr.is-spent > td:first-child { box-shadow: inset 2px 0 0 var(--danger); }
 tr.is-reserved > td:first-child { box-shadow: inset 2px 0 0 var(--text-3); }
 tr.is-reserved > td { background: var(--neutral-soft); }
+
+
+/* ─── Feedback timeline ───
+   Two columns: a record of what changed, and what people said about it. They
+   stack on a narrow screen, because side by side at 400px is one column with
+   extra steps. */
+.fb-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; align-items: start; }
+@media (max-width: 900px) { .fb-cols { grid-template-columns: 1fr; } }
+.fb-day { margin-bottom: .8rem; }
+.fb-row > summary { display: flex; gap: .5rem; align-items: baseline; flex-wrap: wrap; }
+.fb-row > summary > .small { flex: 1 1 12rem; min-width: 0; }
+.fb-diff { font-size: .74rem; white-space: pre-wrap; background: var(--bg2, #f6f6f4);
+           padding: .4rem .5rem; border-radius: 4px; overflow-x: auto; }
+.fb-by { min-width: 14rem; }
+.fb-filters select { width: auto; min-width: 9rem; max-width: 16rem; }
+
+/* A feedback button sits on things you can have an opinion about: a reference
+   card, the verdict, a drafted claim. It stays quiet until hovered so it does
+   not compete with the content it is attached to. */
+.fb-btn { font-size: .72rem; opacity: .45; }
+.fb-btn:hover, .fb-btn:focus { opacity: 1; }

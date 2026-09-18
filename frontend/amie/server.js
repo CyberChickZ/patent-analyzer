@@ -490,6 +490,37 @@ app.get("/api/jobs/:jobId/usage", async (req, res) => {
   }
 });
 
+// Feedback timeline — prompt edits, reviewer edits, comments and ratings.
+// Distinct from /api/feedback/:jobId below, which is the old per-job rating file.
+app.get("/api/feedback", async (req, res) => {
+  try {
+    const qs = new URLSearchParams(req.query).toString();
+    const { status, data } = await proxyBackend(`/feedback${qs ? "?" + qs : ""}`, { firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: "Backend unreachable" });
+  }
+});
+
+app.post("/api/feedback", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend("/feedback", { method: "POST", data: req.body, firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: "Backend unreachable" });
+  }
+});
+
+app.patch("/api/feedback/:id", async (req, res) => {
+  try {
+    const { status, data } = await proxyBackend(`/feedback/${encodeURIComponent(req.params.id)}`,
+      { method: "PATCH", data: req.body, firebaseToken: fbToken(req) });
+    res.status(status).json(data);
+  } catch (e) {
+    res.status(502).json({ error: "Backend unreachable" });
+  }
+});
+
 // Health
 // Rate card / quota — what every external source has left, plus the prices the
 // backend costs a run with. Live as of N1; the backend serves it at /api/quota.

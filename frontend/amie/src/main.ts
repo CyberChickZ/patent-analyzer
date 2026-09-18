@@ -8,6 +8,7 @@ import { renderRun, disposeRun } from "./pages/run";
 import { renderResults, disposeResults } from "./pages/results";
 import { renderPrompts, disposePrompts } from "./pages/prompts";
 import { renderQuota, disposeQuota } from "./pages/quota";
+import { renderFeedback, disposeFeedback } from "./pages/feedback";
 
 export interface Page {
   render(host: HTMLElement, arg: string): void | Promise<void>;
@@ -25,6 +26,7 @@ root.innerHTML = `
         <a href="#/submit" data-route="submit">Submit</a>
         <a href="#/results" data-route="results">Results</a>
         <a href="#/prompts" data-route="prompts">Prompts</a>
+        <a href="#/feedback" data-route="feedback">Feedback</a>
         <a href="#/quota" data-route="quota">Quota</a>
       </nav>
       <button class="icon-btn" id="theme-btn" title="Light / dark / follow system"></button>
@@ -83,6 +85,7 @@ const PAGES: Record<string, Page> = {
   run: { render: renderRun, dispose: disposeRun },
   results: { render: renderResults, dispose: disposeResults },
   prompts: { render: renderPrompts, dispose: disposePrompts },
+  feedback: { render: renderFeedback, dispose: disposeFeedback },
   quota: { render: renderQuota, dispose: disposeQuota },
 };
 

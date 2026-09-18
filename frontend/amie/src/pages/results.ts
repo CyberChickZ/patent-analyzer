@@ -1,6 +1,6 @@
 import {
   getResults, getStatus, reportUrl, getFulltextGaps, uploadFulltext, dropFulltextUpload,
-  rerunEvidence, getLedger, listJobs, deleteJob, isNotSignedIn,
+  rerunEvidence, getLedger, listJobs, deleteJob, isNotSignedIn, addFeedback,
   type JobEvent, type FulltextGaps, type FulltextGapRow, type JobSummary, type Ledger,
 } from "../api";
 import { esc, clip, pill, num, empty, errorBox, openModal, md, on, plainTitle, fmtDate } from "../ui";
@@ -172,6 +172,56 @@ async function renderJobList(host: HTMLElement): Promise<void> {
   });
 }
 
+/** A place to say something about this exact thing.
+ *
+ *  Feedback that is not attached to a place is a to-do list nobody can action:
+ *  "the evidence is wrong" and "this reference's element 3 is wrong" are
+ *  different amounts of information. The button records the tab and the
+ *  anchor, so the Feedback page can link straight back here.
+ */
+function fbButton(tab: string, anchor: string, what: string): string {
+  return `<button class="icon-btn fb-btn" data-fb="${esc(tab)}||${esc(anchor)}"
+    title="Leave feedback on ${esc(what)}" onclick="event.stopPropagation()">Feedback</button>`;
+}
+
+function wireFeedback(host: HTMLElement, jobId: string): void {
+  on(host, "[data-fb]", async (el, ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const [tab, anchor] = el.dataset.fb!.split("||");
+    const text = prompt(`Feedback on ${anchor || tab}:`)?.trim();
+    if (!text) return;
+    try {
+      await addFeedback({
+        kind: "comment", job_id: jobId,
+        job_title: plainTitle(R?.source_title) || R?.source_filename || "",
+        target: { tab, anchor }, text,
+      });
+      el.textContent = "Saved ✓";
+      setTimeout(() => { el.textContent = "Feedback"; }, 2000);
+    } catch (e: any) {
+      alert(`Could not save that — ${String(e?.message || e)}`);
+    }
+  });
+
+  on(host, "[data-rate]", async (el, ev) => {
+    ev.preventDefault();
+    const rating = Number(el.dataset.rate);
+    const text = prompt(rating > 0 ? "What worked? (optional)" : "What was wrong? (optional)") || "";
+    try {
+      await addFeedback({
+        kind: "rating", job_id: jobId,
+        job_title: plainTitle(R?.source_title) || R?.source_filename || "",
+        rating, text, target: { tab: "verdict", anchor: "" },
+      });
+      const slot = host.querySelector("#rate-slot");
+      if (slot) slot.innerHTML = `<span class="small muted">thanks — recorded on the Feedback page</span>`;
+    } catch (e: any) {
+      alert(`Could not save that — ${String(e?.message || e)}`);
+    }
+  });
+}
+
 function paint(host: HTMLElement, jobId: string, tab = ""): void {
   buildCoverage();
   const p1 = R.phase1 || {};
@@ -209,6 +259,8 @@ function paint(host: HTMLElement, jobId: string, tab = ""): void {
       ${esc(p1.input_mode || "—")} · CPC ${esc(p1.cpc_subclass || "—")} ·
       <a href="${reportUrl(jobId)}" target="_blank" rel="noopener">Full HTML report ↗</a> ·
       <a href="/api/results/${esc(jobId)}" target="_blank" rel="noopener">results.json ↗</a>
+      <span id="rate-slot"> · <button class="icon-btn" data-rate="1" title="This report was useful">👍</button>
+        <button class="icon-btn" data-rate="-1" title="Something is wrong with this report">👎</button></span>
     </div>
   </div>
 
@@ -223,6 +275,8 @@ function paint(host: HTMLElement, jobId: string, tab = ""): void {
   // The Event log tab is the run page, mounted here: same timeline, same live
   // poll, same HITL review panel. It polls only while this tab is open, and
   // disposeResults stops it.
+  wireFeedback(host, jobId);
+
   const mount = host.querySelector<HTMLElement>("#run-mount");
   if (mount) renderRun(mount, jobId, { embedded: true });
   else disposeRun();
@@ -346,7 +400,8 @@ function determinationSection(adj: any, sr: any[]): string {
   const docs: any[] = chart.docs || [];
   const vclass = adj.label === "102" || adj.label === "103" ? `v-${adj.label}` : "v-allow";
   return `<section class="section" id="sec-verdict">
-    <header><h2>Determination and its basis</h2><span class="hint">rule verdict from the charted evidence</span></header>
+    <header><h2>Determination and its basis</h2><span class="hint">rule verdict from the charted evidence</span>
+      ${fbButton("verdict", "determination", "the determination")}</header>
     <div class="panel"><div class="panel-body stack">
       <div class="verdict ${vclass}">
         <span class="label">§${esc(adj.label)}</span>
@@ -444,6 +499,7 @@ function candidatesSection(cands: any[], checklist: any[], sr: any[]): string {
             ${(c.cpc_pred || []).slice(0, 3).map((x: string) => `<span class="pill pill-tag">${esc(x)}</span>`).join("")}
             ${best ? `<span class="pill ${best.covered >= best.total ? "pill-failed" : "pill-paused"}" title="best single reference against this candidate">${best.covered}/${best.total} covered</span>` : ""}
             <span class="small muted nowrap">${els.length} element${els.length === 1 ? "" : "s"}</span>
+            ${fbButton("candidates", c.id, `candidate ${c.id}`)}
           </div>
           <div class="concept">${esc(c.concept || "")}</div>
         </summary>
@@ -847,6 +903,7 @@ function matrixSection(cands: any[], checklist: any[], sr: any[]): string {
     }
     return `<details class="cand" data-keep="${esc(key)}" ${isOpen(key, false) ? "open" : ""}>
       <summary class="cand-head"><span class="cid">${esc(g.id)}</span>
+        ${fbButton("evidence", g.id, `the evidence grid for ${g.id}`)}
         <div class="concept">${esc(clip(g.concept, 150))}</div>
         <div class="small muted">${g.rows.length} elements × ${docs.length} of ${scored.length} references that touch it${
           (() => { const hit = scored.filter((x) => x.hits > 0).length; return hit ? ` · ${hit} cover at least one element` : ""; })()}</div></summary>
@@ -910,6 +967,7 @@ function draftSection(dc: any): string {
           <span class="pill pill-tag">${esc(c.form || "")}</span>
           ${c.depends_on != null ? `<span class="small muted">depends on ${esc(c.depends_on)}</span>` : ""}
           <span class="small muted nowrap">${(c.limitations || []).length} limitation${(c.limitations || []).length === 1 ? "" : "s"}</span>
+          ${fbButton("draft", `claim-${c.no}`, `claim ${c.no}`)}
         </div><div class="concept">${esc(clip(c.preamble || "", 160))}</div></summary>
         <div class="cand-body">
         <div class="prose">${esc(c.preamble || "")}</div>

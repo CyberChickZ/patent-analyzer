@@ -41,6 +41,16 @@ def _no_accidental_urlopen(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _never_shared_feedback(tmp_path_factory, monkeypatch):
+    """Feedback is one object per entry in the bucket. A test that writes one
+    puts it on the real timeline."""
+    if os.environ.get("FEEDBACK_STORE") is None:
+        monkeypatch.setenv("FEEDBACK_STORE", "local")
+    if os.environ.get("FEEDBACK_LOCAL_DIR") is None:
+        monkeypatch.setenv("FEEDBACK_LOCAL_DIR", str(tmp_path_factory.mktemp("feedback")))
+
+
+@pytest.fixture(autouse=True)
 def _never_shared_cloud_state(tmp_path_factory, monkeypatch):
     """Quotas, breakers and gates live in GCS now. Every test gets its own
     directory: a test that increments the real SerpAPI counter would refuse a

@@ -397,6 +397,15 @@ async def _run_langgraph_pipeline(job_id: str):
                     job.setdefault("phases", {})["phase4"] = {"evaluated": len(sr), "top_score": round(top, 4)}
                 if patch.get("user_edits"):
                     job.setdefault("user_edits", []).extend(patch["user_edits"])
+                    # One timeline entry per accepted gate edit, so what a
+                    # reviewer changed sits next to what the prompts did.
+                    try:
+                        from app import feedback_store
+                        await asyncio.to_thread(
+                            feedback_store.record_reviewer_edits, job_id,
+                            patch["user_edits"], job.get("submitted_by", ""))
+                    except Exception as exc:
+                        print(f"[feedback] reviewer edits not recorded for {job_id}: {exc}", flush=True)
                 if patch.get("prompt_versions"):
                     job.setdefault("prompt_versions", {}).update(patch["prompt_versions"])
                 # keep the cost/timing accounting on the job record too, so it
@@ -997,6 +1006,41 @@ async def get_usage(job_id: str, user: dict = Depends(require_auth)):
             "prices_usd_per_mtok": cost.get("prices_usd_per_mtok") or {},
             "bigquery_usd_per_tib": cost.get("bigquery_usd_per_tib"),
             "note": cost.get("note") or "", "ledger": ledger}
+
+
+# ── feedback timeline ───────────────────────────────────────────────────────
+#
+# Distinct from /feedback/{job_id}, which is the old per-job rating file and
+# stays where it is. These three are the timeline: prompt edits, reviewer
+# edits, in-place comments and ratings, one store, all of it behind auth.
+
+
+@app.get("/feedback")
+async def feedback_list(job: str = "", kind: str = "", status: str = "",
+                        prompt_name: str = "", limit: int = 100, offset: int = 0,
+                        user: dict = Depends(require_auth)):
+    from app import feedback_store
+    return feedback_store.listing(job=job, kind=kind, status=status,
+                                  prompt_name=prompt_name, limit=limit, offset=offset)
+
+
+@app.post("/feedback")
+async def feedback_create(payload: dict, user: dict = Depends(require_auth)):
+    from app import feedback_store
+    try:
+        entry = feedback_store.new_entry(payload, user.get("email", ""))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return feedback_store.save(entry)
+
+
+@app.patch("/feedback/{entry_id}")
+async def feedback_patch(entry_id: str, payload: dict, user: dict = Depends(require_auth)):
+    from app import feedback_store
+    out = feedback_store.patch(entry_id, payload, user.get("email", ""))
+    if out is None:
+        raise HTTPException(404, "No feedback entry with that id")
+    return out
 
 
 @app.get("/api/quota")

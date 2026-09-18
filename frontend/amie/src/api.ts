@@ -432,3 +432,51 @@ export const dropFulltextUpload = (id: string, refId: string) =>
 export const rerunEvidence = (id: string, refs?: string[]) =>
   sendJson<{ job_id: string; status: string; refs: string[] }>(
     `/api/jobs/${encodeURIComponent(id)}/rerun-evidence`, "POST", refs ? { refs } : {});
+
+
+// ─── Feedback timeline ───
+//
+// Four kinds. `auto` is the one that matters when reading the page: a
+// prompt_edit or a reviewer_edit is a record that something changed, not
+// somebody's opinion that it should, and the two belong in different columns.
+
+export interface FeedbackEntry {
+  id: string;
+  ts: string;
+  by: string;
+  auto: boolean;
+  kind: "prompt_edit" | "reviewer_edit" | "comment" | "rating";
+  job_id: string;
+  job_title: string;
+  target: { tab?: string; anchor?: string };
+  text: string;
+  prompt_name: string;
+  prompt_version: number | null;
+  instruction: string;
+  diff_summary: string;
+  rating: number | null;
+  status: "open" | "addressed";
+  addressed_by: { prompt_name?: string; version?: number; commit?: string } | null;
+  addressed_at: string;
+}
+
+export interface FeedbackPage {
+  total: number;
+  offset: number;
+  limit: number;
+  entries: FeedbackEntry[];
+  note?: string;
+}
+
+export const listFeedback = (q: Record<string, string | number> = {}) => {
+  const qs = new URLSearchParams(
+    Object.entries(q).filter(([, v]) => v !== "" && v != null).map(([k, v]) => [k, String(v)]),
+  ).toString();
+  return json<FeedbackPage>(`/api/feedback${qs ? `?${qs}` : ""}`);
+};
+
+export const addFeedback = (body: Partial<FeedbackEntry>) =>
+  sendJson<FeedbackEntry>("/api/feedback", "POST", body);
+
+export const patchFeedback = (id: string, body: Record<string, unknown>) =>
+  sendJson<FeedbackEntry>(`/api/feedback/${encodeURIComponent(id)}`, "PATCH", body);
