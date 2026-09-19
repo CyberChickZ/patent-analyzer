@@ -654,7 +654,10 @@ Output strictly this JSON, no preamble:
   "cpc_subclass": "G06N",
   "publication_date": "YYYY-MM-DD if determinable from the document (arXiv date, copyright year, conference date), or empty string",
   "summary": "400-800 word summary, or empty string if Absent"
-}}""")
+}}""", contract="""Does: summarise the invention in a source document, for every later phase to work from.
+Must output: prose only, no JSON, no headings the caller parses.
+Consumed by: nodes/idca.py, and from there the whole pipeline's `summary`.
+Never: invent detail the document does not contain — every later phase treats this as the document's own account of itself.""")
 
 
 async def detect_and_summarize_invention(
@@ -792,7 +795,10 @@ Rules:
 - figures: every figure/table caption: label ("Figure 1", "Table 2"), caption text verbatim.
 - equations: every numbered display equation: label ("1", "2", ...), latex.
 - references_count: number of entries in the reference list (0 if none).
-{extra}""")
+{extra}""", contract="""Does: turn a document into the structured Doc JSON the pipeline locates quotes against.
+Must output: JSON with `sections`, `paragraphs`, `figures`, `equations`, `references`; paragraph indices are 1-based and are what evidence_loc points at.
+Consumed by: nodes/idca.py -> doc_json, then quote location in extract and evaluate.
+Never: renumber, merge or drop paragraphs — a shifted index silently relocates every quote.""")
 
 
 def _clean_doc_json(d: dict) -> dict:
@@ -893,7 +899,10 @@ Rules:
 - reason: ONE short sentence, naming the evidence (e.g. the phrase that turns the section).
 
 ════ MANUSCRIPT OUTLINE ════
-{outline}""")
+{outline}""", contract="""Does: find the parts of a document that describe prior art rather than the invention.
+Must output: JSON with the section identifiers to exclude.
+Consumed by: nodes/idca.py, to keep the invention summary free of the art it cites.
+Never: exclude a section that also carries the invention's own elements.""")
 
 _SECTION_PREVIEW_HEAD = 2000
 _SECTION_PREVIEW_TAIL = 1200
@@ -1154,7 +1163,10 @@ JSON output:
   "key_teachings": "103 relevant elements in 1-2 sentences",
   "rs_synopsis": "One sentence: what this prior art does (actor→operation→outcome)",
   {output_schema}
-}}""")
+}}""", contract="""Does: score one prior-art document, read as a PDF, against the checklist.
+Must output: JSON `checklist_results` keyed by criterion, each with `score` 0/1/2 and `evidence_quotes` copied verbatim from that document.
+Consumed by: adjudicate.py, which counts an element as disclosed only when the score is >= 1 AND a quote was located.
+Never: quote the invention instead of the prior art, and never write a quote that is not in the document — an unlocatable quote does not count and is worse than none.""")
 
 
 async def evaluate_single_document(
@@ -1304,11 +1316,17 @@ JSON output:
   "key_teachings": "1-2 sentences",
   "rs_synopsis": "One sentence: what this prior art does",
   {output_schema}
-}}""")
+}}""", contract="""Does: the same scoring, for a document available only as text or as an abstract.
+Must output: the same JSON shape as evaluate.document_pdf.
+Consumed by: adjudicate.py, and the report labels the result abstract-only when the text was an abstract.
+Never: score an element Present on the strength of a title — an abstract that does not mention an element is silence, not absence.""")
 
 
 EVALUATE_BRI_INSTRUCTION = prompts.register_default("evaluate.bri_instruction", """
-CLAIM INTERPRETATION — BROADEST REASONABLE INTERPRETATION (MPEP 2111 / 2111.01). Read each criterion the way a US examiner reads a pending claim: give its words their plain meaning and their broadest reasonable interpretation consistent with the invention's own description, not the narrowest reading the wording admits. Identity of terminology is not required (MPEP 2131): a part or step in the document that performs the same function in substantially the same way satisfies the criterion even if it is named, arranged or exemplified differently; a generic component (processor, memory, module, database, controller, network element, sensor, standard protocol) is satisfied by any such component the document describes; a functional limitation ("configured to X", "for X-ing", "wherein X") is satisfied by any disclosed part that performs X. The rule "do not infer beyond what the text states" governs facts, not claim scope: never add a disclosure the document does not make, but do not score 0 merely because the document uses different words, a different example, or a broader or narrower species of the same feature. Score 0 only when no reasonable reading of the criterion is met by anything the document discloses. Quotes stay verbatim: every score 1 or 2 still needs evidence_quotes copied exactly from the document, never paraphrased or invented; if nothing in the text supports even the broad reading, score 0.""")
+CLAIM INTERPRETATION — BROADEST REASONABLE INTERPRETATION (MPEP 2111 / 2111.01). Read each criterion the way a US examiner reads a pending claim: give its words their plain meaning and their broadest reasonable interpretation consistent with the invention's own description, not the narrowest reading the wording admits. Identity of terminology is not required (MPEP 2131): a part or step in the document that performs the same function in substantially the same way satisfies the criterion even if it is named, arranged or exemplified differently; a generic component (processor, memory, module, database, controller, network element, sensor, standard protocol) is satisfied by any such component the document describes; a functional limitation ("configured to X", "for X-ing", "wherein X") is satisfied by any disclosed part that performs X. The rule "do not infer beyond what the text states" governs facts, not claim scope: never add a disclosure the document does not make, but do not score 0 merely because the document uses different words, a different example, or a broader or narrower species of the same feature. Score 0 only when no reasonable reading of the criterion is met by anything the document discloses. Quotes stay verbatim: every score 1 or 2 still needs evidence_quotes copied exactly from the document, never paraphrased or invented; if nothing in the text supports even the broad reading, score 0.""", contract="""Does: state how the claims are construed, under MPEP 2111 broadest reasonable interpretation, inside the evaluation prompts.
+Must output: a sentence fragment spliced into the evaluation prompt, no JSON.
+Consumed by: evaluate.document_pdf and evaluate.document_text.
+Never: change what BRI means. The report tells the reader the claims were read this way.""")
 
 
 def _bri_enabled() -> bool:
@@ -1838,7 +1856,10 @@ REFERENCES AND THE ELEMENTS EACH DISCLOSES (located verbatim quotes in brackets)
 {references}
 
 ELEMENTS NO REFERENCE DISCLOSES:
-{uncovered}""")
+{uncovered}""", contract="""Does: explain, in prose, why a charted combination reads as obvious or does not.
+Must output: prose paragraphs, no JSON, no verdict.
+Consumed by: the report, under a heading that says this is the model's narrative and the determination is not.
+Never: state a conclusion. The rule decides; this explains the rule's output.""")
 
 
 OBVIOUSNESS_FINDINGS_PROMPT = prompts.register_default("evaluate.obviousness_findings", """════ TASK ════
@@ -1914,7 +1935,10 @@ Everyone answers 5, 6 and 7.
 
 Answer with JSON only, in the given schema. Use the exact reference key shown in brackets as
 "doc". Where you cannot find support, set found=false and say why in "reason" — do not invent a
-quote to fill the field.""")
+quote to fill the field.""", contract="""Does: make the six MPEP 2143 findings a 103 rejection needs, over the charted references.
+Must output: JSON findings, each with `status`, `evidenced`, and a quote when evidenced.
+Consumed by: obviousness.py -> adjudicate.py, which refuses a 103 whose findings do not support the combination.
+Never: mark a finding evidenced without a quote from a reference. Background knowledge is allowed as a rationale (2143.01) but it is recorded as asserted, not evidenced.""")
 
 
 async def obviousness_findings(elements: list[str], refs: dict[str, str],
@@ -2039,7 +2063,10 @@ Output JSON: {{"observation": "<=40 words on what the last results showed",
  "decision": "<=30 words on why this next query",
  "covered_elements": ["<element id>", ...], "learned_terms": ["..."],
  "next": {{"target_elements": ["<element id>"], "specific": ["2-4 items"], "broad": ["8-15 terms"], "cpc_group": "H04N7 or empty"}},
- "stop": false}}""")
+ "stop": false}}""", contract="""Does: choose the next prior-art query, one at a time, from the history so far.
+Must output: JSON with `observation`, `decision`, `covered_elements`, `learned_terms`, `next` (`target_elements`, `specific`, `broad`, `cpc_group`) and `stop`.
+Consumed by: agentic/loop.py, which issues the query and feeds the results back.
+Never: invent vocabulary. Terms come from returned titles and the art's own words — a compound nobody drafting a patent wrote matches nothing, which is exactly how first-reach went to zero once before (H.md 勘误五).""")
 
 
 SEARCH_FACETS_PROMPT = prompts.register_default("search.facets", """For EACH element below, give five facets of search terms:
@@ -2073,7 +2100,10 @@ no slash part) where prior art for these elements is likely classified, INCLUDIN
 technologies the implementation borrows from other fields (optical tracking → G01S17, machine guidance
 → G05D1, video conferencing → H04N7): an examiner cites across fields, the paper's own field is not enough.
 
-JSON output: {{"cpc_groups": ["..."], "facets": {{"<element id>": {{"patent": [...], "named": [...], "thing": [...], "place": [...], "apparatus": [...]}}, ...}}}}""")
+JSON output: {{"cpc_groups": ["..."], "facets": {{"<element id>": {{"patent": [...], "named": [...], "thing": [...], "place": [...], "apparatus": [...]}}, ...}}}}""", contract="""Does: give five facets of search terms per element, plus likely CPC main groups.
+Must output: JSON per element with the five named facets and the CPC list.
+Consumed by: the query builder.
+Never: return words so general they appear in every patent, and never keep a paper's own coinage where the art has a word for it.""")
 
 
 async def facet_elements(elements: list[dict], summary: str) -> dict[str, dict]:
@@ -2173,7 +2203,10 @@ Output strictly this JSON, no preamble:
 ════ DOCUMENT ════
 ```
 {document}
-```""")
+```""", contract="""Does: break a candidate invention into claim elements, each tied to verbatim text.
+Must output: JSON `elements`, each with `id`, `text`, `evidence_quote` copied verbatim from the document.
+Consumed by: the checklist, the search, the evidence matrix and the drafted claims.
+Never: paraphrase an evidence_quote. It is located back in the document by exact match, and a paraphrase is an unsupported element.""")
 
 _FACET_BANNED = frozenset("device member element portion means unit system method apparatus module component assembly".split())
 
@@ -2246,7 +2279,10 @@ Output strictly this JSON, no preamble:
 ════ DOCUMENT ════
 ```
 {document}
-```""")
+```""", contract="""Does: propose candidate inventions in the document, at core / component / application level.
+Must output: JSON `candidate_inventions`, each with `id`, `level`, `concept`.
+Consumed by: the extraction subgraph, then every downstream phase keyed on candidate id.
+Never: merge two distinct inventions into one candidate — the whole chart is per candidate.""")
 
 
 async def extract_candidates(doc_text: str, summary: str, doc_kind: str = "paper") -> dict:
@@ -2405,7 +2441,10 @@ Output strictly this JSON, no preamble:
 ════ DOCUMENT ════
 ```
 {document}
-```""")
+```""", contract="""Does: draft independent and dependent claims for a candidate invention.
+Must output: JSON claims with `no`, `form`, `preamble`, `limitations`, `depends_on`.
+Consumed by: nodes/draft.py, the definiteness check and the report.
+Never: introduce a limitation with no basis in the extracted elements — a claim to matter the document does not disclose is not a claim anybody can file.""")
 
 
 def _lines(items: list[dict], key: str, extra: str = "") -> str:
@@ -2480,7 +2519,10 @@ FLAGGED LIMITATIONS
 {flag_lines}
 
 Output strictly this JSON, no preamble:
-{{"limitations": [{{"lid": "c1.l2", "text": "..."}}]}}""")
+{{"limitations": [{{"lid": "c1.l2", "text": "..."}}]}}""", contract="""Does: reword one claim limitation to clear a definiteness flag.
+Must output: the rewritten limitation text only.
+Consumed by: nodes/draft.py.
+Never: broaden the limitation. Fixing indefiniteness by removing the restriction changes what was claimed.""")
 
 
 async def reword_limitations(flagged: list[dict]) -> dict[str, str]:
@@ -2539,7 +2581,10 @@ Put your examination into JSON with this schema, one entry per claim:
 
 In `likelihood_indefinite`, indicate how likely the claim is to be rejected for indefiniteness by the USPTO. Use one of these expressions verbatim:
 {likelihood_expressions}
-Keep `claim_recitations` as specific and narrow as possible.""")
+Keep `claim_recitations` as specific and narrow as possible.""", contract="""Does: flag 112(b) problems in drafted claims.
+Must output: JSON `flags`, each naming the claim and the phrase.
+Consumed by: nodes/draft.py, which reports open flags on the claims.
+Never: rewrite the claim — this prompt reports, the reword prompt changes.""")
 
 
 async def definiteness_advisory(claims: list[dict], description: str, thinking_budget: int = 2048) -> dict:
