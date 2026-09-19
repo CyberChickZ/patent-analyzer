@@ -348,6 +348,32 @@ async def put_prompt(name: str, req: PromptPut):
     return {"name": name, "version": v, "current": _prompts.describe(name)["current"]}
 
 
+def _specifics_lost(before: str, after: str) -> list[str]:
+    """Named things that were in the template and are not in the rewrite.
+
+    The placeholder check is necessary and not sufficient. Dogfooding this
+    endpoint on four real prompts (2026-09-20), every proposal kept its
+    placeholders and two of them quietly dropped something that mattered: the
+    MPEP 904.01(c) citation that is the REASON for a rule, and the
+    ("icg", "indocyanine green") example that teaches the acronym rule. A
+    rewrite may shorten a sentence; it may not drop the fact the sentence was
+    carrying.
+
+    So: quoted strings, statute citations and multi-digit numbers. Crude on
+    purpose — it reports, the human decides, and a false positive costs a
+    glance while a false negative costs a rule.
+    """
+    import re as _r
+
+    def facts(t: str) -> set[str]:
+        out = set(_r.findall(r'"([^"\n]{2,40})"', t))
+        out |= set(_r.findall(r"\bMPEP\s+[\d.]+(?:\([a-z]\))?", t))
+        out |= set(_r.findall(r"\b\d+\s*CFR\s*[\d.()]+", t))
+        out |= {n for n in _r.findall(r"\b\d[\d,]{2,9}\b", t) if "," in n or len(n) >= 3}
+        return out
+    return sorted(facts(before) - facts(after))[:20]
+
+
 class PromptRevise(BaseModel):
     instruction: str
 
@@ -395,12 +421,22 @@ async def revise_prompt(name: str, req: PromptRevise):
         raise HTTPException(502, f"the model did not answer: {type(exc).__name__}: {exc}")
     import json as _json
     import re as _re
-    m = _re.search(r"\{.*\}", raw, _re.DOTALL)
+    fenced = _re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, _re.DOTALL)
+    m = fenced or _re.search(r"\{.*\}", raw, _re.DOTALL)
     if not m:
         raise HTTPException(502, "the model did not return JSON")
-    try:
-        out = _json.loads(m.group())
-    except Exception:
+    blob = m.group(1) if fenced else m.group()
+    out = None
+    for strict in (True, False):
+        try:
+            # strict=False tolerates raw newlines inside a JSON string, which is
+            # how a model returns a multi-line template it forgot to escape —
+            # the alternative is refusing a rewrite that is otherwise fine.
+            out = _json.loads(blob, strict=strict)
+            break
+        except Exception:
+            continue
+    if out is None:
         raise HTTPException(502, "the model returned JSON this endpoint could not parse")
     text = str(out.get("text") or "")
     if not text.strip():
@@ -409,14 +445,18 @@ async def revise_prompt(name: str, req: PromptRevise):
     # is a long way from here. Check it now and hand the check back.
     holes = set(_re.findall(r"(?<!\{)\{([a-zA-Z_][a-zA-Z0-9_]*)\}(?!\})", current))
     kept = set(_re.findall(r"(?<!\{)\{([a-zA-Z_][a-zA-Z0-9_]*)\}(?!\})", text))
+    lost = sorted(holes - kept)
+    specifics = _specifics_lost(current, text)
     return {"name": name, "from_version": ver, "text": text,
             "rationale": str(out.get("rationale") or ""),
             "model": model,
-            "placeholders_lost": sorted(holes - kept),
+            "placeholders_lost": lost,
             "placeholders_added": sorted(kept - holes),
-            "note": ("nothing was saved; PUT /prompts/{name} with this text to create a version"
-                     if not (holes - kept) else
-                     "NOT SAFE TO SAVE: the rewrite dropped a placeholder the template renders with")}
+            "specifics_lost": specifics,
+            "note": ("NOT SAFE TO SAVE: the rewrite dropped a placeholder the template renders with"
+                     if lost else
+                     "nothing was saved; PUT /prompts/{name} with this text to create a version"
+                     + (f" — but read it first: {len(specifics)} specific(s) went missing" if specifics else ""))}
 
 
 class PromptCurrent(BaseModel):

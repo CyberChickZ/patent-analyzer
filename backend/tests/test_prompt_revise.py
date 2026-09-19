@@ -95,3 +95,22 @@ def test_an_unpriced_model_is_reported_as_a_gap_not_as_free():
     n = len(metering.incidents)
     metering.cost_usd("made-up-model", 1000, 100, 0)
     assert len(metering.incidents) == n, "one incident per model, not per call"
+
+
+def test_a_rewrite_that_drops_a_citation_or_an_example_is_reported(client, monkeypatch):
+    """The placeholder check is necessary and not sufficient. Dogfooding this
+    endpoint on four real prompts, every proposal kept its placeholders and two
+    of them quietly dropped the MPEP citation that was a rule's whole reason,
+    and the ("icg", "indocyanine green") example that teaches the acronym rule.
+    A rewrite may shorten a sentence; it may not drop the fact it carried."""
+    import app.prompts as pr
+    pr._DEFAULTS["t.rev"] = ('Try every group: examiners search all analogous arts (MPEP 904.01(c)). '
+                             'Give the acronym and its expansion ("icg", "indocyanine green"). '
+                             'The field is about 100,000 documents. {elements}')
+    _answer(monkeypatch, "Try every group, as examiners do. Give both forms. A large field. {elements}")
+    r = client.post("/api/prompts/t.rev/revise", json={"instruction": "shorten"}).json()
+    assert r["placeholders_lost"] == [], "the placeholder check passes — that is the point"
+    assert "MPEP 904.01(c)" in r["specifics_lost"]
+    assert "icg" in r["specifics_lost"] and "indocyanine green" in r["specifics_lost"]
+    assert "100,000" in r["specifics_lost"]
+    assert "went missing" in r["note"]
