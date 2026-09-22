@@ -96,6 +96,8 @@ async def draft_node(state: GraphState) -> dict:
         if payload:
             evt["payload"] = payload
         events.append(evt)
+        from patent_analyzer import event_log
+        event_log.emit(evt)
 
     _event("start", "Drafting claims from the grounded elements and the evidence matrix")
     extraction = state.get("extraction") or {}

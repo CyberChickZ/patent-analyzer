@@ -85,7 +85,11 @@ class ExtractionState(TypedDict, total=False):
 
 
 def _event(kind: str, message: str) -> dict:
-    return {"ts": datetime.now(timezone.utc).isoformat(), "phase": "phase2", "kind": kind, "message": message}
+    from patent_analyzer import event_log
+    evt = {"ts": datetime.now(timezone.utc).isoformat(), "phase": "phase2",
+           "kind": kind, "message": message}
+    event_log.emit(evt)
+    return evt
 
 
 def raw_file_text(state: ExtractionState) -> str:

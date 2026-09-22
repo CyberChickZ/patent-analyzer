@@ -79,8 +79,14 @@ class SingleDocInput(TypedDict):
 
 def _event(kind: str, message: str) -> dict:
     from datetime import datetime, timezone
-    return {"ts": datetime.now(timezone.utc).isoformat(),
-            "phase": "phase4", "kind": kind, "message": message}
+
+    from patent_analyzer import event_log
+    evt = {"ts": datetime.now(timezone.utc).isoformat(),
+           "phase": "phase4", "kind": kind, "message": message}
+    # straight out to whoever is watching; the returned patch carries it too,
+    # and event_log.merge counts it once
+    event_log.emit(evt)
+    return evt
 
 
 def fan_out_docs(state: EvalState) -> list[Send]:

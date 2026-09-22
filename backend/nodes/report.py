@@ -73,8 +73,11 @@ async def report_node(state: GraphState) -> dict:
     events = []
 
     def _event(kind: str, message: str):
-        events.append({"ts": datetime.now(timezone.utc).isoformat(),
-                        "phase": "phase5", "kind": kind, "message": message})
+        evt = {"ts": datetime.now(timezone.utc).isoformat(),
+               "phase": "phase5", "kind": kind, "message": message}
+        events.append(evt)
+        from patent_analyzer import event_log
+        event_log.emit(evt)
 
     _event("start", "Generating report")
 

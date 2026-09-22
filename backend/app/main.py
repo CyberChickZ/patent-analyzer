@@ -339,6 +339,22 @@ async def _run_langgraph_pipeline(job_id: str):
 
     hb = asyncio.create_task(_heartbeat())
 
+    # Events reach the job record only when a node returns, and a node is a
+    # whole phase — so a running job had produced events that no caller could
+    # see for as long as the phase lasted (job ea70d51a: 45 s, and the first
+    # screen said "0 events" while event one was a second old). Push each one
+    # to its own small GCS object as it happens; /events and /status merge.
+    from patent_analyzer import event_log
+
+    def _live(evt: dict) -> None:
+        slim = slim_event(evt)
+        k = event_log.event_key(slim)
+        rows = job.setdefault("events", [])
+        if not any(event_log.event_key(r) == k for r in rows[-40:]):
+            rows.append(slim)
+        event_log.append(job_id, slim)
+    sink_token = event_log.set_sink(_live)
+
     interrupted = None
     try:
         stream = graph.astream(graph_input, config=config, stream_mode="updates")
@@ -369,7 +385,14 @@ async def _run_langgraph_pipeline(job_id: str):
                     # the job record is rewritten to disk and GCS on every
                     # heartbeat; one round_done payload was 6.6 MB of provenance
                     # that funnel.json already holds (patent_analyzer.funnel)
-                    job.setdefault("events", []).append(slim_event(evt))
+                    #
+                    # The live sink has usually recorded this already. Both are
+                    # right; neither may be counted twice.
+                    slim = slim_event(evt)
+                    k = event_log.event_key(slim)
+                    rows = job.setdefault("events", [])
+                    if not any(event_log.event_key(r) == k for r in rows[-80:]):
+                        rows.append(slim)
                     if evt.get("phase"):
                         job["phase"] = evt["phase"]
                 if patch.get("source_title") and not job.get("title"):
@@ -448,9 +471,11 @@ async def _run_langgraph_pipeline(job_id: str):
                                "data": {"checklist": values.get("checklist", []), "summary": (values.get("summary") or "")[:500],
                                         "extraction": values.get("extraction"), "next_node": _next_node(phase)}}
         print(f"[HITL] Job {job_id} paused after {phase}")
+        event_log.reset_sink(sink_token)
         _save_job(job)
         return
 
+    event_log.reset_sink(sink_token)
     try:
         final_state = graph.get_state(config).values
     except Exception:
@@ -839,6 +864,10 @@ async def get_status(job_id: str, user: dict | None = Depends(optional_auth)):
     # the pipeline finished on another Cloud Run instance — this instance's
     # in-memory view is stale. Trust the GCS artifact, not the heartbeat.
     response = {k: v for k, v in job.items() if not k.startswith("_")}   # _hitl_saved_state etc. stay server-side
+    # Same union as /events: this instance may not be the one running the job,
+    # and a node that has not returned yet has its events only in the log.
+    from patent_analyzer import event_log
+    response["events"] = event_log.merge(job.get("events"), event_log.read(job_id))
     if job.get("status") == "queued":
         pos = _queue_position(job_id)
         if pos is not None:
@@ -877,7 +906,11 @@ async def get_events(job_id: str, since: int = 0):
     job = _get_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
-    events = job.get("events", [])
+    from patent_analyzer import event_log
+    # The record is authoritative once a node has returned; the log is the only
+    # source while one is still running, and this instance may not be the one
+    # running it. Neither is a superset of the other, so answer with the union.
+    events = event_log.merge(job.get("events"), event_log.read(job_id))
     return {
         "events": events[since:],
         "total": len(events),

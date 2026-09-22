@@ -161,6 +161,8 @@ async def search_node(state: GraphState) -> dict:
         if payload:
             evt["payload"] = payload
         events.append(evt)
+        from patent_analyzer import event_log
+        event_log.emit(evt)
 
     _event("start", "Multi-channel prior art recall")
 

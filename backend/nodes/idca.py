@@ -99,6 +99,10 @@ async def idca_node(state: GraphState) -> dict:
         if payload:
             evt["payload"] = payload
         events.append(evt)
+        # also straight out to whoever is watching: `events` only reaches the
+        # job record when this node returns, and a node is a whole phase
+        from patent_analyzer import event_log
+        event_log.emit(evt)
 
     _event("start", "Reading PDF and detecting invention")
 
