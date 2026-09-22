@@ -1138,16 +1138,54 @@ def cost_md(cost: dict | None) -> list[str]:
     return lines
 
 
+def email_note_html(email: dict | None) -> str:
+    """What happened, or is about to happen, to the emailed copy.
+
+    The report file is written before the mail is sent, so it can carry only
+    what is knowable first: that a copy was asked for, and — when the server
+    has no SMTP credentials — that none is coming. A transport failure at send
+    time lands on the job record and the Results page instead, which is stated
+    here rather than left for the reader to wonder about.
+
+    It exists because "Email the report when it finishes" was offered by a
+    deployment that could not send mail, and the only way to find out was not
+    receiving anything (Harry, 2026-09-22).
+    """
+    if not email or not email.get("requested"):
+        return ""
+    to = _e(email.get("to", ""))
+    if email.get("enabled"):
+        return (f'<div class="sec-note">A copy is being emailed to {to} after this report was '
+                f'written. If it does not arrive, the job record says why — the outcome is on '
+                f'the Results page, not in this file, because the file is written first.</div>')
+    return (f'<div class="notice notice-warn"><b>No email was sent.</b> A copy was requested for '
+            f'{to}, but {_e(email.get("reason") or "this server cannot send mail")}. '
+            f'The report itself is unaffected: it is here, and on the Results page.</div>')
+
+
+def email_note_md(email: dict | None) -> list[str]:
+    if not email or not email.get("requested"):
+        return []
+    to = email.get("to", "")
+    if email.get("enabled"):
+        return [f"_A copy is being emailed to {to} after this report was written; the outcome is "
+                f"on the Results page, not in this file._", ""]
+    return [f"**No email was sent.** A copy was requested for {to}, but "
+            f"{email.get('reason') or 'this server cannot send mail'}. "
+            f"The report itself is unaffected.", ""]
+
+
 def inject_html(report_html: str, extraction: dict | None, search_stats: dict | None,
                 scoring_report: list[dict] | None, checklist: list[dict] | None,
                 adjudication: dict | None = None, draft: dict | None = None,
-                cost: dict | None = None, read_gap: dict | None = None) -> str:
+                cost: dict | None = None, read_gap: dict | None = None,
+                email: dict | None = None) -> str:
     anchor = '<div class="sec-t">Invention Summary</div>'
     adj_block = determination_html(adjudication) if adjudication and "Prior-Art Determination" not in report_html else ""
     # read_gap first: how much of the delivered prior art was actually read
     # qualifies every number under it.
     from .fulltext_gap import uploaded_fulltext_html
-    block = "\n".join(x for x in (read_gap_html(read_gap), extraction_html(extraction),
+    block = "\n".join(x for x in (email_note_html(email), read_gap_html(read_gap), extraction_html(extraction),
                                   channel_health_html(search_stats),
                                   evidence_coverage_html(scoring_report),
                                   fulltext_tier_html(search_stats),
@@ -1167,10 +1205,12 @@ def inject_html(report_html: str, extraction: dict | None, search_stats: dict | 
 def inject_md(report_md: str, extraction: dict | None, search_stats: dict | None,
               scoring_report: list[dict] | None, checklist: list[dict] | None,
               adjudication: dict | None = None, draft: dict | None = None,
-              cost: dict | None = None, read_gap: dict | None = None) -> str:
+              cost: dict | None = None, read_gap: dict | None = None,
+              email: dict | None = None) -> str:
     adj_lines = determination_md(adjudication) if adjudication and "## Prior-Art Determination" not in report_md else []
     from .fulltext_gap import uploaded_fulltext_md
-    lines = (read_gap_md(read_gap) + extraction_md(extraction) + channel_health_md(search_stats)
+    lines = (email_note_md(email) + read_gap_md(read_gap) + extraction_md(extraction)
+             + channel_health_md(search_stats)
              + evidence_coverage_md(scoring_report) + fulltext_tier_md(search_stats)
              + uploaded_fulltext_md(scoring_report)
              + loop_md(search_stats)

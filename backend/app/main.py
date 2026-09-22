@@ -1043,6 +1043,24 @@ async def feedback_patch(entry_id: str, payload: dict, user: dict = Depends(requ
     return out
 
 
+@app.get("/config")
+async def server_config():
+    """What this deployment can actually do, for the UI to ask before it offers.
+
+    No auth: it carries no data about any job and the page needs it before
+    anybody signs in. It carries no secret either — whether mail is configured,
+    and the from-address, which every recipient sees anyway.
+
+    The submit page offers "Email the report when it finishes". Offering that
+    on a server with no SMTP credentials is a promise nobody keeps, and the
+    person only finds out by not receiving anything.
+    """
+    from app import email_notify
+    return {"email_enabled": email_notify.configured(),
+            "email_from": email_notify.smtp_user(),
+            "email_reason": "" if email_notify.configured() else email_notify.NOT_CONFIGURED}
+
+
 @app.get("/api/quota")
 async def get_quota(user: dict = Depends(require_auth)):
     """What is left on every external source, in one shape.

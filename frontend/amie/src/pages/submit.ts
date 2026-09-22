@@ -1,4 +1,7 @@
-import { listJobs, submitJob, deleteJob, isNotSignedIn, type JobSummary } from "../api";
+import {
+  listJobs, submitJob, deleteJob, isNotSignedIn, emailAvailable, emailUnavailableReason,
+  type JobSummary,
+} from "../api";
 import { esc, pill, fmtDate, errorBox, empty, on } from "../ui";
 import { PAUSE_ORDER, PAUSE_LABEL } from "../phases";
 import { loadQuota, jobCostRange, perM, quotaNote, upcomingBlock, EMDASH, type Quota } from "../pricing";
@@ -61,6 +64,7 @@ export function renderSubmit(host: HTMLElement): void {
       </div>
       <div>
         <label class="check"><input type="checkbox" id="email-on"><span>Email the report when it finishes</span></label>
+        <div class="tiny muted" id="email-note"></div>
         <input type="email" id="email" class="hidden" style="max-width:26rem;margin-top:.35rem" placeholder="recipient@example.com">
       </div>
     </div></div>
@@ -135,6 +139,22 @@ export function renderSubmit(host: HTMLElement): void {
     if (saved) { email.value = saved; emailOn.checked = true; email.classList.remove("hidden"); }
   } catch { /* private mode */ }
   emailOn.addEventListener("change", () => email.classList.toggle("hidden", !emailOn.checked));
+
+  // Do not offer what the server cannot do. "Email the report when it
+  // finishes", ticked and never delivered, is worse than not offering it —
+  // the person only finds out by not receiving anything.
+  const mail = emailAvailable();
+  const note = $("email-note");
+  if (mail === false) {
+    emailOn.checked = false;
+    emailOn.disabled = true;
+    email.classList.add("hidden");
+    note.textContent = `Email is not configured on this server — ${emailUnavailableReason()
+      || "no SMTP credentials"}.`;
+  } else if (mail === null) {
+    note.textContent = "Could not check whether this server can send mail; if it cannot, "
+      + "the report is still on the Results page and the job records why no email went out.";
+  }
 
   const pauses = () => Array.from(document.querySelectorAll<HTMLInputElement>("input.pause:checked")).map((c) => c.value);
 

@@ -181,16 +181,25 @@ async def report_node(state: GraphState) -> dict:
         _event("warn", read_gap.get("headline", "") + " — " +
                        "; ".join(f"{k}: {v}" for k, v in (read_gap.get("reasons") or {}).items()))
     # generate_html/markdown render the determination themselves (top of the report); inject_* add the other sections
+    # Decided before the report is written, because it is the half that can be:
+    # whether a copy was asked for and whether this server can send one at all.
+    # The transport result cannot be in the file — the file is the attachment.
+    from app import email_notify
+    email_plan = email_notify.plan_for(state.get("notify_email", ""))
+    if email_plan["requested"] and not email_plan["enabled"]:
+        _event("email_failed", f"No email will be sent to {email_plan['to']}: "
+                               f"{email_notify.NOT_CONFIGURED}")
+
     html = inject_html(generate_html(results), results["extraction"], results["search"]["summary"],
                        scoring_report, checklist, adjudication=adjudication, draft=draft, cost=cost,
-                       read_gap=read_gap)
+                       read_gap=read_gap, email=email_plan)
     (job_dir / "report.html").write_text(html, encoding="utf-8")
     if err := _save_to_gcs(job_id, "report.html", html, "text/html"):
         upload_errors["report.html"] = err
 
     md = inject_md(generate_markdown(results), results["extraction"], results["search"]["summary"],
                    scoring_report, checklist, adjudication=adjudication, draft=draft, cost=cost,
-                   read_gap=read_gap)
+                   read_gap=read_gap, email=email_plan)
     (job_dir / "report.md").write_text(md, encoding="utf-8")
     if err := _save_to_gcs(job_id, "report.md", md, "text/markdown"):
         upload_errors["report.md"] = err
@@ -207,21 +216,32 @@ async def report_node(state: GraphState) -> dict:
 
     # Email notification
     notify_email = state.get("notify_email", "")
+    email_status = {"requested": bool(notify_email), "to": notify_email,
+                    "sent": False, "error": ""}
     if notify_email:
-        try:
-            from app.email_notify import send_report
-            subject = f"Patent Analysis Complete: {state.get('source_title', 'report')}"
-            err = send_report(notify_email, subject, md, job_id=job_id)
-            if err:
-                _event("email_failed", f"Email to {notify_email}: {err}")
-            else:
-                _event("email_sent", f"Report emailed to {notify_email}")
-        except Exception as e:
-            _event("email_failed", str(e))
+        if not email_plan["enabled"]:
+            # already reported above, before the report was written
+            email_status["error"] = email_notify.NOT_CONFIGURED
+        else:
+            try:
+                subject = f"Patent Analysis Complete: {state.get('source_title', 'report')}"
+                err = email_notify.send_report(notify_email, subject, md, job_id=job_id)
+                if err:
+                    email_status["error"] = err
+                    _event("email_failed", f"Email to {notify_email}: {err}")
+                else:
+                    email_status["sent"] = True
+                    _event("email_sent", f"Report emailed to {notify_email}")
+            except Exception as e:
+                email_status["error"] = f"{type(e).__name__}: {e}"
+                _event("email_failed", email_status["error"])
 
     return {
         "phase": "phase5",
         "status": "completed",
+        # on the job record, which is in GCS and is what /status returns — the
+        # report file was written before the mail went out and cannot say
+        "email_status": email_status,
         "report_html_gcs": f"gs://{gcs_bucket}/{gcs_prefix}{job_id}/report.html",
         "report_md_gcs": f"gs://{gcs_bucket}/{gcs_prefix}{job_id}/report.md",
         "results_json_gcs": f"gs://{gcs_bucket}/{gcs_prefix}{job_id}/results.json",

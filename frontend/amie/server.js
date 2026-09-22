@@ -126,8 +126,19 @@ app.post("/a2a", async (req, res) => {
 
 // Frontend runtime config. BACKEND_ENV=dev means the backend runs with
 // AUTH_DISABLED, so the UI skips the Firebase sign-in gate.
-app.get("/api/config", (req, res) => {
-  res.json({ dev: LOCAL_RUN, backend: LOCAL_RUN ? BACKEND_URL : undefined });
+app.get("/api/config", async (req, res) => {
+  // `dev` is the proxy's own fact; everything else is the backend's answer about
+  // what it can do. A backend that will not answer leaves email_enabled null —
+  // "unknown", which the page says out loud rather than guessing either way.
+  const base = { dev: LOCAL_RUN, backend: LOCAL_RUN ? BACKEND_URL : undefined,
+                 email_enabled: null, email_reason: "the server did not answer" };
+  try {
+    const { status, data } = await proxyBackend("/config");
+    if (status === 200 && data && typeof data === "object") Object.assign(base, data);
+  } catch (e) {
+    console.error("config: backend unreachable:", e?.message || e);
+  }
+  res.json(base);
 });
 
 

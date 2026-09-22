@@ -68,12 +68,29 @@ export function isDevMode(): boolean {
   return devMode;
 }
 
+/** Whether this deployment can send mail. `null` means nobody could tell us —
+ *  the backend did not answer — and the page says that instead of guessing,
+ *  because guessing "yes" offers a promise nobody keeps and guessing "no"
+ *  removes a feature that works. */
+let emailEnabled: boolean | null = null;
+let emailReason = "";
+
+export function emailAvailable(): boolean | null {
+  return emailEnabled;
+}
+
+export function emailUnavailableReason(): string {
+  return emailReason;
+}
+
 export async function loadConfig(): Promise<{ dev: boolean }> {
   try {
     const r = await fetch("/api/config");
     if (r.ok) {
       const d = await r.json();
       devMode = !!d.dev;
+      emailEnabled = typeof d.email_enabled === "boolean" ? d.email_enabled : null;
+      emailReason = String(d.email_reason || "");
       return { dev: devMode };
     }
   } catch { /* the proxy predates /api/config — fall back to auth mode */ }
