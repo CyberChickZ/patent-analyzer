@@ -1,0 +1,14 @@
+# Local-only development dependencies. NOT installed in the Cloud Run image:
+# requirements.txt is what the Dockerfile installs, and this file is deliberately
+# not referenced from it.
+#
+#   python3 -m venv .venv
+#   .venv/bin/pip install -r requirements-local.txt
+#   .venv/bin/python -m playwright install chromium
+#
+# Playwright is here and not in requirements.txt because it is a ~150 MB browser
+# download used by one eval script (evals/scratch_n7b_antibot.py), which measures
+# what the publisher hosts do to a real browser. The pipeline itself never drives
+# a browser: it uses curl_cffi, which is in requirements.txt.
+-r requirements.txt
+playwright==1.63.0

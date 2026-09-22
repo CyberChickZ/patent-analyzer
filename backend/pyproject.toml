@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "patent-analyzer"
+version = "0.3.0"
+description = "Patent novelty analysis — Gemini + SerpAPI + semantic search + A2A protocol"
+readme = "README.md"
+license = {text = "MIT"}
+# Lower bounds only — the *exact* versions that run and that the tests are green
+# on live in requirements.txt (read its header before changing a bound here).
+# a2a-sdk was dropped: the A2A JSON-RPC endpoints in app/main.py are hand-written
+# and nothing in the tree imports `a2a` (checked 2026-09-18); it was never
+# installed in the reference environment either.
+requires-python = ">=3.10"
+dependencies = [
+    "certifi",
+    "google-genai>=1.0.0",
+    "google-cloud-storage>=2.14",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "python-multipart>=0.0.9",
+    "pymupdf>=1.24.0",
+    "sentence-transformers>=3.0.0",
+    "numpy>=1.26.0",
+    "httpx>=0.28.0",
+    "tenacity>=8.0.0",
+    "firebase-admin>=7.4.0",
+    "langgraph>=0.2.60,<0.3",
+    "google-cloud-bigquery>=3.20",
+    "markdown>=3.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "ruff",
+    "httpx",
+]
+
+[project.scripts]
+patent-search = "patent_analyzer.searcher:main"
+patent-prefilter = "patent_analyzer.prefilter:main"
+patent-report = "patent_analyzer.report_generator:main"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]

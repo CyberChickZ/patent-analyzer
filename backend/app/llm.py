@@ -1,0 +1,2724 @@
+"""
+LLM calls via Google GenAI (Vertex AI).
+
+Pipeline LLM calls:
+  Phase 1: detect_and_summarize_invention
+  Phase 2: see graph/extraction_subgraph.py
+  Phase 4: evaluate_single_document (×N), generate_overall_summary
+  Harness: self_check, refine_search_query
+
+Deterministic (zero LLM tokens):
+  detect_invention, classify_document, classify_category
+"""
+
+import asyncio
+import contextvars
+import json
+import os
+import functools
+import re
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+import httpx
+from google import genai
+from google.genai import types
+
+from app import prompts
+from google.genai.errors import APIError
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_random_exponential
+
+GC_PROJECT = os.getenv("GC_PROJECT", "aime-hello-world")
+MODEL = os.getenv("LLM_MODEL", "gemini-3.8-flash")
+MAX_TOKENS = 8192
+
+# Per-stage override: LLM_MODEL_<STAGE> (extract / screen / eval / idca / search / draft); unset → MODEL.
+STAGES = ("extract", "screen", "eval", "idca", "search", "draft")
+
+
+# J5 gates (outputs/eval_status/J5.md, 2026-09-18): the screen stage keeps the same gold with
+# gemini-3.1-flash-lite at 13x the speed, 23x cheaper and 0/45 429s vs 2.5-pro (which also
+# loses batches to thinking overrunning max_output_tokens); extract/eval stay on the global model
+# (3.5-flash scored lower on both). 2.5-pro/flash/flash-lite retire 2026-10-20 — re-gate before then.
+# 2026-09-18 (Harry): the global model is gemini-3.8-flash, screen stays 3.1-flash-lite. 3.8-flash
+# is $0.75/$3.75 per M against 2.5-pro's $1.25/$10 and the J5 extraction gate puts it ahead:
+# FiNE F1 .964 vs .897 (quote survival 1.000, fabrication 0/27, omission .069 vs .103), Pap2Pat
+# cov@3 .790 vs .779, misclassification .163 vs .304 (cov@1 .530 vs .600 is the one loss).
+# The extract stage went back too, on the downstream-reach column the J5 gate was missing: the
+# same four papers reach 11 of 19 gold families with 2.5-pro extraction (h1h) and 7 of 19 with
+# 3.8-flash (h1o), everything else held equal — three of the four went down. The extraction gate
+# measures whether an element reads like a gold claim limitation, not whether its words find
+# anything, and 3.8-flash scored higher there (FiNE F1 .964 vs .897).
+# The search stage went back to 2.5-pro on its gate: H1-01 pool reach 4/5 on 2.5-pro against
+# 1/5 on 3.8-flash (h1n) and 0/5 on 3.5-flash (h1m) — the flash models narrow each ReAct query
+# (totals of 2.5k-38k against 100k+) and the graph channels then expand from the wrong seeds.
+# 3.5-flash was tried and dropped: dearer than 2.5-pro on input ($1.50/$9), extraction
+# fabrication .165 (13/79), and on the search stage (h1m) H1-01 pool reach 0/5 against 4/5.
+# gemini-3.x-flash exists only on the Vertex global endpoint (us-west1 returns 404) — never set
+# VERTEX_LOCATION to a region for them.
+STAGE_DEFAULTS = {"screen": "gemini-3.1-flash-lite", "search": "gemini-2.5-pro",
+                  "extract": "gemini-2.5-pro"}
+
+
+def stage_model(stage: str) -> str:
+    """Model id for a pipeline stage: LLM_MODEL_<STAGE> if set, else the
+    stage default from the J5 gates, else the global MODEL."""
+    return os.getenv(f"LLM_MODEL_{stage.upper()}") or STAGE_DEFAULTS.get(stage.lower()) or MODEL
+
+_client: genai.Client | None = None
+
+# Hook so the pipeline can observe every LLM call (system, user, response, thoughts)
+_llm_hook: contextvars.ContextVar[Callable[[str, str, str, str], None] | None] = contextvars.ContextVar(
+    "_llm_hook", default=None
+)
+
+
+def set_llm_hook(hook: Callable[[str, str, str, str], None] | None):
+    _llm_hook.set(hook)
+
+
+def _emit(system: str, user: str, response: str, thoughts: str = ""):
+    hook = _llm_hook.get()
+    if hook is not None:
+        try:
+            hook(system, user, response, thoughts)
+        except Exception:
+            pass
+
+
+def get_client() -> genai.Client:
+    global _client
+    if _client is None:
+        # Vertex DSQ guidance: "we recommend using the global endpoint. Unlike a
+        # regional endpoint ... the global endpoint dynamically routes your
+        # requests to the region with the most available capacity" (VERTEX_LOCATION)
+        # HttpOptions.timeout is in MILLISECONDS (google-genai types.HttpOptions:
+        # "Timeout for the request in milliseconds"). Without it the underlying
+        # httpx client has no read timeout at all, so a stalled Vertex response
+        # hangs the phase forever — the one failure mode the tenacity retry
+        # below cannot see, because nothing ever raises. 900 s is deliberately
+        # generous: a deep evaluation call with HIGH thinking over a long PDF
+        # legitimately runs for minutes. httpx raises ReadTimeout/ConnectTimeout,
+        # whose names contain "Timeout", so _is_retryable already retries them.
+        _client = genai.Client(
+            vertexai=True,
+            project=GC_PROJECT,
+            location=os.getenv("VERTEX_LOCATION", "global"),
+            http_options=types.HttpOptions(timeout=int(float(os.getenv("LLM_TIMEOUT_S", "900")) * 1000)),
+        )
+    return _client
+
+
+# Gemini 3 dropped the numeric budget: "The raw numeric thinking_budget parameter is
+# no longer supported across all Gemini 3 models. Use the thinking_level string enum
+# instead." (models/guides/gemini-3-5-flash). MINIMAL is rejected by 3.7/3.8 Flash and
+# 3.x Pro ("thinking_level=\"MINIMAL\" is not available for 3.8 Flash"), so budget 0
+# maps to LOW there.
+_NO_MINIMAL = ("gemini-3.7-", "gemini-3.8-", "gemini-3-pro", "gemini-3.1-pro")
+
+
+def _is_gemini3(model: str) -> bool:
+    m = re.match(r"gemini-(\d+)", model or "")
+    return bool(m) and int(m.group(1)) >= 3
+
+
+def _thinking_level(model: str, thinking_budget: int) -> str:
+    """Budget → level for Gemini 3 (LLM_THINKING_LEVEL overrides): 0 → MINIMAL/LOW,
+    ≤2048 → LOW, ≤4096 → MEDIUM, else HIGH."""
+    forced = os.getenv("LLM_THINKING_LEVEL")
+    if forced:
+        return forced.upper()
+    if thinking_budget <= 0:
+        return "LOW" if model.startswith(_NO_MINIMAL) else "MINIMAL"
+    if thinking_budget <= 2048:
+        return "LOW"
+    if thinking_budget <= 4096:
+        return "MEDIUM"
+    return "HIGH"
+
+
+def _build_config(system: str, max_tokens: int, thinking_budget: int,
+                  response_schema: dict | None = None,
+                  model: str | None = None) -> types.GenerateContentConfig:
+    model = model or MODEL
+    config = types.GenerateContentConfig(
+        system_instruction=system,
+        max_output_tokens=max_tokens,
+    )
+    if response_schema:
+        # JSON mode: the model can only emit an instance of the schema
+        config.response_mime_type = "application/json"
+        config.response_schema = response_schema
+    try:
+        if _is_gemini3(model):
+            config.thinking_config = types.ThinkingConfig(
+                thinking_level=_thinking_level(model, thinking_budget),
+                include_thoughts=True,
+            )
+        elif thinking_budget > 0:
+            config.thinking_config = types.ThinkingConfig(
+                thinking_budget=thinking_budget,
+                include_thoughts=True,
+            )
+    except Exception:
+        # SDK version may not support ThinkingConfig — fall back silently
+        pass
+    return config
+
+
+def _extract_text_and_thoughts(resp) -> tuple[str, str]:
+    """Split response candidate parts into (visible_text, thought_summary)."""
+    text_parts: list[str] = []
+    thought_parts: list[str] = []
+    candidates = getattr(resp, "candidates", None) or []
+    for cand in candidates:
+        content = getattr(cand, "content", None)
+        if content is None:
+            continue
+        parts = getattr(content, "parts", None) or []
+        for part in parts:
+            ptext = getattr(part, "text", None) or ""
+            if not ptext:
+                continue
+            if getattr(part, "thought", False):
+                thought_parts.append(ptext)
+            else:
+                text_parts.append(ptext)
+    text = "\n".join(text_parts) if text_parts else (getattr(resp, "text", None) or "")
+    thoughts = "\n".join(thought_parts)
+    return text, thoughts
+
+
+_LLM_RPM = int(os.getenv("LLM_RPM", "120"))   # smoothing only; DSQ has no fixed RPM (12-way burst test: 0 × 429)
+_llm_gates: dict = {}
+
+# Per-model meter (prompt / output / thought tokens, calls, 429s) — read by evals for cost.
+usage: dict[str, dict[str, int]] = {}
+
+
+def _meter(model: str) -> dict[str, int]:
+    return usage.setdefault(model, {"calls": 0, "prompt_tokens": 0, "output_tokens": 0,
+                                    "thought_tokens": 0, "errors_429": 0, "seconds": 0.0})
+
+
+def _record_usage(model: str, resp, seconds: float = 0.0) -> None:
+    m = _meter(model)
+    m["calls"] += 1
+    m["seconds"] += seconds
+    um = getattr(resp, "usage_metadata", None)
+    if um is None:
+        return
+    m["prompt_tokens"] += int(getattr(um, "prompt_token_count", 0) or 0)
+    m["output_tokens"] += int(getattr(um, "candidates_token_count", 0) or 0)
+    m["thought_tokens"] += int(getattr(um, "thoughts_token_count", 0) or 0)
+
+
+class EvalBudgetExceeded(RuntimeError):
+    """This process has spent its EVAL_BUDGET_USD. Not a model error."""
+
+
+def _check_eval_budget() -> None:
+    """A ceiling for a whole process, checked at the one place every model call
+    passes through.
+
+    Wiring a budget into each eval script's loop only guards the loops somebody
+    remembered to wire, and the calls that cost money are several frames deep
+    inside the pipeline. This sits under all of them: set EVAL_BUDGET_USD and
+    the process stops when the meter says it has spent that much, whatever
+    script it is and wherever in the call stack it happens to be.
+
+    Unset (the server case) it does nothing at all. The server has its own
+    ceiling, which is a different thing — it refuses new jobs and never
+    interrupts a running one (patent_analyzer.spend).
+    """
+    raw = os.environ.get("EVAL_BUDGET_USD", "").strip()
+    if not raw:
+        return
+    try:
+        cap = float(raw)
+    except ValueError:
+        return
+    from patent_analyzer import metering
+    spent = float((metering.totals() or {}).get("cost_usd", 0.0))
+    if spent >= cap:
+        raise EvalBudgetExceeded(
+            f"spent ${spent:.2f} of the ${cap:.2f} EVAL_BUDGET_USD ceiling; refusing further model "
+            f"calls. Nothing after this point ran — treat the output as partial.")
+
+
+# ── telling the watcher what the model is doing ───────────────────────────────
+#
+# A phase whose work is one 90-second model call looked exactly like a phase
+# that had hung: no output, no timer, nothing. These raise an event when a call
+# starts, every HEARTBEAT_EVERY_S while it runs, and when it returns with what
+# it cost. They go to patent_analyzer.event_log, which any instance can read the
+# moment it is written, and outside a pipeline run there is no sink and they do
+# nothing at all.
+
+HEARTBEAT_EVERY_S = float(os.environ.get("LLM_EVENT_HEARTBEAT_S", "30"))
+
+_call_phase: contextvars.ContextVar[str] = contextvars.ContextVar("llm_call_phase", default="")
+
+
+def set_call_phase(phase: str) -> None:
+    """Which pipeline phase the calls on this task belong to."""
+    _call_phase.set(phase or "")
+
+
+def _llm_event(kind: str, message: str) -> None:
+    from datetime import datetime, timezone
+
+    from patent_analyzer import event_log
+    event_log.emit({"ts": datetime.now(timezone.utc).isoformat(),
+                    "phase": _call_phase.get() or "", "kind": kind, "message": message})
+
+
+def _toks(n: int) -> str:
+    return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
+
+
+def _call_label() -> str:
+    return prompts.last_rendered()
+
+
+class _CallWatch:
+    """start / heartbeat / finish around one model call.
+
+    The heartbeat is the point: without it nothing distinguishes a long call
+    from a dead one, and "still running, 45s" is the most useful thing a slow
+    phase can say about itself.
+    """
+
+    def __init__(self, model: str):
+        self.model = model
+        self.label = _call_label()
+        self.t0 = time.monotonic()
+        self._task = None
+
+    async def start(self) -> "_CallWatch":
+        suffix = f" · {self.label}" if self.label else ""
+        _llm_event("llm_start", f"calling {self.model}{suffix}")
+
+        async def _beat():
+            while True:
+                await asyncio.sleep(HEARTBEAT_EVERY_S)
+                _llm_event("llm_running", f"still waiting on {self.model}{suffix}"
+                                          f" · {time.monotonic() - self.t0:.0f}s")
+        self._task = asyncio.create_task(_beat())
+        return self
+
+    def _stop(self) -> float:
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+        return time.monotonic() - self.t0
+
+    def done(self, resp) -> None:
+        secs = self._stop()
+        um = getattr(resp, "usage_metadata", None)
+        total = 0
+        if um is not None:
+            total = (int(getattr(um, "prompt_token_count", 0) or 0)
+                     + int(getattr(um, "candidates_token_count", 0) or 0)
+                     + int(getattr(um, "thoughts_token_count", 0) or 0))
+        tokens = f" · {_toks(total)} tokens" if total else ""
+        _llm_event("llm_done", f"returned · {secs:.0f}s{tokens} · {self.model}")
+
+    def failed(self, exc: BaseException) -> None:
+        secs = self._stop()
+        _llm_event("llm_failed",
+                   f"{self.model} failed after {secs:.0f}s: {type(exc).__name__}: {exc}"[:300])
+
+
+async def _smooth(model: str | None = None) -> None:
+    """Shared per-minute gate across every process on this machine/instance, one per model."""
+    _check_eval_budget()
+    model = model or MODEL
+    gate = _llm_gates.get(model)
+    if gate is None:
+        from patent_analyzer.runtime_state import MinuteGate
+        gate = _llm_gates[model] = MinuteGate(f"vertex:{model}", _LLM_RPM)
+    try:
+        waited = await gate.wait()
+        if waited:
+            print(f"[LLM] smoothed: waited {waited:.1f}s for a slot ({_LLM_RPM}/min, {model})")
+    except Exception:
+        pass
+
+
+def _incident(source: str, kind: str, detail: str = "") -> None:
+    """Tell the ledger a call did not go cleanly. Late import (patent_analyzer
+    must not need app/, and metering reads `usage` from here), and never raises
+    — accounting must not be able to fail a request."""
+    try:
+        from patent_analyzer import metering
+        metering.incident(source, kind, detail)
+    except Exception:
+        pass
+
+
+# The isinstance test above is the precise one. This is for transports that are
+# not httpx — httpcore leaking through un-wrapped, aiohttp when google-genai is
+# built on it, an OSError from the socket layer — where the class name is all
+# there is to go on.
+_RETRYABLE_NAMES = ("Timeout", "ServiceUnavailable", "ResourceExhausted",
+                    "ConnectError", "ReadError", "WriteError", "CloseError",
+                    "ConnectionReset", "ConnectionAborted", "IncompleteRead")
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    model = _current_model.get() or MODEL
+    if isinstance(exc, APIError) and exc.code in (429, 503, 500):
+        # DSQ 429 = "temporary high contention for a specific shared resource", not a fixed quota
+        print(f"[LLM] {exc.code} from Vertex: {str(getattr(exc, 'message', exc))[:300]}")
+        if exc.code == 429:
+            _meter(model)["errors_429"] += 1
+        _incident(model, "retry", f"{exc.code} from Vertex: {str(getattr(exc, 'message', exc))[:160]}")
+        return True
+    name = type(exc).__name__
+    # A connection that never opened, or died mid-body, is the same kind of
+    # answer as a 503: Vertex did not refuse the work, the transport dropped it.
+    # It used to fall through to "not retryable" because the name test below
+    # only catches the word "Timeout", and httpx's ConnectError / ReadError do
+    # not contain it. Measured on Cloud Run (job 08f8212d, 2026-09-19): Phase 4
+    # took 39 of these across a 60-document fan-out with errors_429 == 0, and
+    # every one killed its document on the first attempt — 41 of 60 references
+    # were never read. Same machinery as everything else here, one predicate
+    # wider: _retry_decorator already backs off exponentially over 4 attempts.
+    #
+    # ProtocolError is split deliberately. RemoteProtocolError is the peer
+    # breaking the conversation (retry); LocalProtocolError and
+    # UnsupportedProtocol are this process being wrong, and retrying a bug just
+    # makes four of it.
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError,
+                        httpx.RemoteProtocolError, httpx.ProxyError)):
+        _incident(model, "retry", f"{name}: {exc}"[:200])
+        return True
+    retryable = any(k in name for k in _RETRYABLE_NAMES)
+    # Not retryable = the call is over. The ledger records it either way; this
+    # predicate is the one place every exception out of Vertex passes through.
+    _incident(model, "retry" if retryable else "failed", f"{name}: {exc}"[:200])
+    if not retryable:
+        # _retry_decorator logs the give-up; this one is already on the books.
+        try:
+            exc._amie_incident_logged = True
+        except (AttributeError, TypeError):
+            pass
+    return retryable
+
+
+_RETRY_ATTEMPTS = int(os.getenv("LLM_RETRY_ATTEMPTS", "4"))
+
+_tenacity_retry = retry(
+    retry=retry_if_exception(_is_retryable),
+    wait=wait_random_exponential(multiplier=1, max=60),
+    stop=stop_after_attempt(_RETRY_ATTEMPTS),
+    reraise=True,
+)
+
+
+def _retry_decorator(fn):
+    """`_tenacity_retry`, plus the one incident it cannot record on its own.
+
+    `_is_retryable` logs every exception it sees, as "retry" when it will try
+    again and "failed" when it will not. Nothing logged the third case: the
+    call that was retryable every time and still ran out of attempts. tenacity
+    re-raises it and the caller turns it into an unread document, but the
+    ledger counted only retries — job 99a35c00 (2026-09-19) closed with
+    `failures: 0` against 58 retry incidents while 14 of its 60 references came
+    back `abstract_failed`. A phase that lost a quarter of its evidence must
+    not report a clean bill.
+
+    The exception is stamped so the non-retryable path, which already logged
+    its own "failed", is not counted twice.
+    """
+    inner = _tenacity_retry(fn)
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await inner(*args, **kwargs)
+        except BaseException as exc:
+            if not getattr(exc, "_amie_incident_logged", False):
+                _incident(_current_model.get() or MODEL, "failed",
+                          f"gave up after {_RETRY_ATTEMPTS} attempts: "
+                          f"{type(exc).__name__}: {exc}"[:200])
+            raise
+
+    return wrapper
+
+
+# Model of the in-flight call, so the retry predicate can attribute a 429 to it.
+_current_model: contextvars.ContextVar[str | None] = contextvars.ContextVar("_current_model", default=None)
+
+
+@_retry_decorator
+async def call_llm(
+    system: str,
+    user: str,
+    max_tokens: int = MAX_TOKENS,
+    thinking_budget: int = 0,
+    response_schema: dict | None = None,
+    model: str | None = None,
+) -> str:
+    """model=None → the global MODEL; stages pass stage_model(<stage>)."""
+    model = model or MODEL
+    _current_model.set(model)
+    client = get_client()
+    config = _build_config(system, max_tokens, thinking_budget, response_schema, model=model)
+    await _smooth(model)
+    t0 = time.monotonic()
+    watch = await _CallWatch(model).start()
+    try:
+        resp = await client.aio.models.generate_content(
+            model=model,
+            contents=[types.Part.from_text(text=user)],
+            config=config,
+        )
+    except BaseException as exc:
+        watch.failed(exc)
+        raise
+    watch.done(resp)
+    _record_usage(model, resp, time.monotonic() - t0)
+    text, thoughts = _extract_text_and_thoughts(resp)
+    if text.startswith("```"):
+        text = text.split("```", 2)[1].strip()
+        if text.startswith("json"):
+            text = text[4:].strip()
+    _emit(system, user, text, thoughts)
+    return text
+
+
+async def call_llm_with_pdf(
+    system: str,
+    user: str,
+    pdf_path: str,
+    max_tokens: int = MAX_TOKENS,
+    thinking_budget: int = 0,
+    model: str | None = None,
+) -> str:
+    """Send a single PDF as a native multi-modal part to Gemini (no truncation).
+
+    Only used for bulk initial screening where text extraction is acceptable.
+    For deep eval use call_llm_with_pdfs which supports multiple files.
+    """
+    return await call_llm_with_pdfs(system, user, [pdf_path], max_tokens, thinking_budget, model=model)
+
+
+# Vertex AI inline-bytes cap is ~20MB per request. Pad for safety.
+_INLINE_PDF_CAP_BYTES = 18 * 1024 * 1024
+
+
+@_retry_decorator
+async def call_llm_with_pdfs(
+    system: str,
+    user: str,
+    pdf_paths: list[str],
+    max_tokens: int = MAX_TOKENS,
+    thinking_budget: int = 0,
+    image_parts: list[bytes] | None = None,
+    response_schema: dict | None = None,
+    model: str | None = None,
+) -> str:
+    """Send one or more PDFs as native multi-modal parts to Gemini.
+
+    Uploads PDF bytes directly — the model sees layout, figures, tables. No text
+    extraction, no truncation. If a file exceeds Vertex's inline cap (~20MB),
+    it falls back to text extraction for THAT file only (others still go as PDF)
+    and prefixes a [fallback_text] marker so the LLM knows the input was lossy.
+    response_schema switches on JSON mode exactly as in call_llm.
+    """
+    parts: list[Any] = []
+    for p in pdf_paths:
+        if not p or not Path(p).exists():
+            continue
+        size = Path(p).stat().st_size
+        data = Path(p).read_bytes()
+        if size <= _INLINE_PDF_CAP_BYTES:
+            parts.append(types.Part.from_bytes(data=data, mime_type="application/pdf"))
+        else:
+            from google.cloud import storage as gcs_storage
+            bucket_name = os.environ.get("GCS_BUCKET", "aime-hello-world-amie-uswest1")
+            blob_path = f"patent-analyzer/tmp-llm/{Path(p).name}"
+            bucket = gcs_storage.Client().bucket(bucket_name)
+            blob = bucket.blob(blob_path)
+            blob.upload_from_string(data, content_type="application/pdf")
+            file_uri = f"gs://{bucket_name}/{blob_path}"
+            parts.append(types.Part.from_uri(
+                file_uri=file_uri, mime_type="application/pdf"))
+            _incident("vertex:pdf", "degraded",
+                      f"{Path(p).name} is {size // 1048576}MB, over the inline cap — sent as a gs:// uri")
+    for img_data in (image_parts or []):
+        parts.append(types.Part.from_bytes(data=img_data, mime_type="image/png"))
+    parts.append(types.Part.from_text(text=user))
+
+    model = model or MODEL
+    _current_model.set(model)
+    client = get_client()
+    config = _build_config(system, max_tokens, thinking_budget, response_schema, model=model)
+    await _smooth(model)
+    t0 = time.monotonic()
+    watch = await _CallWatch(model).start()
+    try:
+        resp = await client.aio.models.generate_content(
+            model=model,
+            contents=parts,
+            config=config,
+        )
+    except BaseException as exc:
+        watch.failed(exc)
+        raise
+    watch.done(resp)
+    _record_usage(model, resp, time.monotonic() - t0)
+    text, thoughts = _extract_text_and_thoughts(resp)
+    if text.startswith("```"):
+        text = text.split("```", 2)[1].strip()
+        if text.startswith("json"):
+            text = text[4:].strip()
+    file_list = ", ".join(f"{Path(p).name} ({Path(p).stat().st_size//1024}KB)"
+                          for p in pdf_paths if p and Path(p).exists())
+    img_note = f" + {len(image_parts)} figure screenshots" if image_parts else ""
+    _emit(system, f"[PDFs: {file_list}{img_note}]\n\n{user}", text, thoughts)
+    return text
+
+
+# ═══════════════════════════════════════════════════════════════
+# DETERMINISTIC: Zero LLM tokens
+# ═══════════════════════════════════════════════════════════════
+
+def detect_invention(paper_text: str) -> dict:
+    """DETERMINISTIC. Checks for method/system/apparatus/composition keywords."""
+    lower = paper_text[:10000].lower()
+    invention_kw = [
+        "we propose", "we present", "we introduce", "we develop", "we design",
+        "novel method", "novel system", "novel approach", "novel framework",
+        "our method", "our system", "our approach", "this paper presents",
+        "we demonstrate", "we show that", "we achieve",
+        "apparatus", "device", "composition", "manufacture",
+        "claims", "embodiment", "wherein",
+    ]
+    hits = sum(1 for kw in invention_kw if kw in lower)
+    if hits >= 3:
+        return {"status": "present"}
+    if hits >= 1:
+        return {"status": "implied"}
+    return {"status": "absent"}
+
+
+def classify_document(paper_text: str, filename: str = "") -> str:
+    """DETERMINISTIC. Uses filename + content patterns."""
+    lower = paper_text[:5000].lower()
+    fn = filename.lower()
+
+    if any(x in lower for x in ["claims", "embodiment", "wherein", "applicant", "assignee"]):
+        return "patent"
+    if any(x in fn for x in ["us", "ep", "cn", "wo", "jp"]) and any(c.isdigit() for c in fn):
+        return "patent"
+
+    if any(x in lower for x in ["abstract", "introduction", "related work", "methodology", "references", "arxiv"]):
+        return "paper"
+
+    return "other"
+
+
+def classify_category(summary: str) -> dict:
+    """DETERMINISTIC. Keyword-based classification under 35 USC §101."""
+    lower = summary.lower()
+
+    scores = {
+        "Process": 0,
+        "Machine": 0,
+        "Manufacture": 0,
+        "Composition": 0,
+        "Design": 0,
+    }
+
+    process_kw = [
+        "method", "step", "process", "procedure", "algorithm",
+        "pipeline", "training", "learning", "computing",
+    ]
+    machine_kw = ["system", "device", "apparatus", "sensor", "processor", "robot", "hardware", "module", "circuit"]
+    manufacture_kw = ["article", "product", "component", "fabricat", "manufactur", "assem"]
+    composition_kw = ["compound", "mixture", "composition", "formulation", "material", "substance"]
+    design_kw = ["ornamental", "design", "appearance", "shape", "visual design"]
+
+    for kw in process_kw:
+        if kw in lower:
+            scores["Process"] += 1
+    for kw in machine_kw:
+        if kw in lower:
+            scores["Machine"] += 1
+    for kw in manufacture_kw:
+        if kw in lower:
+            scores["Manufacture"] += 1
+    for kw in composition_kw:
+        if kw in lower:
+            scores["Composition"] += 1
+    for kw in design_kw:
+        if kw in lower:
+            scores["Design"] += 1
+
+    best = max(scores, key=scores.get)
+    hits = scores[best]
+    if hits == 0:
+        return {"invention_type": "None", "reasoning": "No category keywords matched"}
+    return {"invention_type": best, "reasoning": f"Keyword classification: {best} ({hits} keyword hits)"}
+
+
+# ═══════════════════════════════════════════════════════════════
+# LLM CALLS: Where tokens SHOULD be spent
+# ═══════════════════════════════════════════════════════════════
+
+def _feedback_block(feedback: dict | None) -> str:
+    if not feedback:
+        return ""
+    issues = feedback.get("issues") or []
+    issue_lines = "\n".join(f"- {i}" for i in issues) if issues else "- (none specified)"
+    suggestion = feedback.get("suggestion") or ""
+    prev = feedback.get("previous_response") or ""
+    return f"""
+
+════ FEEDBACK FROM YOUR PREVIOUS ATTEMPT ════
+A self-review of your previous output flagged these issues:
+{issue_lines}
+
+Reviewer's suggestion: {suggestion}
+
+Your previous output (for reference, do NOT just repeat it):
+{prev[:1500]}
+
+CRITICAL: Regenerate from scratch addressing the issues. Use ONLY facts from the input below.
+"""
+
+
+IDCA_SUMMARIZE_PROMPT = prompts.register_default("idca.summarize", """════ TASK ════
+Read the ENTIRE attached document and perform IDCA (Invention
+Detection, Classification, and Assignment).
+
+STEP 1 — Status Determination:
+  - "Present": the document describes a CONCRETE, IMPLEMENTED invention —
+    something built, made, synthesized, designed, or a novel method/process
+    with enough technical detail to extract patent claims.
+  - "Implied": the document discusses an inventive concept but lacks concrete
+    implementation (theoretical proposals, future work, "with funding we
+    could build X"). There IS a recognizable claim, but no implementation.
+  - "Absent": no invention at all — surveys, opinions, commentaries, course
+    material, dataset descriptions, review articles, news.
+
+STEP 2 — Document Type:
+  - "invention": paper or patent presenting a novel technical contribution.
+  - "design_engineering": engineering implementation report — describes HOW
+    something was built/integrated, not claiming novelty.
+  - "literature_review": survey, review, or meta-analysis.
+  - "talks_about_invention_but_no_invention": discusses/references others'
+    inventions but does not present one itself.
+
+STEP 3 — Input Mode (how is this document structured?):
+  - "academic_paper": formal paper with abstract, methods, results structure.
+  - "informal_description": handwritten notes, project description, proposal,
+    or informal write-up describing what someone is building/planning.
+  - "patent_draft": document with patent claim language or structured as a
+    patent application.
+  - "technical_report": formal but not claiming novelty — engineering report,
+    technical documentation.
+
+STEP 4 — Fields & Classification:
+  - fields_map: 3-7 technical field labels from broad to specific.
+    Example: ["Computer Vision", "Object Detection", "Anchor-Free Detection"]
+  - cpc_subclass: best-guess 4-character CPC subclass code (e.g. G06N, H04L,
+    A61B). Pick the single most relevant one.
+  - category: §101 type (Process/Machine/Manufacture/Composition/Design/None).
+
+STEP 5 — Summary (only if status is Present or Implied):
+  400-800 words describing WHAT is built/done, using the paper's own
+  terminology. Cover the full technical contribution including methods,
+  architecture, key results, and novel components. If Implied,
+  describe what is proposed rather than what is implemented.
+
+Output strictly this JSON, no preamble:
+{{
+  "status_determination": "Present" | "Implied" | "Absent",
+  "reasoning": "1-2 sentences explaining the status decision",
+  "doc_type": "invention" | "literature_review" | "design_engineering"
+            | "talks_about_invention_but_no_invention",
+  "category": "Process" | "Machine" | "Manufacture" | "Composition"
+            | "Design" | "None",
+  "fields_map": ["Field1", "Field2", "..."],
+  "input_mode": "academic_paper" | "informal_description" | "patent_draft" | "technical_report",
+  "source_citation": "APA citation from document info, or empty string",
+  "cpc_subclass": "G06N",
+  "publication_date": "YYYY-MM-DD if determinable from the document (arXiv date, copyright year, conference date), or empty string",
+  "summary": "400-800 word summary, or empty string if Absent"
+}}""", contract="""Does: summarise the invention in a source document, for every later phase to work from.
+Must output: prose only, no JSON, no headings the caller parses.
+Consumed by: nodes/idca.py, and from there the whole pipeline's `summary`.
+Never: invent detail the document does not contain — every later phase treats this as the document's own account of itself.""")
+
+
+async def detect_and_summarize_invention(
+    document_text: str,
+    source_pdf_path: str | None = None,
+) -> dict:
+    """ONE LLM CALL: classify document → status_determination + fields_map +
+    doc_type + CPC subclass + summary. This is the IDCA step — everything
+    downstream (decompose, eval) depends on this output.
+
+    Returns:
+        {
+          "status_determination": "Present" | "Implied" | "Absent",
+          "has_innovation": bool,       # backward compat: True unless Absent
+          "reasoning":      str,
+          "doc_type":       "invention" | "literature_review" | "design_engineering"
+                          | "talks_about_invention_but_no_invention",
+          "category":       "Process" | "Machine" | "Manufacture" | "Composition" | "Design" | "None",
+          "fields_map":     list[str],  # 3-7 technical field labels
+          "source_citation": str,       # APA format if determinable
+          "cpc_subclass":   str,        # 4-char CPC code, e.g. "G06N"
+          "summary":        str,        # 200-400 word canonical invention summary
+        }
+    """
+    system = ("You are a patent analyst. Read the document and classify it. "
+              "Output JSON only.")
+    task_prompt, _ = prompts.get("idca.summarize")   # registry v0 = the template below
+
+    if source_pdf_path and Path(source_pdf_path).exists():
+        resp = await call_llm_with_pdfs(
+            system, task_prompt, [source_pdf_path], thinking_budget=4096,
+            model=stage_model("idca"))
+    else:
+        resp = await call_llm(
+            system,
+            f"{task_prompt}\n\n════ DOCUMENT TEXT ════\n"
+            f"```\n{document_text}\n```",
+            thinking_budget=4096,
+            model=stage_model("idca"),
+        )
+    m = re.search(r'\{.*\}', resp, re.DOTALL)
+    if m:
+        try:
+            d = json.loads(m.group())
+            # Backward compat: old format had has_innovation instead of status_determination
+            if "has_innovation" in d and "status_determination" not in d:
+                d["status_determination"] = "Present" if d["has_innovation"] else "Absent"
+            status = str(d.get("status_determination", "Present"))
+            return {
+                "status_determination": status,
+                "has_innovation":  status != "Absent",
+                "reasoning":       str(d.get("reasoning", "") or ""),
+                "doc_type":        str(d.get("doc_type", "invention") or "invention"),
+                "input_mode":      str(d.get("input_mode", "academic_paper") or "academic_paper"),
+                "category":        str(d.get("category", "None") or "None"),
+                "fields_map":      list(d.get("fields_map", []) or []),
+                "source_citation":  str(d.get("source_citation", "") or ""),
+                "cpc_subclass":     str(d.get("cpc_subclass", "") or ""),
+                "publication_date": str(d.get("publication_date", "") or ""),
+                "summary":          str(d.get("summary", "") or ""),
+            }
+        except json.JSONDecodeError:
+            pass
+    return {
+        "status_determination": "Present",
+        "has_innovation": True,
+        "reasoning":      "(JSON parse failed — defaulting to proceed)",
+        "doc_type":       "invention",
+        "input_mode":     "academic_paper",
+        "category":       "None",
+        "fields_map":     [],
+        "source_citation":  "",
+        "cpc_subclass":     "",
+        "publication_date": "",
+        "summary":          resp[:2000],
+    }
+
+
+
+# ── IDCA: structured Doc JSON (the single text layer downstream) ──
+#
+# How others represent a parsed paper (sources checked 2026-09-18):
+# - GROBID, https://grobid.readthedocs.io/en/latest/Introduction/ : "Full text extraction and
+#   structuring from PDF articles, including a model for the overall document segmentation and
+#   models for the structuring of the text body (paragraph, section titles, reference and footnote
+#   callouts, figures, tables, ...)"; TEI output = header (title/abstract) + body of <div><head>/<p>
+#   + <figure> + <formula> + bibliography. Its JSON export has "separate sections for bibliographic
+#   metadata, body text, figures and tables, and references" (Grobid-service.md).
+# - MinerU content_list.json, https://opendatalab.github.io/MinerU/reference/output_files/ :
+#   "stores all readable content blocks in reading order as a flat structure"; headings are text
+#   blocks with `text_level: 1/2/...`, figures carry `img_caption: [..]`, formulas are
+#   `{"type": "equation", "text": "$$...$$", "text_format": "latex"}`.
+# - Gemini structured output, https://ai.google.dev/gemini-api/docs/structured-output :
+#   "generate responses that adhere to a provided JSON Schema"; "Very large or deeply nested
+#   schemas may be rejected"; "always validate values in your application".
+# Hence: a FLAT section list with `level` (MinerU style, no recursive schema), figures and
+# equations as separate lists (GROBID style), enforced via response_schema and validated here.
+
+DOC_JSON_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "title": {"type": "STRING"},
+        "abstract": {"type": "STRING"},
+        "sections": {"type": "ARRAY", "items": {
+            "type": "OBJECT",
+            "properties": {"heading": {"type": "STRING"}, "level": {"type": "INTEGER"},
+                           "paragraphs": {"type": "ARRAY", "items": {"type": "STRING"}}},
+            "required": ["heading", "level", "paragraphs"]}},
+        "figures": {"type": "ARRAY", "items": {
+            "type": "OBJECT", "properties": {"label": {"type": "STRING"}, "caption": {"type": "STRING"}},
+            "required": ["label", "caption"]}},
+        "equations": {"type": "ARRAY", "items": {
+            "type": "OBJECT", "properties": {"label": {"type": "STRING"}, "latex": {"type": "STRING"}},
+            "required": ["label", "latex"]}},
+        "references_count": {"type": "INTEGER"},
+    },
+    "required": ["title", "abstract", "sections", "figures", "equations", "references_count"],
+}
+
+_DOC_JSON_MAX_TOKENS = 65535
+
+DOC_JSON_PROMPT = prompts.register_default("idca.docjson", """════ TASK ════
+Transcribe the attached document into structured JSON. This is a TRANSCRIPTION, not a summary:
+every body paragraph must be copied VERBATIM, in reading order, nothing dropped or shortened.
+
+Rules:
+- title: the document title. abstract: the abstract text (empty string if none).
+- sections: one entry per heading, in reading order, FLAT (no nesting). level = 1 for a top-level
+  heading ("3 Method"), 2 for a subsection ("3.2 Loss"), 3 for a sub-subsection. Keep the heading
+  text as printed (with its number). Text before the first heading goes into a section with
+  heading "" and level 1. Do NOT emit the reference list as a section.
+- paragraphs: the section's body paragraphs, verbatim, one string each. Join lines broken by the
+  page layout; remove hyphenation at line ends; drop running headers/footers and page numbers.
+  Keep inline math as LaTeX ($...$). Do NOT put figure captions or table contents in paragraphs.
+- figures: every figure/table caption: label ("Figure 1", "Table 2"), caption text verbatim.
+- equations: every numbered display equation: label ("1", "2", ...), latex.
+- references_count: number of entries in the reference list (0 if none).
+{extra}""", contract="""Does: turn a document into the structured Doc JSON the pipeline locates quotes against.
+Must output: JSON with `sections`, `paragraphs`, `figures`, `equations`, `references`; paragraph indices are 1-based and are what evidence_loc points at.
+Consumed by: nodes/idca.py -> doc_json, then quote location in extract and evaluate.
+Never: renumber, merge or drop paragraphs — a shifted index silently relocates every quote.""")
+
+
+def _clean_doc_json(d: dict) -> dict:
+    """Coerce a model response to the Doc JSON contract (drop empties, fix types)."""
+    sections = []
+    for sec in d.get("sections") or []:
+        if not isinstance(sec, dict):
+            continue
+        paras = [" ".join(str(x).split()) for x in (sec.get("paragraphs") or []) if str(x or "").strip()]
+        heading = " ".join(str(sec.get("heading") or "").split())
+        if not paras and not heading:
+            continue
+        try:
+            level = max(1, min(4, int(sec.get("level") or 1)))
+        except (TypeError, ValueError):
+            level = 1
+        sections.append({"heading": heading, "level": level, "paragraphs": paras})
+    figures = [{"label": " ".join(str(f.get("label") or "").split()), "caption": " ".join(str(f.get("caption") or "").split())}
+               for f in (d.get("figures") or []) if isinstance(f, dict) and str(f.get("caption") or "").strip()]
+    equations = [{"label": " ".join(str(e.get("label") or "").split()), "latex": str(e.get("latex") or "").strip()}
+                 for e in (d.get("equations") or []) if isinstance(e, dict) and str(e.get("latex") or "").strip()]
+    try:
+        refs = max(0, int(d.get("references_count") or 0))
+    except (TypeError, ValueError):
+        refs = 0
+    return {"title": " ".join(str(d.get("title") or "").split()),
+            "abstract": " ".join(str(d.get("abstract") or "").split()),
+            "sections": sections, "figures": figures, "equations": equations, "references_count": refs}
+
+
+async def build_doc_json(document_text: str, source_pdf_path: str | None = None) -> dict | None:
+    """ONE LLM CALL (JSON mode): the document as Doc JSON
+    {title, abstract, sections:[{heading, level, paragraphs}], figures:[{label, caption}],
+     equations:[{label, latex}], references_count}. The PDF goes to Gemini natively
+    (layout, captions, math); a text input is sent as-is. None when the call or the
+    parse fails — the caller keeps the fitz/plain text as the fallback text layer.
+    Independent of detect_and_summarize_invention so that prompt (and its cache key)
+    is untouched."""
+    system = ("You are a document transcription engine. Reproduce the document's text faithfully "
+              "into the requested JSON structure. Output JSON only.")
+    if source_pdf_path and Path(source_pdf_path).exists():
+        prompt = prompts.render("idca.docjson", extra="")
+        resp = await call_llm_with_pdfs(system, prompt, [source_pdf_path], max_tokens=_DOC_JSON_MAX_TOKENS,
+                                        response_schema=DOC_JSON_SCHEMA)
+    else:
+        prompt = prompts.render("idca.docjson", extra=f"\n════ DOCUMENT TEXT ════\n```\n{(document_text or '')[:_EXTRACTION_DOC_CAP]}\n```")
+        resp = await call_llm(system, prompt, max_tokens=_DOC_JSON_MAX_TOKENS, response_schema=DOC_JSON_SCHEMA)
+    data = _extraction_json(resp)
+    if not data:
+        return None
+    doc = _clean_doc_json(data)
+    if not doc["sections"] and not doc["abstract"]:
+        return None
+    return doc
+
+
+PRIOR_ART_SECTIONS_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {"sections": {"type": "ARRAY", "items": {
+        "type": "OBJECT",
+        "properties": {"id": {"type": "STRING"},
+                       "verdict": {"type": "STRING", "enum": ["prior_art", "mixed", "own_work"]},
+                       "reason": {"type": "STRING"},
+                       "prior_art_paragraphs": {"type": "ARRAY", "items": {"type": "INTEGER"}}},
+        "required": ["id", "verdict", "reason", "prior_art_paragraphs"]}}},
+    "required": ["sections"],
+}
+
+PRIOR_ART_SECTIONS_PROMPT = prompts.register_default("idca.prior_art_sections", """════ TASK ════
+The document below is an unpublished manuscript. Decide, for EVERY section listed, whether its
+text is a review of OTHER people's work (prior art / background / literature) or a description of
+what THESE authors themselves built, did or found.
+
+Verdicts:
+- "prior_art"  every paragraph in the section reviews other people's work, the state of the art,
+               or general field background. Nothing in it is this team's own contribution.
+- "mixed"      the section does both — typically an Introduction that opens with background and
+               citations and ends with "Here we introduce ...", "In this paper we propose ...",
+               "we therefore developed ...". List in prior_art_paragraphs the 1-based indices of
+               the paragraphs that are PURELY other people's work or general background.
+- "own_work"   the section describes this team's own method, apparatus, materials, experiments,
+               results, discussion or conclusions.
+
+Rules:
+- Judge every listed id exactly once. Use the id strings as given.
+- A paragraph that says what the authors built, how it works, what it is made of, or why it is
+  better is NEVER prior art — keep it, even inside a background section.
+- A paragraph in which the authors speak for themselves — "we propose", "we hypothesized", "we
+  tested", "we chose", "here we introduce", "in this paper", "this study" — states their own
+  contribution however many citations surround it. A section holding one such paragraph is at
+  most "mixed"; it is never "prior_art".
+- Method / Materials / Implementation / Design / Results / Discussion / Conclusion sections are
+  own_work; citing a reagent, an instrument or a published protocol there does not make them
+  prior art.
+- A section that only sets up the problem the authors solve, with no citations to others'
+  solutions, is own_work (motivation is not prior art).
+- prior_art_paragraphs is [] unless the verdict is "mixed".
+- reason: ONE short sentence, naming the evidence (e.g. the phrase that turns the section).
+
+════ MANUSCRIPT OUTLINE ════
+{outline}""", contract="""Does: find the parts of a document that describe prior art rather than the invention.
+Must output: JSON with the section identifiers to exclude.
+Consumed by: nodes/idca.py, to keep the invention summary free of the art it cites.
+Never: exclude a section that also carries the invention's own elements.""")
+
+_SECTION_PREVIEW_HEAD = 2000
+_SECTION_PREVIEW_TAIL = 1200
+
+
+def _preview(p: str) -> str:
+    """Head and tail of a paragraph, only for paragraphs longer than both together.
+
+    A short preview is what got this wrong the first time: in two of the eight
+    §H1.7.1 papers the authors' "we hypothesized" / "we tested" sentence sat in the
+    middle of a ~1.2k-char paragraph, the model never saw it, and it dropped the
+    paragraph that held the invention. Whole paragraphs, with head+tail only as a
+    guard against a pathological one."""
+    if len(p) <= _SECTION_PREVIEW_HEAD + _SECTION_PREVIEW_TAIL:
+        return p
+    cut = len(p) - _SECTION_PREVIEW_HEAD - _SECTION_PREVIEW_TAIL
+    return f"{p[:_SECTION_PREVIEW_HEAD]} […{cut} chars…] {p[-_SECTION_PREVIEW_TAIL:]}"
+
+
+def _outline_block(title: str, sections: list[dict]) -> str:
+    parts = [f"Title: {title}"] if title else []
+    for sec in sections:
+        parts.append(f"\n[{sec['id']}] {sec.get('heading') or '(no heading)'}")
+        paras = sec.get("paragraphs") or []
+        if not paras:
+            parts.append("  (no body paragraphs)")
+        for i, p in enumerate(paras, 1):
+            parts.append(f"  P{i}: {_preview(p)}")
+    return "\n".join(parts)
+
+
+async def classify_prior_art_sections(title: str, sections: list[dict]) -> dict:
+    """ONE LLM CALL: which sections of a manuscript are somebody else's work.
+
+    `sections` = [{"id", "heading", "paragraphs": [str]}] in reading order (the
+    adapters build it from either Doc shape). Returns {id: {"verdict", "reason",
+    "prior_art_paragraphs"}} — ids the model skipped are absent, and the caller
+    keeps those sections (fail-open: a manuscript that loses nothing is a paper,
+    a manuscript that loses its Method is nothing)."""
+    if not sections:
+        return {}
+    system = ("You are a patent analyst triaging an unpublished manuscript: you separate what the "
+              "authors cite from what the authors built. Output JSON only.")
+    prompt = prompts.render("idca.prior_art_sections", outline=_outline_block(title, sections))
+    resp = await call_llm(system, prompt, max_tokens=8192, response_schema=PRIOR_ART_SECTIONS_SCHEMA)
+    data = _extraction_json(resp) or {}
+    known = {s["id"] for s in sections}
+    out = {}
+    for row in data.get("sections") or []:
+        if not isinstance(row, dict):
+            continue
+        sid = str(row.get("id") or "").strip()
+        verdict = str(row.get("verdict") or "").strip()
+        if sid not in known or verdict not in ("prior_art", "mixed", "own_work"):
+            continue
+        paras = []
+        if verdict == "mixed":
+            for n in row.get("prior_art_paragraphs") or []:
+                try:
+                    paras.append(int(n))
+                except (TypeError, ValueError):
+                    continue
+        out[sid] = {"verdict": verdict, "reason": " ".join(str(row.get("reason") or "").split())[:300],
+                    "prior_art_paragraphs": sorted(set(paras))}
+    return out
+
+
+
+# ════════════════════════════════════════════════════════════
+# Phase 2: Expert-driven innovation analysis
+# ════════════════════════════════════════════════════════════
+
+
+# The SSR-era Phase 2 helpers — scan_innovation_landscape,
+# expand_technology_choices, determine_patent_types, generate_checklist_for_type,
+# review_checklist, generate_search_queries — and the INITIAL_PERSONAS block that
+# supplied their system prompts were removed on 2026-09-18 with graph/ssr_subgraph.py
+# and the legacy app.main.run_pipeline, which were their only callers. Phase 2 is
+# graph/extraction_subgraph.py. compute_ssr_grounding below keeps its name because
+# nodes/evaluate.py still calls it.
+
+
+def compute_ssr_grounding(checklist: list) -> dict:
+    """Compute grounding metrics for SSR checklist. Deterministic."""
+    if not checklist:
+        return {"evidence_coverage": 0.0, "weight_concentration": 0.0,
+                "total_criteria": 0}
+    dicts = [c for c in checklist if isinstance(c, dict)]
+    if not dicts:
+        return {"evidence_coverage": 1.0, "weight_concentration": 0.0,
+                "total_criteria": len(checklist)}
+    weights = [d.get("weight", 1.0) for d in dicts]
+    total_w = sum(weights)
+    max_w = max(weights) if weights else 0
+    return {
+        "evidence_coverage": 1.0,
+        "weight_concentration": round(max_w / total_w, 4) if total_w > 0 else 0.0,
+        "total_criteria": len(dicts),
+    }
+
+
+def compute_eval_grounding(scoring_report: list[dict]) -> dict:
+    """Compute evaluation grounding metrics across all docs. Deterministic."""
+    if not scoring_report:
+        return {"avg_denom_coverage": 0.0, "avg_evidence_density": 0.0,
+                "low_confidence_docs": 0, "total_docs": 0}
+    denom_coverages = []
+    evidence_densities = []
+    low_conf = 0
+    for doc in scoring_report:
+        cr = doc.get("checklist_results", doc.get("similarity_categories", {}))
+        if not cr:
+            low_conf += 1
+            continue
+        total = len(cr)
+        scored = sum(1 for v in cr.values()
+                     if isinstance(v, dict) and v.get("score") is not None)
+        with_evidence = sum(1 for v in cr.values()
+                           if isinstance(v, dict) and v.get("evidence_quote"))
+        dc = scored / total if total > 0 else 0
+        ed = with_evidence / total if total > 0 else 0
+        denom_coverages.append(dc)
+        evidence_densities.append(ed)
+        if dc < 0.5 or ed < 0.3:
+            low_conf += 1
+
+    avg_dc = sum(denom_coverages) / len(denom_coverages) if denom_coverages else 0
+    avg_ed = sum(evidence_densities) / len(evidence_densities) if evidence_densities else 0
+    return {
+        "avg_denom_coverage": round(avg_dc, 4),
+        "avg_evidence_density": round(avg_ed, 4),
+        "low_confidence_docs": low_conf,
+        "total_docs": len(scoring_report),
+    }
+
+
+def compute_entropy_profile(
+    ssr_grounding: dict,
+    eval_grounding: dict,
+) -> dict:
+    """Aggregate all grounding metrics into an entropy profile. Deterministic."""
+    ec = ssr_grounding.get("evidence_coverage", 0)
+    dc = eval_grounding.get("avg_denom_coverage", 0)
+    ed = eval_grounding.get("avg_evidence_density", 0)
+
+    if ec >= 0.8 and dc >= 0.7 and ed >= 0.8:
+        confidence = "high"
+    elif ec < 0.5 or dc < 0.4:
+        confidence = "low"
+    else:
+        confidence = "medium"
+
+    degradation = []
+    wc = ssr_grounding.get("weight_concentration", 0)
+    tc = ssr_grounding.get("total_criteria", 0)
+    if wc > 0.5 and tc > 0:
+        degradation.append(
+            f"SSR: top criterion holds {wc:.0%} of total weight")
+    lcd = eval_grounding.get("low_confidence_docs", 0)
+    if lcd > 0:
+        degradation.append(
+            f"evaluate: {lcd} docs have low confidence scores")
+
+    return {
+        "phase2_ssr_evidence_coverage": ec,
+        "phase2_ssr_weight_concentration": wc,
+        "phase4_avg_denom_coverage": dc,
+        "phase4_avg_evidence_density": ed,
+        "phase4_low_confidence_docs": lcd,
+        "overall_confidence": confidence,
+        "degradation_points": degradation,
+    }
+
+
+def _extract_pdf_text(path: str, max_pages: int = 10, max_chars: int = 60000) -> str:
+    import fitz
+    doc = fitz.open(path)
+    pages = [p.get_text() for p in doc[:max_pages]]
+    doc.close()
+    t = "\n\n---PAGE---\n\n".join(pages)
+    return t[:max_chars] + ("\n[truncated]" if len(t) > max_chars else "")
+
+
+# _render_figure_pages was deleted on 2026-09-18. It re-rendered every page of
+# the prior-art PDF that looked like it had a figure at 150 dpi and attached the
+# PNGs as image parts *beside the same PDF*, so those pages were sent twice.
+#
+# A/B on 24 prior-art PDFs the pipeline had downloaded (194 figure pages), each
+# against its own job's checklist (evals/figure_png_ab.py):
+#
+#   with PNGs   1,428,140 prompt tokens   $1.2131   12 criteria matched
+#   PDF only      873,498 prompt tokens   $0.7799   10 criteria matched
+#
+# The PNG copy was 38.8% of the input and $0.018 per document. What it bought:
+# 3 criteria found only with it against 1 found only without it, which is
+# McNemar exact p = 0.625 -- what a coin flip looks like. Evidence-quote
+# survival against the text layer was 49/67 with and 50/71 without.
+#
+# Reading figures is NOT what was removed. The prior-art PDF still goes to the
+# model as a native PDF part, figure pages included, and so does the user's own
+# document (detect_and_summarize_invention, doc_json, the draft self-check).
+# What is gone is the second, pixel copy of pages the model already had.
+
+
+def _format_criteria_for_eval(checklist: list) -> str:
+    """Format SSR criteria or legacy checklist for evaluation prompts.
+    When known_approaches are present, include them so the evaluator can
+    distinguish 'same method' (Present) from 'different method in same
+    category' (Partial)."""
+    lines = []
+    for i, item in enumerate(checklist):
+        if isinstance(item, dict) and "criterion" in item:
+            c = item
+            weight = float(c.get("weight", 0))
+            scale = c.get("scale", {})
+            known = c.get("known_approaches", [])
+            line = f"{i+1}. [w={weight:.2f}] {c['criterion']}"
+            if known:
+                line += f"\n   Known alternatives: {', '.join(known)}"
+            line += (
+                f"\n   0={scale.get('0','absent')} | "
+                f"1={scale.get('1','partial')} | "
+                f"2={scale.get('2','present')}")
+            lines.append(line)
+        else:
+            lines.append(f"{i+1}. {item}")
+    return "\n".join(lines)
+
+
+def _is_ssr(checklist: list) -> bool:
+    return bool(checklist and isinstance(checklist[0], dict) and "weight" in checklist[0])
+
+
+EVALUATE_PDF_PROMPT = prompts.register_default("evaluate.document_pdf", """{source_label}{pa_ordinal} attached PDF = PRIOR ART candidate.{fig_note}
+
+INVENTION SUMMARY:
+{invention_summary}
+
+EVALUATION CRITERIA ({n_items} items):
+{cl_text}
+
+PRIOR ART CANDIDATE:
+TITLE: {prior_art_title}
+TYPE: {prior_art_type}
+
+Read the ENTIRE prior art document — every page, every figure, every table.
+
+TASK:
+1. Is this the SAME document as the source? (identical title/authors/DOI)
+   If yes, set is_source_duplicate=true.
+2. {scoring_instruction}
+
+JSON output:
+{{
+  "is_source_duplicate": true | false,
+  "duplicate_reason": "if true",
+  "anticipation_assessment": "102 analysis in 1-2 sentences",
+  "key_teachings": "103 relevant elements in 1-2 sentences",
+  "rs_synopsis": "One sentence: what this prior art does (actor→operation→outcome)",
+  {output_schema}
+}}""", contract="""Does: score one prior-art document, read as a PDF, against the checklist.
+Must output: JSON `checklist_results` keyed by criterion, each with `score` 0/1/2 and `evidence_quotes` copied verbatim from that document.
+Consumed by: adjudicate.py, which counts an element as disclosed only when the score is >= 1 AND a quote was located.
+Never: quote the invention instead of the prior art, and never write a quote that is not in the document — an unlocatable quote does not count and is worse than none.""")
+
+
+async def evaluate_single_document(
+    invention_summary: str,
+    checklist: list,
+    prior_art_pdf_path: str,
+    prior_art_title: str,
+    prior_art_type: str,
+    source_pdf_path: str | None = None,
+    source_title: str | None = None,
+) -> dict:
+    """Deep-eval one prior art doc against the invention's SSR criteria.
+    Sends full native PDFs (source + prior art) plus figure screenshots to Gemini."""
+
+    use_ssr = _is_ssr(checklist)
+    cl_text = _format_criteria_for_eval(checklist)
+
+    system = (
+        "You are a US patent examiner comparing a SOURCE invention "
+        "against one PRIOR ART document. Output JSON only.")
+
+    pdfs = []
+    source_label = ""
+    if source_pdf_path and Path(source_pdf_path).exists():
+        pdfs.append(source_pdf_path)
+        source_label = (
+            f"FIRST attached PDF = SOURCE INVENTION "
+            f"(title: {source_title or '(unknown)'}).\n")
+
+    pdfs.append(prior_art_pdf_path)
+    pa_ordinal = "SECOND" if source_label else "FIRST"
+
+    # The template still carries {fig_note}; leaving it empty renders exactly the
+    # prompt this function already produced for a document with no figure pages,
+    # so no prompt version changes here.
+    fig_note = ""
+
+    if use_ssr:
+        scoring_instruction = (
+            "For EACH criterion, assign a match_score:\n"
+            "  2 = Present — the prior art explicitly describes this element "
+            "(cite section/quote)\n"
+            "  1 = Partial — related concept exists but differs in specifics\n"
+            "  0 = Absent — not found in the prior art\n"
+            "Use the scale descriptions provided with each criterion as guidance.\n"
+            "For score 1 or 2, you MUST include evidence_quotes: 1 to 5 verbatim excerpts "
+            "(10-40 words each, one per passage) from the prior art that support the score.\n"
+            "Pay attention to figures, tables, and diagrams — visual evidence counts.")
+        output_schema = (
+            '"checklist_results": {\n'
+            '    "<criterion>": {"score": 0|1|2, '
+            + ("" if _lean_eval() else '"analysis": "why this score", ')
+            + '"evidence_quotes": ["verbatim excerpt from prior art", "..."], '
+            '"match": true|false},\n'
+            '    ...all items...\n'
+            '  }')
+    else:
+        scoring_instruction = (
+            "For EACH checklist item set match=true only with explicit evidence "
+            "from the prior art text or figures. Include a verbatim quote or "
+            "figure description as evidence.")
+        output_schema = (
+            '"checklist_results": {\n'
+            '    "<item>": {' + ("" if _lean_eval() else '"analysis": "evidence", ')
+            + '"evidence_quote": "verbatim excerpt", '
+            '"match": true|false},\n'
+            '    ...all items...\n'
+            '  }')
+
+    prompt = prompts.render("evaluate.document_pdf", source_label=source_label, pa_ordinal=pa_ordinal, fig_note=fig_note,
+                            invention_summary=invention_summary, n_items=len(checklist), cl_text=cl_text,
+                            prior_art_title=prior_art_title, prior_art_type=prior_art_type,
+                            scoring_instruction=scoring_instruction, output_schema=output_schema)
+
+    try:
+        resp = await call_llm_with_pdfs(
+            system, prompt, pdfs, thinking_budget=_eval_thinking(8192),
+            model=stage_model("eval"))
+        m = re.search(r'\{.*\}', resp, re.DOTALL)
+        if m:
+            result = json.loads(m.group())
+            result["title"] = prior_art_title
+            result["match_type"] = prior_art_type
+            result["keys_unaligned"] = _align_checklist_keys(result, checklist)
+            if use_ssr:
+                _backfill_match_from_score(result)
+            return result
+    except Exception as e:
+        return {"title": prior_art_title, "match_type": prior_art_type,
+                "error": str(e), "checklist_results": {}}
+    return {"title": prior_art_title, "checklist_results": {}}
+
+
+def _backfill_match_from_score(result: dict):
+    """Ensure backward compat: set match=true when score >= 2."""
+    for v in result.get("checklist_results", {}).values():
+        if isinstance(v, dict) and "score" in v and "match" not in v:
+            v["match"] = v["score"] >= 2
+
+
+def _align_checklist_keys(result: dict, checklist: list) -> int:
+    """Re-key checklist_results onto the exact criterion strings the reducer
+    looks up. Models return the numbered label ("3", "3.") or a trimmed /
+    paraphrased criterion; unmatched keys silently score 0 downstream.
+    Returns the number of keys that could not be aligned."""
+    cr = result.get("checklist_results")
+    if not isinstance(cr, dict) or not checklist:
+        return 0
+    crits = [c.get("criterion", "") if isinstance(c, dict) else str(c) for c in checklist]
+    norm = {re.sub(r"\W+", " ", c.lower()).strip(): c for c in crits}
+    aligned, unmatched = {}, 0
+    for k, v in cr.items():
+        key = str(k).strip()
+        m = re.match(r"^(\d+)\.?$", key)
+        if m and 1 <= int(m.group(1)) <= len(crits):
+            aligned[crits[int(m.group(1)) - 1]] = v
+            continue
+        if key in crits:
+            aligned[key] = v
+            continue
+        nk = re.sub(r"\W+", " ", key.lower()).strip()
+        hit = norm.get(nk) or next((c for n, c in norm.items() if nk[:40] and (nk[:40] in n or n[:40] in nk)), None)
+        if hit:
+            aligned[hit] = v
+        else:
+            aligned[key] = v
+            unmatched += 1
+    result["checklist_results"] = aligned
+    return unmatched
+
+
+EVALUATE_TEXT_PROMPT = prompts.register_default("evaluate.document_text", """INVENTION: {invention_summary}
+
+CRITERIA ({n_items} items):
+{cl_text}
+
+PRIOR ART "{prior_art_title}" ({prior_art_type}) — {doc_label}:
+<document>
+{prior_art_text}
+</document>
+
+{scoring_instruction}
+
+JSON output:
+{{
+  "anticipation_assessment": "1-2 sentences",
+  "key_teachings": "1-2 sentences",
+  "rs_synopsis": "One sentence: what this prior art does",
+  {output_schema}
+}}""", contract="""Does: the same scoring, for a document available only as text or as an abstract.
+Must output: the same JSON shape as evaluate.document_pdf.
+Consumed by: adjudicate.py, and the report labels the result abstract-only when the text was an abstract.
+Never: score an element Present on the strength of a title — an abstract that does not mention an element is silence, not absence.""")
+
+
+EVALUATE_BRI_INSTRUCTION = prompts.register_default("evaluate.bri_instruction", """
+CLAIM INTERPRETATION — BROADEST REASONABLE INTERPRETATION (MPEP 2111 / 2111.01). Read each criterion the way a US examiner reads a pending claim: give its words their plain meaning and their broadest reasonable interpretation consistent with the invention's own description, not the narrowest reading the wording admits. Identity of terminology is not required (MPEP 2131): a part or step in the document that performs the same function in substantially the same way satisfies the criterion even if it is named, arranged or exemplified differently; a generic component (processor, memory, module, database, controller, network element, sensor, standard protocol) is satisfied by any such component the document describes; a functional limitation ("configured to X", "for X-ing", "wherein X") is satisfied by any disclosed part that performs X. The rule "do not infer beyond what the text states" governs facts, not claim scope: never add a disclosure the document does not make, but do not score 0 merely because the document uses different words, a different example, or a broader or narrower species of the same feature. Score 0 only when no reasonable reading of the criterion is met by anything the document discloses. Quotes stay verbatim: every score 1 or 2 still needs evidence_quotes copied exactly from the document, never paraphrased or invented; if nothing in the text supports even the broad reading, score 0.""", contract="""Does: state how the claims are construed, under MPEP 2111 broadest reasonable interpretation, inside the evaluation prompts.
+Must output: a sentence fragment spliced into the evaluation prompt, no JSON.
+Consumed by: evaluate.document_pdf and evaluate.document_text.
+Never: change what BRI means. The report tells the reader the claims were read this way.""")
+
+
+def _bri_enabled() -> bool:
+    """MPEP 2111: "claims ... are to be given their broadest reasonable
+    interpretation consistent with the specification". That is what a US
+    examiner does, so it is the default (leader, 2026-09-18). EVAL_BRI=0 turns
+    it off.
+
+    Honest note on the evidence, because the decision went against it: L6
+    measured this prompt on the PANORAMA hold-out and found no effect — net +5
+    criteria changed, paired CI including 0. It is on because the statute says
+    how a pending claim is read, not because it scored better; nobody should
+    cite a score for it."""
+    return os.environ.get("EVAL_BRI", "1") != "0"
+
+
+def _lean_eval() -> bool:
+    """Harry, 2026-09-18: "输出 + 思考应该放在召回先" — the deep read spends its
+    budget on the recall stages instead. Lean mode drops the per-criterion
+    `analysis` prose (the verbatim quotes are the evidence a reviewer checks)
+    and the thinking budget. EVAL_LEAN=0 restores both."""
+    return os.environ.get("EVAL_LEAN", "1") != "0"
+
+
+def _eval_thinking(default: int) -> int:
+    return 0 if _lean_eval() else default
+
+
+async def evaluate_single_document_text(
+    invention_summary: str,
+    checklist: list,
+    prior_art_text: str,
+    prior_art_title: str,
+    prior_art_type: str,
+    doc_mode: str = "abstract",
+) -> dict:
+    """Text-only evaluation. Output shape matches evaluate_single_document.
+
+    doc_mode="abstract" (default): short snippet, silence scores 0.
+    doc_mode="full_text": numbered full document; every non-zero score must
+    carry a verbatim evidence_quote so it can be verified against the text.
+    EVAL_BRI=1 appends the registry prompt evaluate.bri_instruction (examiner-
+    style broadest reasonable interpretation) to the scoring instruction; the
+    default prompt is unchanged.
+    """
+
+    use_ssr = _is_ssr(checklist)
+    cl_text = _format_criteria_for_eval(checklist)
+    system = (
+        "You are a US patent examiner. Output JSON only.")
+    full = doc_mode == "full_text"
+    doc_label = "full text with numbered paragraphs" if full else "abstract/snippet only"
+    evidence_field = ('"evidence_quotes": ["verbatim excerpt", "..."], '
+                      if full else "")
+
+    if use_ssr:
+        scoring_instruction = (
+            "For EACH criterion assign score: 2=Present, 1=Partial, 0=Absent.\n"
+            + ("For score 1 or 2 you MUST list evidence_quotes: 1 to 5 verbatim excerpts copied "
+               "from the document (exact wording, 10-40 words each), one per passage that "
+               "discloses the criterion, most direct first; never merge text from two places. "
+               "If you cannot quote anything, score 0. "
+               if full else
+               "Abstract is limited — if silent on a criterion, score 0. ")
+            + "Do NOT infer beyond what the text states.")
+        output_schema = (
+            '"checklist_results": {\n'
+            '    "<criterion>": {"score": 0|1|2, '
+            + ("" if _lean_eval() else '"analysis": "...", ')
+            + evidence_field +
+            '"match": true|false},\n    ...all items...\n  }')
+    else:
+        scoring_instruction = (
+            f"For EACH item, match=true only when the {doc_label} explicitly "
+            "discusses that element. When silent, match=false."
+            + (" For match=true list 1-5 verbatim evidence_quotes." if full else ""))
+        output_schema = (
+            '"checklist_results": {\n'
+            '    "<item>": {' + ("" if _lean_eval() else '"analysis": "...", ') + evidence_field
+            + '"match": true|false},\n'
+            '    ...all items...\n  }')
+    if _bri_enabled():
+        scoring_instruction += prompts.get("evaluate.bri_instruction")[0]
+
+    prompt = prompts.render("evaluate.document_text", invention_summary=invention_summary, n_items=len(checklist), cl_text=cl_text,
+                            prior_art_title=prior_art_title, prior_art_type=prior_art_type, doc_label=doc_label,
+                            prior_art_text=prior_art_text, scoring_instruction=scoring_instruction, output_schema=output_schema)
+    try:
+        resp = await call_llm(system, prompt, thinking_budget=_eval_thinking(4096), model=stage_model("eval"))
+        m = re.search(r'\{.*\}', resp, re.DOTALL)
+        if m:
+            result = json.loads(m.group())
+            result["title"] = prior_art_title
+            result["match_type"] = prior_art_type
+            result["source"] = "full_text" if full else "abstract"
+            result["keys_unaligned"] = _align_checklist_keys(result, checklist)
+            if use_ssr:
+                _backfill_match_from_score(result)
+            return result
+    except Exception as e:
+        return {"title": prior_art_title, "match_type": prior_art_type,
+                "error": str(e), "checklist_results": {},
+                "source": "abstract_failed"}
+    return {"title": prior_art_title, "checklist_results": {},
+            "source": "abstract_noparse"}
+
+
+# What the evaluation knew about a document but never passed on.
+#
+# The scoring report carried a score and a title and nothing else — no link, no
+# abstract, no reason the full text was missing. So a card for a paper nobody
+# could download showed a greyed-out download icon and stopped there, when we
+# had its abstract, its landing page and the reason in hand the whole time
+# (Harry, 2026-09-20). None of this is new information; it is information that
+# was being thrown away one frame before the report.
+_CARRY = ("pub_num", "url", "patent_link", "pdf_link", "doi", "year", "authors",
+          "assignee", "inventor", "filing_date", "grant_date", "snippet",
+          "fulltext_tier", "fulltext_download", "fulltext_why", "similarity_score")
+
+
+def _carry_through(res: dict, doc: dict, text_used: str = "") -> dict:
+    for k in _CARRY:
+        v = doc.get(k)
+        if v not in (None, "") and res.get(k) in (None, ""):
+            res[k] = v
+    # The text the verdict was actually formed on, so the card can show it
+    # rather than asserting that a document was read.
+    if text_used:
+        res["evaluated_text"] = text_used[:4000]
+    elif doc.get("abstract"):
+        res["evaluated_text"] = str(doc["abstract"])[:4000]
+    return res
+
+
+async def evaluate_batch(
+    invention_summary: str,
+    checklist: list[str],
+    documents: list[dict],
+    max_concurrent: int = 2,
+    source_pdf_path: str | None = None,
+    source_title: str | None = None,
+    on_doc_done: Callable[[], None] | None = None,
+) -> list[dict]:
+    """Evaluate a batch of candidates.
+
+    on_doc_done: optional callback fired after each doc's eval completes
+    (success or failure). Used by the pipeline to heartbeat so the zombie
+    detector doesn't falsely flag this long-running phase as stuck.
+    """
+    sem = asyncio.Semaphore(max_concurrent)
+
+    async def one(doc):
+        async with sem:
+            try:
+                pdf = doc.get("local_pdf", "")
+                if pdf and Path(pdf).exists():
+                    res = await evaluate_single_document(
+                        invention_summary, checklist, pdf,
+                        doc.get("title", ""), doc.get("match_type", "Paper"),
+                        source_pdf_path=source_pdf_path,
+                        source_title=source_title,
+                    )
+                    res["source"] = "pdf"
+                    return _carry_through(res, doc)
+                text = (doc.get("abstract") or "").strip() or (doc.get("snippet") or "").strip()
+                if len(text) >= 120:
+                    res = await evaluate_single_document_text(
+                        invention_summary, checklist, text,
+                        doc.get("title", ""), doc.get("match_type", "Paper"),
+                    )
+                    return _carry_through(res, doc, text)
+                return _carry_through({"title": doc.get("title", ""), "match_type": doc.get("match_type", ""),
+                                       "checklist_results": {}, "source": "no_content"}, doc)
+            finally:
+                if on_doc_done is not None:
+                    try:
+                        on_doc_done()
+                    except Exception:
+                        pass
+
+    return list(await asyncio.gather(*[one(d) for d in documents]))
+
+
+async def refine_search_query(
+    invention_summary: str,
+    group_label: str,
+    group_intent: str,
+    weak_results: list[dict],
+    original_queries: list[str],
+) -> dict:
+    """
+    Adaptive search harness: LLM looks at weak results and proposes refined queries.
+    Returns {"queries": [str, str, ...], "reasoning": "..."}
+    """
+    weak_titles = "\n".join(
+        f"- ({d.get('semantic_score', 0):.2f}) {d.get('title', '')[:150]}"
+        for d in weak_results[:5]
+    )
+    orig_q = "\n".join(f"- {q}" for q in original_queries)
+    resp = await call_llm(
+        "You are a USPTO patent search expert. Output JSON only. "
+        "You refine failed search queries based on what was found.",
+        f"""════ TASK (template) ════
+A search group's queries returned only weakly-relevant results. \
+Look at what we found and propose 1-2 REFINED queries that would find more relevant prior art.
+
+Strategy hints:
+- If results are too generic → add specific technical terms from the invention
+- If results are off-topic → use stricter quoted phrases
+- If results are in wrong domain → add domain-restricting terms
+- Try a different phrasing, synonyms, or more specific technical jargon
+
+Output strict JSON:
+{{
+  "reasoning": "1-2 sentences why the original queries failed and what your refinement targets",
+  "queries": ["refined query 1", "refined query 2"]
+}}
+
+════ INPUT ════
+INVENTION SUMMARY:
+{invention_summary}
+
+SEARCH GROUP:
+- label: {group_label}
+- intent: {group_intent}
+
+ORIGINAL QUERIES (these failed):
+{orig_q}
+
+TOP RESULTS WE FOUND (weak — semantic similarity in parens):
+{weak_titles or "(no results)"}
+""",
+    )
+    m = re.search(r'\{.*\}', resp, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+    return {"reasoning": "parse failed", "queries": []}
+
+
+async def review_phase_output(
+    phase_name: str,
+    task_description: str,
+    original_input: str,
+    output_to_review: str,
+    extra_context: str = "",
+) -> dict:
+    """Evolve mode: full-context review of a phase's output.
+
+    The reviewer gets the original input AND the produced output and decides
+    whether the output is good enough for the phase's task. Returns:
+        {
+          "good_enough": bool,
+          "what_works": str,
+          "what_doesnt": str,
+          "next_action": "proceed" | "do_more" | "skip",
+          "do_more_hint": str,
+        }
+
+    For phases 1/2 the next_action is informational (no backtracking allowed).
+    For phases 3/4 the next_action drives the elastic loop.
+    """
+    extra_block = f"\n\n════ EXTRA CONTEXT ════\n{extra_context}" if extra_context else ""
+    resp = await call_llm(
+        "You are a senior reviewer of a patent novelty pipeline. You read the inputs "
+        "the LLM saw and the output it produced, then judge whether the output is good "
+        "enough to drive the next pipeline step. Be specific. Output JSON only.",
+        f"""════ TASK ════
+You are reviewing the output of phase "{phase_name}".
+Phase task: {task_description}
+
+Decide whether the output is good enough. Consider: factual accuracy vs the input,
+completeness for the task, whether the next pipeline step has what it needs.
+
+Output strictly this JSON:
+{{
+  "good_enough": true | false,
+  "what_works": "1-2 sentences on what the output got right",
+  "what_doesnt": "1-2 sentences on what is missing or wrong (or empty if good_enough)",
+  "next_action": "proceed" | "do_more" | "skip",
+  "do_more_hint": "if next_action=do_more, 1 sentence on what specifically to do more of"
+}}
+
+════ ORIGINAL INPUT THE PHASE SAW ════
+{original_input[:_EXTRACTION_DOC_CAP]}
+
+════ OUTPUT TO REVIEW ════
+{output_to_review[:8000]}{extra_block}""",
+        max_tokens=1024,
+    )
+    m = re.search(r'\{.*\}', resp, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+    return {
+        "good_enough": True,
+        "what_works": "(reviewer parse failed)",
+        "what_doesnt": "",
+        "next_action": "proceed",
+        "do_more_hint": "",
+    }
+
+
+async def summarize_failure(step_name: str, raw_error: str, context: str = "") -> str:
+    """When a pipeline step fails (LLM exception, parse error, channel error, 0 results),
+    produce ONE 1-2 sentence plain-language explanation that a developer can read in the
+    timeline to understand why this step did not produce useful output.
+
+    Cheap utility — no thinking budget.
+    """
+    try:
+        return await call_llm(
+            "You explain pipeline failures to a developer in 1-2 sentences. Be specific. No filler.",
+            f"""════ TASK ════
+A step in a patent novelty analysis pipeline did not produce useful output.
+Explain in 1-2 sentences what went wrong, in plain language. If the cause is
+ambiguous, say so and list the most likely 2 reasons. Do NOT suggest fixes — just
+state what happened. Output a single short paragraph, no markdown, no preamble.
+
+════ STEP ════
+{step_name}
+
+════ RAW ERROR / SIGNAL ════
+{raw_error[:1500]}
+
+════ CONTEXT ════
+{context[:1500] if context else "(none)"}""",
+            max_tokens=400,
+        )
+    except Exception as e:
+        return f"(failure_reason summarizer itself failed: {type(e).__name__}: {e})"
+
+
+async def self_check(
+    label: str,
+    source_text: str,
+    generated_text: str,
+    source_pdf_path: str | None = None,
+) -> dict:
+    """Verify whether generated_text is faithful to source_text (or source PDF).
+
+    When source_pdf_path is provided, the PDF is sent natively to the LLM
+    so the check works even for scanned / image-only documents.
+
+    Returns {ok: bool, issues: [...], suggestion: str}.
+    """
+    system = ("You verify whether a generated text is faithful to a source "
+              "document. Output JSON only.")
+    user_prompt = f"""════ GENERATED TEXT (the "{label}" step produced this) ════
+```
+{generated_text[:6000]}
+```
+
+For each substantive claim in the GENERATED TEXT, check if it appears in or
+follows from the SOURCE DOCUMENT. Output strict JSON:
+{{
+  "ok": true | false,
+  "issues": ["short issue 1", "short issue 2"],
+  "suggestion": "one-line fix or 'looks good'"
+}}"""
+    if source_pdf_path and Path(source_pdf_path).exists():
+        resp = await call_llm_with_pdfs(
+            system, user_prompt, [source_pdf_path], model=stage_model("extract"))
+    else:
+        resp = await call_llm(
+            system,
+            f"════ SOURCE DOCUMENT ════\n```\n{source_text[:_EXTRACTION_DOC_CAP]}\n```"
+            f"\n\n{user_prompt}",
+            model=stage_model("extract"),
+        )
+    m = re.search(r'\{.*\}', resp, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+    return {"ok": True, "issues": [], "suggestion": "self-check parse failed"}
+
+
+async def generate_combination_analysis(
+    invention_summary: str,
+    top_matches: list[dict],
+) -> str | None:
+    """Ask whether combining top references makes the invention obvious (§103 analysis)."""
+    if len(top_matches) < 2:
+        return None
+    refs = []
+    for i, m in enumerate(top_matches[:5], 1):
+        title = m.get("title", "")
+        teachings = m.get("key_teachings", "") or m.get("snippet", "")
+        if teachings:
+            refs.append(f"Reference {i}: {title}\n  Key teachings: {teachings[:300]}")
+    if len(refs) < 2:
+        return None
+    refs_block = "\n\n".join(refs)
+    system = (
+        "You are a patent analyst assessing whether combining multiple prior art "
+        "references would make an invention obvious to a person of ordinary skill. "
+        "Be specific and concise."
+    )
+    return await call_llm(
+        system,
+        f"""Given this invention and the references below, assess whether a skilled
+practitioner would naturally combine elements from these references to arrive
+at the invention.
+
+INVENTION:
+{invention_summary}
+
+REFERENCES:
+{refs_block}
+
+Answer in 2-4 sentences:
+1. Which specific elements from which references could be combined?
+2. Would this combination be natural/obvious to someone in this field, or would it require an inventive leap?
+3. What specific aspect of the invention (if any) would NOT be obvious even after combining all references?
+
+Be concrete — name the specific technical elements, not abstract concepts.""",
+    )
+
+
+async def generate_overall_summary(invention_summary: str, top_matches: list[dict]) -> str:
+    """Generate plain-language novelty assessment for faculty inventors (not patent lawyers)."""
+    if not top_matches:
+        raise ValueError(
+            "generate_overall_summary called with zero matches — refusing to let the LLM "
+            "hallucinate prior art. Caller must guard against empty input."
+        )
+    matches_lines = []
+    for m in top_matches[:10]:
+        title = m.get('title', '')
+        score = m.get('similarity_score', 0)
+        css = m.get('css', 0)
+        ewss = m.get('ewss', 0)
+        rs_syn = m.get('rs_synopsis', '')
+        teachings = m.get('key_teachings', '') or m.get('snippet', '')
+        score_str = f"CSS={css:.0%}, EWSS={ewss:.0%}" if css or ewss else f"{score:.0%} overlap"
+        line = f"- **{title}** ({score_str})"
+        if rs_syn:
+            line += f"\n  What it does: {rs_syn}"
+        line += f"\n  Key relevant content: {teachings[:300]}"
+        matches_lines.append(line)
+    matches = "\n".join(matches_lines)
+
+    _default_system = (
+        "You are explaining a patent novelty assessment to a university faculty "
+        "inventor who is NOT a patent lawyer. Use plain English. Be honest, specific, "
+        "and actionable. Avoid legal jargon (no '102', '103', 'anticipation', "
+        "'prior art teaches'). Don't be vague."
+    )
+    return await call_llm(
+        _default_system,
+        f"""════ TASK (template) ════
+Write a novelty assessment of this invention for the inventor. \
+The inventor is a faculty member who knows their research area but is not familiar with patent law.
+
+Structure your response in EXACTLY these sections (use markdown):
+
+## What you invented (in plain words)
+2-3 sentences restating what the inventor built, in their own field's language.
+
+## What's already out there
+For the most relevant existing work (top 3-5 from the matches below), explain in 1-2 sentences EACH:
+- What that prior work did
+- Which specific aspects of YOUR invention it covers (or comes close to)
+
+## What appears genuinely new
+List the specific technical elements of your invention that none of the matches \
+seem to cover. Be concrete — point at actual components, methods, or claims, \
+not abstract concepts.
+
+## Honest assessment
+1-2 sentences. Pick one: "Looks novel and worth pursuing", \
+"Has overlap but a clear novel angle", \
+"Significant overlap — narrow your claims", or "Likely already known". \
+Then explain why in plain terms.
+
+## Suggested next steps
+2-3 concrete actions the inventor can take \
+(e.g., "Read paper X carefully — it's the closest match", \
+"Talk to your tech transfer office about claim Y", \
+"Focus your patent application on aspect Z").
+
+════ INPUT (from prior LLM steps) ════
+INVENTION SUMMARY:
+{invention_summary}
+
+TOP MATCHES (sorted by overlap):
+{matches}
+""",
+    )
+
+
+OBVIOUSNESS_EXPLAIN_PROMPT = prompts.register_default("report.obviousness_explain", """════ TASK ════
+A deterministic rule has already made the determination below from verified evidence. Your job is
+ONLY to write the examiner-style reasoning for it (MPEP 2143: "there must be some articulated
+reasoning with some rational underpinning"). You may NOT change the determination, add or remove
+references, or claim an element is disclosed when the chart says it is not.
+
+Write 2 short paragraphs of plain prose (no headings, no bullets, no preamble):
+
+1. Why these references, read together, could render the claim obvious: for each reference name the
+   elements it supplies (use the chart), then say whether combining them is "combining prior art
+   elements according to known methods to yield predictable results" (KSR rationale A) — same field,
+   same problem, no change in the elements' respective functions — or whether the gap elements would
+   need a routine modification. Be concrete: name the elements.
+
+2. What cuts against it: whether an articulated reason to combine is missing, whether any reference
+   teaches away or solves a different problem, and which uncovered element (if any) is more than a
+   routine modification. If nothing cuts against it, say so in one sentence.
+
+Never say the invention is or is not patentable / allowable / grantable — this is blocking-risk
+reasoning over the references at hand only.
+
+════ INPUT (rule output) ════
+DETERMINATION: {label_text}
+RULE REASON: {reason}
+
+INVENTION (summary):
+{summary}
+
+REFERENCES AND THE ELEMENTS EACH DISCLOSES (located verbatim quotes in brackets):
+{references}
+
+ELEMENTS NO REFERENCE DISCLOSES:
+{uncovered}""", contract="""Does: explain, in prose, why a charted combination reads as obvious or does not.
+Must output: prose paragraphs, no JSON, no verdict.
+Consumed by: the report, under a heading that says this is the model's narrative and the determination is not.
+Never: state a conclusion. The rule decides; this explains the rule's output.""")
+
+
+OBVIOUSNESS_FINDINGS_PROMPT = prompts.register_default("evaluate.obviousness_findings", """════ TASK ════
+You are a US patent examiner assembling the FACTUAL FINDINGS an obviousness rejection needs.
+You are NOT deciding anything. A deterministic rule decides the label from what you find; your
+job is to locate the evidence for four findings, or to say plainly that it is not there.
+
+Every finding you report must quote the reference it comes from, VERBATIM. Each quote is checked
+against that reference's own text; a quote that cannot be located makes the finding fail, which
+is the same as not making it. Copy exactly — do not paraphrase, do not stitch fragments, do not
+translate, do not fix the source's typos. An empty or unfound finding is a perfectly good answer
+and is much better than one you cannot support.
+
+Reason only from the references below. You have not been shown the invention's own description
+for a reason: MPEP 2142 — "Knowledge of applicant's disclosure must be put aside in reaching this
+determination ... impermissible hindsight must be avoided". The claim elements are there to tell
+you what is being compared, not to be read back into the references.
+
+There are {n_refs} reference(s) below. WHICH findings apply depends on that number, so read this
+first:
+
+WITH TWO OR MORE REFERENCES, answer 1, 2, 3 (the combination rationale, MPEP 2143 I.A) and skip 4.
+WITH EXACTLY ONE REFERENCE there is nothing to combine: skip 1, 2 and 3, set their "found" to
+false with the reason "single reference", and answer 4 instead.
+Everyone answers 5, 6 and 7.
+
+1. MOTIVATION TO COMBINE (MPEP 2143.01). A reason one of ordinary skill would have combined these
+   references, found in one of: market_forces, design_incentives, interrelated_teachings (one
+   reference points at the other's subject matter), known_need_or_problem (a need or problem
+   stated in the art at the time), background_knowledge.
+   For the first four the quote must be the place the reason actually appears.
+   **background_knowledge is different and you should use it when it fits.** MPEP 2143.01 says a
+   motivation may be found "explicitly or implicitly in ... the background knowledge, creativity,
+   and common sense of the person of ordinary skill" — that kind of reason is not written down in
+   any reference, so for it set source="background_knowledge", LEAVE THE QUOTE EMPTY, and state
+   the reason in one specific sentence: what the skilled person knew, and why it leads here. Do
+   NOT force a quote for it and do NOT report found=false merely because no reference says it out
+   loud. "The combination would be obvious" is still not a reason (MPEP 2143, In re Van Os) — name
+   the knowledge, not the conclusion.
+
+2. COMBINABLE BY KNOWN METHODS (MPEP 2143 I.A (2)). That one of ordinary skill could have combined
+   the elements by known methods, and that in combination each element merely performs the same
+   function it does separately. Quote the words showing the elements are separable and ordinary.
+   -> field "combinable_by_known_methods"
+
+3. PREDICTABLE RESULTS (MPEP 2143 I.A (3)). That one of ordinary skill would have recognised the
+   results of the combination were predictable. Quote the words showing the behaviour is known
+   rather than surprising. -> field "predictable_results"
+
+4. MODIFICATION RATIONALE for a SINGLE reference (MPEP 2143 I.(B)-(E)). Which one applies:
+   B_simple_substitution (one known element swapped for another, predictable result);
+   C_known_technique_same_way (a known technique improving similar devices the same way);
+   D_known_technique_ready_for_improvement (a known technique applied to a device ready for it);
+   E_obvious_to_try (a finite number of identified, predictable solutions). Quote the words in the
+   reference that make the modification a known one. -> field "modification"
+
+5. REASONABLE EXPECTATION OF SUCCESS (MPEP 2143.02 I). Evidence that the combination or the
+   modification could be expected to work — routine technique, an explicit statement of
+   compatibility, a worked example. A rationale without this is not enough; both are required.
+
+6. ANALOGOUS ART (MPEP 2141.01(a) I), one entry per reference. Either same_field_of_endeavor, or
+   reasonably_pertinent_to_the_problem faced by the inventor. The two tests are independent and a
+   reference need satisfy only one. Quote the words that establish it.
+
+7. LEVEL OF ORDINARY SKILL (MPEP 2141 II (C)). One sentence characterising the person of ordinary
+   skill in this art, drawn from the references' own background. A quote here is optional.
+
+════ CLAIM ELEMENTS BEING COMPARED ════
+{elements}
+
+════ REFERENCES ════
+{references}
+
+Answer with JSON only, in the given schema. Use the exact reference key shown in brackets as
+"doc". Where you cannot find support, set found=false and say why in "reason" — do not invent a
+quote to fill the field.""", contract="""Does: make the six MPEP 2143 findings a 103 rejection needs, over the charted references.
+Must output: JSON findings, each with `status`, `evidenced`, and a quote when evidenced.
+Consumed by: obviousness.py -> adjudicate.py, which refuses a 103 whose findings do not support the combination.
+Never: mark a finding evidenced without a quote from a reference. Background knowledge is allowed as a rationale (2143.01) but it is recorded as asserted, not evidenced.""")
+
+
+async def obviousness_findings(elements: list[str], refs: dict[str, str],
+                               model: str | None = None) -> dict:
+    """One call for the findings MPEP requires but coverage cannot supply:
+    motivation (2143.01), reasonable expectation of success (2143.02 I),
+    analogous art per reference (2141.01(a) I) and the level of ordinary skill
+    (2141 II (C)). Returns the raw JSON; patent_analyzer.obviousness.verify
+    locates every quote before any of it counts, and the rule decides the label.
+
+    The model is never shown the label, the invention summary or the proposed
+    determination — only the claim elements and the references' text.
+    """
+    from patent_analyzer.obviousness import SCHEMA
+    if not refs:
+        return {}
+    body = "\n\n".join(f"[{k}]\n{(t or '')[:12000]}" for k, t in refs.items())
+    prompt = prompts.render("evaluate.obviousness_findings",
+                            n_refs=len(refs),
+                            elements="\n".join(f"- {e}" for e in elements[:40]) or "(none)",
+                            references=body)
+    system = "You are a US patent examiner making factual findings. Output JSON only."
+    try:
+        raw = await call_llm(system, prompt, response_schema=SCHEMA,
+                             model=model or stage_model("eval"))
+        return json.loads(raw) if raw else {}
+    except Exception:
+        return {}
+
+
+async def explain_obviousness(adjudication: dict, chart: dict, invention_summary: str,
+                              docs_results: list[dict] | None = None) -> str:
+    """One call: prose reasoning for a §103 determination the rule already
+    made. Input is the rule output (references, per-element coverage,
+    gaps); the model cannot change the label. Returns "" when the label is
+    not "103" or the call fails."""
+    if not adjudication or adjudication.get("label") != "103" or not chart or not chart.get("rows"):
+        return ""
+    teach = {(d.get("pub_num") or d.get("title") or ""): (d.get("key_teachings") or d.get("rs_synopsis") or "")
+             for d in docs_results or [] if isinstance(d, dict)}
+    refs = []
+    for i, d in enumerate(chart["docs"]):
+        lines = [f"Reference {i + 1}: {d.get('pub_num') or ''} {d.get('title') or ''} "
+                 f"(discloses {d.get('n_covered', 0)}/{chart.get('n_elements', 0)} elements)"]
+        if teach.get(d.get("key")):
+            lines.append(f"  What it teaches: {teach[d['key']][:400]}")
+        for r in chart["rows"]:
+            c = r["cells"][i]
+            if c.get("covered"):
+                lines.append(f"  - {r['element']} [{c.get('quote', '')[:200]}]")
+        refs.append("\n".join(lines))
+    label_text = ("combination of the references below" if len(chart["docs"]) >= 2 and (adjudication.get("combo") or {}).get("docs")
+                  else "primary reference below plus a secondary reference or routine modification for the gaps")
+    prompt = prompts.render("report.obviousness_explain",
+                            label_text=f"blocking risk under §103 — {label_text}",
+                            reason=adjudication.get("reason", ""), summary=(invention_summary or "")[:3000],
+                            references="\n\n".join(refs) or "(none)",
+                            uncovered="\n".join(f"- {u}" for u in chart.get("uncovered") or []) or "(none — every element is disclosed by the set)")
+    system = ("You are a US patent examiner writing the reasoning section of an obviousness rejection. "
+              "Plain, specific prose; no legal conclusions about patentability.")
+    try:
+        return (await call_llm(system, prompt)).strip()   # default max_tokens: thinking tokens count against it on 2.5-pro
+    except Exception:
+        return ""
+
+
+SEARCH_REACT_STEP_PROMPT = prompts.register_default("search.react_step", """You are running a prior-art search on Google Patents for the invention below, one query at a
+time, like an examiner at the search box. Each query has the FIXED shape
+    (specific items OR ...) AND (neighbourhood terms OR ...) [CPC=<main group>/low]
+The neighbourhood group (8-15 terms: domain words, patent-vocabulary hypernyms, terms from the
+paper's citation neighbourhood) defines the ~100,000-document field; the specific group (2-4
+items of ONE or TWO elements: distinctive nouns, names, parameters, structure names) narrows it.
+Google returns only the top 100 of the field, so what matters is which words the target
+documents actually use.
+
+ELEMENTS (the limitations you are searching prior art for):
+{elements}
+
+NEIGHBOURHOOD TERMS available: {broad}
+PREDICTED CPC MAIN GROUPS: {cpc_groups}
+ELEMENTS STILL WITHOUT CANDIDATES: {uncovered}
+VOCABULARY LEARNED FROM RESULTS SO FAR: {learned}
+QUERIES LEFT: {budget_left}
+
+HISTORY (each step: what was asked, the total on Google, and the top titles that came back):
+{history}
+
+What the query is FOR. A query pays off two ways, and both matter:
+  (a) it can return the examiner's reference itself — one query of this kind reached two gold
+      families at once on US20120194631A1: `((remote controlled robot) OR (remote input) OR gaze)
+      (videoconferencing OR (telepresence system) OR …)`;
+  (b) far more often it returns documents whose citations, family and neighbours contain it, and
+      the expansion finds it from there (H.md §H1.5: of 30 gold families reached, citation
+      expansion first reached 19, the bridges 8, Lens 2, similar neighbours 1).
+So a query is good when its top titles are real patents in the invention's art — that serves both
+(a) and (b). Keep trying to hit the reference; do not settle for "the right neighbourhood".
+
+USE THE WORDS PATENTS ACTUALLY USE. Take the terms from the titles that came back and from the
+art's ordinary vocabulary — "remote controlled robot", "pan tilt", "gaze", "video conferencing".
+Do NOT invent compound phrases to describe the invention in your own words: "kinetic conferencing
+proxy", "responsive rotation", "stationary imaging" match nothing, because nobody drafting a
+patent wrote them. A term you have not seen in a real title is probably not a term.
+
+Decide the next query. Rules of thumb:
+- `total` is a diagnostic, NOT a target. Do not reshape a query to move the number — a phrase
+  invented to widen or narrow the count is a phrase that matches the wrong documents.
+- total < 200 → far too narrow: drop an item, or use a synonym / stemmed form; never repeat a query.
+- Titles all off-topic at a large total → the neighbourhood group is wrong, not too wide.
+- READ the returned titles: when they use patent vocabulary for what the paper calls something
+  else (e.g. the paper says "kinetic proxy", patents say "teleconferencing robot",
+  "swiveling monitor"), put those words in `learned_terms` and use them next.
+- Mark an element covered when several returned titles plausibly disclose it; then move to an
+  element that still has no candidates. Prefer elements with distinctive items.
+- Every predicted CPC main group must be tried at least once before any group is reused —
+  examiners search "all analogous arts ... regardless of where the claimed invention is
+  classified" (MPEP 904.01(c)); the neighbouring groups are where cross-field references sit.
+- Never end with queries left: once every element has candidates, spend the remaining queries
+  on PAIRS of elements phrased in the learned patent vocabulary (the examiner's growing synonym
+  list), and on the other predicted CPC groups. Stop only when nothing sensible is left to try.
+
+Output JSON: {{"observation": "<=40 words on what the last results showed",
+ "decision": "<=30 words on why this next query",
+ "covered_elements": ["<element id>", ...], "learned_terms": ["..."],
+ "next": {{"target_elements": ["<element id>"], "specific": ["2-4 items"], "broad": ["8-15 terms"], "cpc_group": "H04N7 or empty"}},
+ "stop": false}}""", contract="""Does: choose the next prior-art query, one at a time, from the history so far.
+Must output: JSON with `observation`, `decision`, `covered_elements`, `learned_terms`, `next` (`target_elements`, `specific`, `broad`, `cpc_group`) and `stop`.
+Consumed by: agentic/loop.py, which issues the query and feeds the results back.
+Never: invent vocabulary. Terms come from returned titles and the art's own words — a compound nobody drafting a patent wrote matches nothing, which is exactly how first-reach went to zero once before (H.md 勘误五).""")
+
+
+SEARCH_FACETS_PROMPT = prompts.register_default("search.facets", """For EACH element below, give five facets of search terms:
+  patent    — 2-3 phrasings of this element in the vocabulary a US patent examiner or attorney
+              would use in a claim or title (NOT the paper's coinage): e.g. a paper's "kinetic
+              videoconferencing proxy" is claimed as "telepresence robot", "movable display",
+              "teleconferencing apparatus"; "explicit control" as "remote pan tilt control". Two
+              to three words each.
+  named     — 0-4 DISTINCTIVE NAMES that identify this element in this document, COPIED as written
+              from the element text or the invention context: chemical / biological / material /
+              organism / product / algorithm / protocol names. For an acronym give BOTH the acronym
+              and its expansion as separate entries ("icg", "indocyanine green"). NOT generic product
+              categories (tablet pc, camera, server) and NOT the document's own coinage for the
+              invention. Leave empty when the element has no such name; never invent one.
+  thing     — what the element IS (the core noun/mechanism): 6-10 surface forms
+  place     — where/in what context it operates (domain, host system, signal): 4-8 forms
+  apparatus — the concrete structural/implementation term: 3-6 forms
+RULES: each form is ONE or TWO full English words (the engine stems them: write "damping" not "damp").
+Use DIFFERENT vocabulary across forms: the older term, the generic term, the industrial term,
+the research term, the term a competitor in another field would use.
+NEVER use words so general they appear in every patent: device, member, element, portion, means, unit, system, method, apparatus, module, component, assembly.
+DROP THE HEAD NOUN: write "sound damping" not "sound damping device". Lowercase. No quotes inside terms.
+
+INVENTION CONTEXT: {summary}
+
+ELEMENTS:
+{listing}
+
+ALSO give "cpc_groups": 5-8 CPC MAIN GROUPS (e.g. "H04N7", "G01S17", "A61B6" — subclass + group number,
+no slash part) where prior art for these elements is likely classified, INCLUDING the neighbouring
+technologies the implementation borrows from other fields (optical tracking → G01S17, machine guidance
+→ G05D1, video conferencing → H04N7): an examiner cites across fields, the paper's own field is not enough.
+
+JSON output: {{"cpc_groups": ["..."], "facets": {{"<element id>": {{"patent": [...], "named": [...], "thing": [...], "place": [...], "apparatus": [...]}}, ...}}}}""", contract="""Does: give five facets of search terms per element, plus likely CPC main groups.
+Must output: JSON per element with the five named facets and the CPC list.
+Consumed by: the query builder.
+Never: return words so general they appear in every patent, and never keep a paper's own coinage where the art has a word for it.""")
+
+
+async def facet_elements(elements: list[dict], summary: str) -> dict[str, dict]:
+    """One call: for each element give search facets in Google Patents
+    vocabulary. Returns {element_id: {thing[], place[], apparatus[]}}.
+    Shape follows patent-search-pilot's measured query craft: 6-14 surface
+    forms per facet, two words max, no generic head nouns, vocabularies
+    from different communities. Full words, not truncated stems: Google
+    Patents stems unquoted keywords itself."""
+    if not elements:
+        return {}
+    listing = "\n".join(f'{e["id"]}: {e["text"]}' for e in elements)
+    system = "You write patent search facets. Output JSON only."
+    prompt = prompts.render("search.facets", summary=summary[:4000], listing=listing)
+    try:
+        # the facet call predicts the CPC main groups the whole search hangs on, once per job:
+        # it gets the search stage's model and a full thinking budget (Harry: "输出 + 思考应该放在召回先")
+        resp = await call_llm(system, prompt, thinking_budget=8192, model=stage_model("search"))
+        m = re.search(r'\{.*\}', resp, re.DOTALL)
+        data = json.loads(m.group()) if m else {}
+        out = {}
+        for e in elements:
+            f = (data.get("facets") or {}).get(e["id"]) or {}
+            out[e["id"]] = {k: [str(t).strip().lower() for t in (f.get(k) or []) if str(t).strip()][:FACET_FORMS_CAP]
+                            for k in ("patent", "named", "thing", "place", "apparatus")}
+        groups = []
+        for g in data.get("cpc_groups") or []:
+            g = re.sub(r"[^A-Za-z0-9]", "", str(g).split("/")[0]).upper()
+            if re.match(r"^[A-HY]\d\d[A-Z]\d{1,4}$", g) and g not in groups:
+                groups.append(g)
+        out["_meta"] = {"cpc_groups": groups[:8]}
+        return out
+    except Exception:
+        return {e["id"]: {"patent": [], "named": [], "thing": [], "place": [], "apparatus": []} for e in elements}
+
+
+# ════════════════════════════════════════════════════════════
+# Extraction (line A): candidate inventions -> claim-language elements
+# ════════════════════════════════════════════════════════════
+
+EXTRACTION_LEVELS = ("core", "component", "application")
+EXTRACTION_KINDS = ("structure", "step", "condition", "parameter")
+_EXTRACTION_DOC_CAP = 150_000
+FACET_FORMS_CAP = 10
+EXTRACT_ELEMENTS_PROMPT = prompts.register_default("extract.elements", """════ TASK ════
+For EACH candidate invention below, draft the independent claims and break the method
+claim into elements.
+
+CANDIDATES
+{cand_lines}
+{prefill_block}
+For each candidate output:
+  independent_claim_draft:
+    method — "A method of ..., comprising: ...; ...; and ..."  (one limitation per clause)
+    system — "A <apparatus/system/device> comprising: ...; ...; and ..."
+    Both claims must recite EVERY component and EVERY step the document presents as part
+    of the invention (typically 4-10 limitations), not a two-clause sketch.
+  primary_form — "system" when the contribution is an apparatus / device / composition /
+    structure (the document describes parts and how they are arranged), "method" when it is a
+    process. This is the claim the elements are cut from.
+  elements — the limitations of the PRIMARY claim, in order, one limitation per element:
+    id             — "<candidate id>.e0" for the preamble, then .e1, .e2, ...
+    text           — the limitation in claim language: one structure (with its configured-to
+                     qualifier) or one action. Concatenating the element texts must reproduce
+                     the primary claim.
+    evidence_quote — 10-40 words COPIED verbatim from the DOCUMENT that support this limitation
+    facets         — search vocabulary {{"thing": [...], "place": [...], "apparatus": [...]}},
+                     1-3 short lowercase stems each (thing = what it is; place = where / in
+                     what host it operates; apparatus = the concrete implementation term)
+    kind           — "structure" | "step" | "condition" | "parameter"
+  dependent_hints — 0-4 short refinements that could become dependent claims
+
+RULES
+- COPY the quote verbatim from the document. DO NOT paraphrase. DO NOT stitch words from
+  different sentences. If nothing in the document supports a limitation, leave
+  evidence_quote empty rather than inventing one.
+- One limitation per element. Do not merge two actions into one element; do not split one
+  action into two.
+- Use the document's own terms in element text; no "novel", "improved", "efficient".
+- In facets never use device/member/element/portion/means/unit/system/method/apparatus/
+  module/component; drop the head noun ("sound damp" not "sound damping device").
+- The preamble element (e0) names the subject ("A method of X" / "An apparatus for X") and
+  carries no limitation.
+{feedback_block}
+Output strictly this JSON, no preamble:
+{{"candidate_inventions": [
+  {{"id": "inv1",
+    "independent_claim_draft": {{"method": "...", "system": "..."}},
+    "primary_form": "system",
+    "elements": [
+      {{"id": "inv1.e0", "text": "A method of ...", "evidence_quote": "...",
+        "facets": {{"thing": ["..."], "place": ["..."], "apparatus": ["..."]}}, "kind": "structure"}}
+    ],
+    "dependent_hints": ["..."]}}
+]}}
+
+════ DOCUMENT ════
+```
+{document}
+```""", contract="""Does: break a candidate invention into claim elements, each tied to verbatim text.
+Must output: JSON `elements`, each with `id`, `text`, `evidence_quote` copied verbatim from the document.
+Consumed by: the checklist, the search, the evidence matrix and the drafted claims.
+Never: paraphrase an evidence_quote. It is located back in the document by exact match, and a paraphrase is an unsupported element.""")
+
+_FACET_BANNED = frozenset("device member element portion means unit system method apparatus module component assembly".split())
+
+_DOC_KIND_GUIDANCE = {
+    "paper": ("Look for the invention in the Method / Approach / System / Implementation sections, "
+              "not in the Introduction or Related Work: what the authors built, not what they cite."),
+    "manuscript": ("The prior-art passages have been removed — every section and paragraph left is "
+                   "the authors' own. Read the abstract and the Method / Results / Discussion for "
+                   "what they built themselves."),
+    "disclosure": ("The Core Idea and Novelty fields state what the inventor considers new; "
+                   "the How It Works field gives the mechanism. Use them in that order."),
+    "patent_draft": ("Each independent claim (or claim-like paragraph) is one candidate; keep its scope. "
+                     "Dependent claims are not candidates."),
+}
+
+
+def _extraction_json(resp: str) -> dict | None:
+    for attempt in (resp, resp[resp.find("{"):resp.rfind("}") + 1] if "{" in resp else ""):
+        if not attempt:
+            continue
+        try:
+            d = json.loads(attempt)
+            return d if isinstance(d, dict) else None
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _clean_facets(f) -> dict:
+    out = {}
+    for k in ("thing", "place", "apparatus"):
+        terms = []
+        for t in (f or {}).get(k) or []:
+            words = [w for w in str(t).strip().lower().split() if w]
+            while words and words[-1] in _FACET_BANNED:
+                words.pop()
+            if words and not all(w in _FACET_BANNED for w in words):
+                terms.append(" ".join(words))
+        out[k] = terms[:4]
+    return out
+
+
+EXTRACT_CANDIDATES_PROMPT = prompts.register_default("extract.candidates", """════ TASK ════
+From the DOCUMENT below (use the SUMMARY only as orientation), list 1-4 candidate
+inventions — things that could each be the subject of an independent patent claim.
+Order them core first, then component, then application.
+
+level:
+  core        — the main contribution as a whole; the subject of the broadest independent claim
+  component   — a sub-mechanism / module / step that could stand on its own as an independent claim
+  application — a use / deployment of the core in a specific setting
+
+For each candidate:
+  concept   — ONE sentence, at most 35 words: what it is, what drives it, and the feature
+              that distinguishes it from ordinary practice
+  cpc_pred  — up to 3 CPC group codes (e.g. "G06T7/00")
+
+Document kind: {doc_kind}. {guidance}
+
+If the document contains no claimable invention (survey, review, pure theory, opinion,
+dataset description, commentary), output an empty list and state no_invention_reason.
+
+Output strictly this JSON, no preamble:
+{{"candidate_inventions": [{{"id": "inv1", "concept": "...", "level": "core", "cpc_pred": ["G06T7/00"]}}],
+ "no_invention_reason": null}}
+
+════ SUMMARY ════
+{summary}
+
+════ DOCUMENT ════
+```
+{document}
+```""", contract="""Does: propose candidate inventions in the document, at core / component / application level.
+Must output: JSON `candidate_inventions`, each with `id`, `level`, `concept`.
+Consumed by: the extraction subgraph, then every downstream phase keyed on candidate id.
+Never: merge two distinct inventions into one candidate — the whole chart is per candidate.""")
+
+
+async def extract_candidates(doc_text: str, summary: str, doc_kind: str = "paper") -> dict:
+    """A1 — ONE LLM CALL: list 1-4 candidate inventions from the full document.
+
+    Returns {"candidate_inventions": [{id, concept, level, cpc_pred}],
+             "no_invention_reason": None | str}
+    """
+    guidance = _DOC_KIND_GUIDANCE.get(doc_kind, _DOC_KIND_GUIDANCE["paper"])
+    system = ("You are a patent attorney identifying what in a technical document could be "
+              "claimed. Output JSON only.")
+    prompt = prompts.render("extract.candidates", doc_kind=doc_kind, guidance=guidance,
+                            summary=(summary or "")[:4000], document=(doc_text or "")[:_EXTRACTION_DOC_CAP])
+    resp = await call_llm(system, prompt, thinking_budget=4096, model=stage_model("extract"))
+    data = _extraction_json(resp) or {}
+    out = []
+    for i, c in enumerate((data.get("candidate_inventions") or [])[:4]):
+        if not isinstance(c, dict):
+            continue
+        concept = " ".join(str(c.get("concept") or "").split())
+        if not concept:
+            continue
+        level = str(c.get("level") or "").strip().lower()
+        if level not in EXTRACTION_LEVELS:
+            level = "core" if not out else "component"
+        cpc = [str(x).strip() for x in (c.get("cpc_pred") or []) if str(x).strip()][:3]
+        out.append({"id": f"inv{len(out) + 1}", "concept": concept, "level": level, "cpc_pred": cpc})
+    out.sort(key=lambda c: EXTRACTION_LEVELS.index(c["level"]))
+    for i, c in enumerate(out, 1):
+        c["id"] = f"inv{i}"
+    reason = data.get("no_invention_reason")
+    reason = str(reason).strip() if reason else None
+    if not out and not reason:
+        reason = "model returned no candidate inventions" if data else "A1 response could not be parsed"
+    return {"candidate_inventions": out, "no_invention_reason": reason if not out else None}
+
+
+async def extract_elements(doc_text: str, candidates: list[dict], prefill: dict[str, list[str]] | None = None,
+                           feedback: dict | None = None) -> dict:
+    """A2 — ONE LLM CALL (all candidates together): independent_claim_draft
+    {method, system} + primary_form + elements[{id, text, evidence_quote, facets, kind}]
+    per candidate; elements are the limitations of the primary-form claim.
+
+    prefill: {candidate_id: [limitation texts]} — element texts fixed (claim mode);
+    the model only adds evidence_quote / facets / kind and may not rewrite them.
+    Returns {"candidate_inventions": [<candidate + claim draft + elements + dependent_hints>]}
+    """
+    if not candidates:
+        return {"candidate_inventions": []}
+    prefill = prefill or {}
+    system = ("You are a patent attorney drafting independent claims from a technical document. "
+              "Output JSON only.")
+    cand_lines = "\n".join(f'- {c["id"]} [{c.get("level", "core")}]: {c.get("concept", "")}' for c in candidates)
+    prefill_block = ""
+    if prefill:
+        listing = "\n".join(f'{cid}:\n' + "\n".join(f"  {cid}.e{i}: {t}" for i, t in enumerate(texts))
+                            for cid, texts in prefill.items())
+        prefill_block = f"""
+
+════ PREFILLED ELEMENTS (FIXED) ════
+The element texts below are the applicant's own claim limitations. Output them EXACTLY
+as given — same order, same count, same wording — adding only evidence_quote, facets
+and kind for each. Do not rewrite, merge, or split them.
+{listing}
+"""
+    prompt = prompts.render("extract.elements", cand_lines=cand_lines, prefill_block=prefill_block,
+                            feedback_block=_feedback_block(feedback), document=(doc_text or "")[:_EXTRACTION_DOC_CAP])
+    resp = await call_llm(system, prompt, max_tokens=16384, thinking_budget=4096, model=stage_model("extract"))
+    data = _extraction_json(resp)
+    if data is None:
+        return {"candidate_inventions": [], "error": "A2 response could not be parsed"}
+    by_id = {}
+    for c in data.get("candidate_inventions") or []:
+        if isinstance(c, dict) and c.get("id"):
+            by_id[str(c["id"]).strip()] = c
+
+    out = []
+    for cand in candidates:
+        cid = cand["id"]
+        raw = by_id.get(cid) or {}
+        draft = raw.get("independent_claim_draft") or {}
+        elements = []
+        raw_elements = [e for e in (raw.get("elements") or []) if isinstance(e, dict)]
+        fixed = prefill.get(cid)
+        if fixed:
+            raw_elements = raw_elements[:len(fixed)] + [{}] * max(0, len(fixed) - len(raw_elements))
+        for i, e in enumerate(raw_elements):
+            text = fixed[i] if fixed else " ".join(str(e.get("text") or "").split())
+            if not text:
+                continue
+            kind = str(e.get("kind") or "").strip().lower()
+            elements.append({
+                "id": f"{cid}.e{len(elements)}",
+                "text": text,
+                "evidence_quote": " ".join(str(e.get("evidence_quote") or "").split()),
+                "facets": _clean_facets(e.get("facets")),
+                "kind": kind if kind in EXTRACTION_KINDS else "step",
+            })
+        form = str(raw.get("primary_form") or "").strip().lower()
+        out.append({
+            **cand,
+            "independent_claim_draft": {
+                "method": " ".join(str(draft.get("method") or "").split()),
+                "system": " ".join(str(draft.get("system") or "").split()),
+            },
+            "primary_form": form if form in ("method", "system") else "method",
+            "elements": elements,
+            "dependent_hints": [str(h).strip() for h in (raw.get("dependent_hints") or []) if str(h).strip()][:4],
+        })
+    return {"candidate_inventions": out}
+
+
+# ════════════════════════════════════════════════════════════
+# Draft claims (Step 6): wording only — content comes from the elements
+# ════════════════════════════════════════════════════════════
+
+DRAFT_CLAIMS_PROMPT = prompts.register_default("draft.claims", """════ TASK ════
+You are polishing the wording of an independent claim that was ASSEMBLED BY RULE from the grounded
+elements of the DOCUMENT below. You may reword; you may NOT add, drop, merge, split or reorder
+limitations, and you may not change their technical meaning. One output limitation per input
+limitation, same order, same lid. Use the document's own terms. Each limitation is one clause with
+no semicolon inside it and no "wherein" inside a step/structure limitation (a condition limitation
+may start with "wherein"). Introduce every noun with "a/an" the first time and refer back with "the".
+No "such as", "for example", "preferably", "about", "substantially", "efficient", "improved".
+
+INDEPENDENT CLAIM — {primary_form} form (rule wording)
+{primary_lines}
+
+MIRROR — {mirror_form} form (rule wording; make it a proper {mirror_form} claim: steps become
+structure "configured to …" or structure becomes steps, same limitations, same order, same lids)
+{mirror_lines}
+
+CANDIDATE DEPENDENT LIMITATIONS (from the document; reword in claim language; for every one that has
+no evidence_quote yet, COPY 10-40 words verbatim from the DOCUMENT that support it — if you cannot,
+leave evidence_quote empty)
+{pool_lines}
+
+REFINEMENT TARGETS (0-3 narrower statements of these elements taken from the passage around their
+evidence: a numeric value, a concrete structure, an ordering. Each must COPY its own verbatim
+evidence_quote from the passage. Skip when the passage adds nothing.)
+{refine_lines}
+
+COVERAGE (which evaluated references disclose which elements; context only)
+{coverage_lines}
+
+RULES
+- COPY every evidence_quote verbatim. DO NOT paraphrase, DO NOT stitch sentences.
+- Do not invent limitations that are not in the document.
+
+Output strictly this JSON, no preamble:
+{{"primary": [{{"lid": "c1.l1", "text": "..."}}],
+  "mirror": [{{"lid": "m.l1", "text": "..."}}],
+  "pool": [{{"pid": "hint0", "text": "...", "evidence_quote": "..."}}],
+  "refinements": [{{"element_id": "inv1.e3", "text": "...", "evidence_quote": "..."}}]}}
+
+════ DOCUMENT ════
+```
+{document}
+```""", contract="""Does: draft independent and dependent claims for a candidate invention.
+Must output: JSON claims with `no`, `form`, `preamble`, `limitations`, `depends_on`.
+Consumed by: nodes/draft.py, the definiteness check and the report.
+Never: introduce a limitation with no basis in the extracted elements — a claim to matter the document does not disclose is not a claim anybody can file.""")
+
+
+def _lines(items: list[dict], key: str, extra: str = "") -> str:
+    out = []
+    for it in items:
+        line = f"  {it.get(key, '')}: {it.get('text', '')}"
+        if extra and it.get(extra):
+            line += f"\n      {extra}: {it[extra]}"
+        out.append(line)
+    return "\n".join(out) or "  (none)"
+
+
+async def draft_claims(primary_form: str, primary: list[dict], mirror: list[dict], pool: list[dict],
+                       refine_targets: list[dict], coverage_lines: list[str], document_text: str) -> dict:
+    """ONE call: reworded limitations for both forms (count / order fixed by
+    lid), claim-language texts + verbatim quotes for the pool, 0-3 refinements.
+    Returns {"primary": {lid: text}, "mirror": {lid: text}, "pool": {pid: {text, evidence_quote}},
+    "refinements": [{element_id, text, evidence_quote}], "error"?}."""
+    mirror_form = "system" if primary_form == "method" else "method"
+    refine_lines = "\n".join(f"  {t['element_id']}: {t['text']}\n      passage: {t.get('passage', '')[:1400]}"
+                              for t in refine_targets) or "  (none)"
+    prompt = prompts.render("draft.claims", primary_form=primary_form, mirror_form=mirror_form,
+                            primary_lines=_lines(primary, "lid"), mirror_lines=_lines(mirror, "lid"),
+                            pool_lines=_lines(pool, "pid", "evidence_quote"), refine_lines=refine_lines,
+                            coverage_lines="\n".join(f"  {c}" for c in coverage_lines) or "  (no evaluated references)",
+                            document=(document_text or "")[:_EXTRACTION_DOC_CAP])
+    system = "You are a patent attorney polishing claim wording. Output JSON only."
+    out = {"primary": {}, "mirror": {}, "pool": {}, "refinements": []}
+    try:
+        resp = await call_llm(system, prompt, max_tokens=12288, thinking_budget=2048, model=stage_model("draft"))
+    except Exception as e:
+        out["error"] = f"draft.claims call failed: {type(e).__name__}: {str(e)[:160]}"
+        return out
+    data = _extraction_json(resp)
+    if not data:
+        out["error"] = "draft.claims response could not be parsed"
+        return out
+    for key in ("primary", "mirror"):
+        for it in data.get(key) or []:
+            if isinstance(it, dict) and it.get("lid") and str(it.get("text") or "").strip():
+                out[key][str(it["lid"]).strip()] = " ".join(str(it["text"]).split())
+    for it in data.get("pool") or []:
+        if isinstance(it, dict) and it.get("pid"):
+            out["pool"][str(it["pid"]).strip()] = {"text": " ".join(str(it.get("text") or "").split()),
+                                                    "evidence_quote": " ".join(str(it.get("evidence_quote") or "").split())}
+    for it in data.get("refinements") or []:
+        if len(out["refinements"]) >= 3:
+            break
+        if isinstance(it, dict) and str(it.get("text") or "").strip():
+            out["refinements"].append({"element_id": str(it.get("element_id") or "").strip(),
+                                       "text": " ".join(str(it["text"]).split()),
+                                       "evidence_quote": " ".join(str(it.get("evidence_quote") or "").split())})
+    return out
+
+
+DRAFT_REWORD_PROMPT = prompts.register_default("draft.reword", """════ TASK ════
+Each claim limitation below was flagged by a rule check under 35 U.S.C. 112(b). Rewrite ONLY the
+flagged limitations so the flag no longer applies. Keep the technical meaning, keep one limitation
+per lid (no semicolons, do not split, do not merge, do not add limitations), use the terms of the
+evidence quote.
+
+How to fix each category:
+- antecedent_basis: introduce the noun with "a/an" the first time it appears, or refer back to the
+  exact phrase introduced earlier ("the first lever", not "the lever" when two levers exist).
+- relative_term: remove the term of degree, or replace it with the standard the evidence quote
+  gives (a number, a unit, a comparison basis). Do not invent a number.
+- exemplary_phrasing: remove "such as / for example / preferably / e.g." and the examples.
+- functional_claiming: replace the generic placeholder (module / unit / means / device …) with the
+  concrete structure named in the evidence quote, or state the act as a step.
+
+FLAGGED LIMITATIONS
+{flag_lines}
+
+Output strictly this JSON, no preamble:
+{{"limitations": [{{"lid": "c1.l2", "text": "..."}}]}}""", contract="""Does: reword one claim limitation to clear a definiteness flag.
+Must output: the rewritten limitation text only.
+Consumed by: nodes/draft.py.
+Never: broaden the limitation. Fixing indefiniteness by removing the restriction changes what was claimed.""")
+
+
+async def reword_limitations(flagged: list[dict]) -> dict[str, str]:
+    """ONE call: {lid: new text} for the flagged limitations ({lid, text, flags[{category, span, note}], quotes[]})."""
+    if not flagged:
+        return {}
+    lines = []
+    for f in flagged:
+        lines.append(f"  {f['lid']}: {f['text']}")
+        for fl in f.get("flags") or []:
+            lines.append(f"      flag: {fl.get('category')} — '{fl.get('span')}' ({fl.get('note', '')})")
+        for q in (f.get("quotes") or [])[:2]:
+            lines.append(f"      evidence: \"{q[:300]}\"")
+    prompt = prompts.render("draft.reword", flag_lines="\n".join(lines))
+    system = "You are a patent attorney fixing claim wording under 35 U.S.C. 112(b). Output JSON only."
+    try:
+        resp = await call_llm(system, prompt, max_tokens=4096, thinking_budget=1024, model=stage_model("draft"))
+        data = _extraction_json(resp) or {}
+    except Exception:
+        return {}
+    out = {}
+    for it in data.get("limitations") or []:
+        if isinstance(it, dict) and it.get("lid") and str(it.get("text") or "").strip():
+            out[str(it["lid"]).strip()] = " ".join(str(it["text"]).split())
+    return out
+
+
+DRAFT_DEFINITENESS_PROMPT = prompts.register_default("draft.definiteness", """Examine each patent claim below with respect to definiteness (35 U.S.C. 112(b)).
+
+### Guidelines
+
+- Carefully dissect the claim and its features and search for common patterns that cause indefiniteness.
+- Think step by step and reason about potential issues! Only the final verdict counts.
+- Be very thorough and list all potential issues you can find!
+- Ultimately, estimate the likelihood of the claim being rejected due to indefiniteness. Note that a single issue renders the entire claim indefinite.
+- Completely ignore all other aspects like novelty or non-obviousness, focus entirely on indefiniteness.
+- A dependent claim is read together with the claims it depends on (given below); do not report as missing antecedent a term its parent introduces.
+
+### Categories of Indefiniteness
+
+{indefiniteness_categories}
+
+### Description (the specification the claims must find support in; may be truncated)
+
+{description}
+
+### Claims
+
+{claim_lines}
+
+### Output
+
+Put your examination into JSON with this schema, one entry per claim:
+{{"claims": [{{"no": 1, "likelihood_indefinite": "<expression>", "indefiniteness_reasons": [
+    {{"category": "<one of the categories above>", "reason_text": "...", "claim_recitations": ["exact words from the claim"], "likelihood": "<expression>"}}]}}]}}
+
+In `likelihood_indefinite`, indicate how likely the claim is to be rejected for indefiniteness by the USPTO. Use one of these expressions verbatim:
+{likelihood_expressions}
+Keep `claim_recitations` as specific and narrow as possible.""", contract="""Does: flag 112(b) problems in drafted claims.
+Must output: JSON `flags`, each naming the claim and the phrase.
+Consumed by: nodes/draft.py, which reports open flags on the claims.
+Never: rewrite the claim — this prompt reports, the reword prompt changes.""")
+
+
+async def definiteness_advisory(claims: list[dict], description: str, thinking_budget: int = 2048) -> dict:
+    """ONE call over a claim set (PEDANTIC examination prompt, categories and
+    likelihood expressions; the get_claim / search_description tools replaced
+    by the parents and the description inline). claims: [{no, text, depends_on}].
+    Returns {no: {"p_indefinite", "likelihood", "reasons": [{category, reason_text, claim_recitations, p}]}}."""
+    from patent_analyzer.draft.pedantic_categories import LIKELIHOOD, format_categories, likelihood_p, normalize_category
+    if not claims:
+        return {}
+    by_no = {c.get("no"): c for c in claims}
+    lines = []
+    for c in claims:
+        dep = c.get("depends_on")
+        head = f"Claim {c.get('no')}" + (f" (depends on claim {dep}; parent text: {(by_no.get(dep) or {}).get('text', '')[:1200]})" if dep else "")
+        lines.append(f"{head}:\n{c.get('text', '')}\n")
+    prompt = prompts.render("draft.definiteness", indefiniteness_categories=format_categories(), description=(description or "")[:60000],
+                            claim_lines="\n".join(lines), likelihood_expressions="\n".join(f"- {k}" for k in LIKELIHOOD))
+    system = "You are a USPTO examiner examining claims for definiteness under 35 U.S.C. 112(b). Output JSON only."
+    try:
+        resp = await call_llm(system, prompt, max_tokens=8192, thinking_budget=thinking_budget, model=stage_model("draft"))
+        data = _extraction_json(resp) or {}
+    except Exception as e:
+        return {"_error": f"{type(e).__name__}: {str(e)[:160]}"}
+    out = {}
+    for it in data.get("claims") or []:
+        if not isinstance(it, dict):
+            continue
+        try:
+            no = int(it.get("no"))
+        except (TypeError, ValueError):
+            continue
+        reasons = []
+        for r in it.get("indefiniteness_reasons") or []:
+            if isinstance(r, dict):
+                reasons.append({"category": normalize_category(r.get("category")), "reason_text": str(r.get("reason_text") or "")[:600],
+                                "claim_recitations": [str(x)[:200] for x in (r.get("claim_recitations") or [])][:5],
+                                "p": likelihood_p(r.get("likelihood") or "")})
+        out[no] = {"likelihood": str(it.get("likelihood_indefinite") or ""), "p_indefinite": likelihood_p(it.get("likelihood_indefinite") or ""),
+                   "reasons": reasons}
+    return out

@@ -1,0 +1,10 @@
+eval_data/
+evals/fixtures/
+tests/
+test_pdfs/
+outputs/
+__pycache__/
+*.pyc
+.keys/
+.env.yaml
+.pytest_cache/
