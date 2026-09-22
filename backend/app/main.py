@@ -535,6 +535,23 @@ async def _start_pipeline_worker():
     global _worker_task
     _worker_task = asyncio.create_task(_pipeline_worker())
 
+    # Say it once, loudly, at startup. A deployment that throttles CPU runs the
+    # pipeline only while a request is in flight; the job does not fail, it
+    # stalls, and every duration it reports is wrong. Silence here is how that
+    # went unnoticed for two cloud runs (job ea70d51a, 2026-09-22).
+    try:
+        from app import runtime_probe
+        p = await asyncio.to_thread(runtime_probe.probe)
+        warn = runtime_probe.warn_line(p)
+        if warn:
+            print(f"[startup] ERROR {warn}", flush=True)
+        elif p.get("state") == "unknown":
+            print(f"[startup] cpu-throttling unknown: {p.get('detail','')}", flush=True)
+        else:
+            print(f"[startup] cpu-throttling {p.get('state')}: {p.get('detail','')}", flush=True)
+    except Exception as exc:
+        print(f"[startup] cpu-throttling probe failed: {exc}", flush=True)
+
 
 def _next_node(phase: str) -> str:
     order = ["idca", "ssr", "search", "evaluate", "draft", "report"]
@@ -680,9 +697,23 @@ def _get_job(job_id: str) -> dict | None:
 async def health():
     # `gcs` is empty on a healthy deploy; a populated one means job state and
     # reports are only on this instance's disk and will not survive it.
-    return {"status": "ok", "version": "0.3.0",
-            "gcs": {k: v["n"] for k, v in _gcs_failures.items()},
-            "gcs_last_error": {k: v["last"] for k, v in _gcs_failures.items()}}
+    #
+    # `cpu` is the other way this service can be broken while looking fine: with
+    # Cloud Run's default throttling the background pipeline only gets CPU while
+    # a request is in flight, so a job stalls between polls and every duration
+    # it reports is a number about the flag rather than about the work
+    # (job ea70d51a, 2026-09-22).
+    from app import runtime_probe
+    cpu = runtime_probe.probe()
+    out = {"status": "ok", "version": "0.3.0",
+           "gcs": {k: v["n"] for k, v in _gcs_failures.items()},
+           "gcs_last_error": {k: v["last"] for k, v in _gcs_failures.items()},
+           "cpu_throttling": cpu}
+    warn = runtime_probe.warn_line(cpu)
+    if warn:
+        out["status"] = "degraded"
+        out["warning"] = warn
+    return out
 
 
 INPUT_MODES = ("academic_paper", "manuscript", "disclosure", "patent_draft")
