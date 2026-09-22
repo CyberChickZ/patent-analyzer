@@ -87,11 +87,15 @@ def _probe() -> dict:
         return {"state": "unknown", "detail": f"{type(exc).__name__}: {exc}"[:200]}
 
     containers = doc.get("containers") or []
-    res = (containers[0].get("resources") if containers else {}) or {}
-    if "cpuIdle" not in res:
+    if not containers:
         return {"state": "unknown",
-                "detail": "the revision carries no resources.cpuIdle; the API shape changed"}
-    idle = bool(res["cpuIdle"])
+                "detail": "the API did not return a revision with containers; shape changed"}
+    res = containers[0].get("resources") or {}
+    # proto3 JSON omits a false boolean, so an ABSENT cpuIdle means CPU is always
+    # allocated — the good case. Reading absence as "unknown" would have made the
+    # fixed deployment (00087, which has no cpuIdle) report a problem it does not
+    # have. `containers` is what tells us we got a revision at all.
+    idle = bool(res.get("cpuIdle", False))
     return {"state": "on" if idle else "off",
             "detail": ("CPU is throttled outside a request: the background pipeline only runs "
                        "while some request is being handled. Deploy with --no-cpu-throttling."

@@ -100,6 +100,12 @@ def test_it_reads_the_field_that_is_true_not_the_one_that_reads_well(monkeypatch
     real["containers"][0]["resources"]["cpuIdle"] = False
     assert rp._probe()["state"] == "off"
 
+    # proto3 JSON omits a false boolean. Revision 00087 — the one deployed WITH
+    # --no-cpu-throttling — carries no cpuIdle at all, and reading that as
+    # "unknown" would report a problem the fixed deployment does not have.
     del real["containers"][0]["resources"]["cpuIdle"]
+    assert rp._probe()["state"] == "off"
+
+    real["containers"] = []
     out = rp._probe()
-    assert out["state"] == "unknown" and "API shape changed" in out["detail"]
+    assert out["state"] == "unknown" and "shape changed" in out["detail"]

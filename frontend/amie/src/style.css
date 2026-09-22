@@ -608,3 +608,9 @@ tr.is-reserved > td { background: var(--neutral-soft); }
   .prompt-diff .d-add { background: #14532d33; color: #86efac; }
   .prompt-diff .d-del { background: #7f1d1d33; color: #fca5a5; }
 }
+
+
+/* The one line that answers "is it working?". It sits above the error box so
+   it is the first thing on the page while a job runs. */
+.run-live { margin-bottom: .6rem; }
+.run-live .notice { margin: 0; }

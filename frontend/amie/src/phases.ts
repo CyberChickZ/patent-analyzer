@@ -143,7 +143,46 @@ export function stepStates(job: JobStatus, events: JobEvent[]): Record<string, S
     const idx = STEPS.findIndex((s) => s.key === pausedStep);
     for (let i = 0; i < idx; i++) out[STEPS[i].key] = "completed";
   }
+  // A job that is running is running SOMETHING. Before this, a step whose
+  // events had not arrived yet read "pending", so a job could be five minutes
+  // into a phase with every step on the page marked as not started (Harry,
+  // 2026-09-22, job ea70d51a). If nothing else claims it, the first step that
+  // has not finished is the one in progress.
+  if (job.status === "running" || job.status === "queued") {
+    const anyRunning = STEPS.some((s) => out[s.key] === "running");
+    if (!anyRunning) {
+      const next = STEPS.find((s) => out[s.key] === "pending");
+      if (next) out[next.key] = job.status === "queued" ? "pending" : "running";
+    }
+  }
   return out;
+}
+
+/** How long a job has been going, and how long since it last said anything.
+ *
+ *  "last event 28 s ago" is the number that distinguishes working from stuck,
+ *  and it is the one nothing on the page used to show. */
+export function runTiming(job: JobStatus, events: JobEvent[]): {
+  elapsedMs: number; sinceLastMs: number | null; lastTs: string;
+} {
+  const now = Date.now();
+  const started = Date.parse(job.created_at || "") || now;
+  const stamps = events.map((e) => Date.parse(e.ts || "")).filter((n) => !Number.isNaN(n));
+  const last = stamps.length ? Math.max(...stamps) : null;
+  return {
+    elapsedMs: Math.max(0, now - started),
+    sinceLastMs: last === null ? null : Math.max(0, now - last),
+    lastTs: last === null ? "" : new Date(last).toISOString(),
+  };
+}
+
+/** "3 min 12 s", "28 s", "1 h 04 m" — short enough for a header line. */
+export function dur(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min ${String(s % 60).padStart(2, "0")} s`;
+  return `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} m`;
 }
 
 /** LLM calls the event stream actually shows (kind `llm`), by step. */

@@ -1,6 +1,9 @@
 import { getStatus, getEvents, reportUrl, type JobEvent, type JobStatus } from "../api";
 import { esc, clip, pill, fmtTime, errorBox, empty, openModal, md, promptBlocks, on, LOCALE } from "../ui";
-import { STEPS, stepOfEvent, stepStates, PAUSE_LABEL, PAUSE_STEP, llmCallsByStep, dedupeEvents, isLegacyEvent } from "../phases";
+import {
+  STEPS, stepOfEvent, stepStates, PAUSE_LABEL, PAUSE_STEP, llmCallsByStep, dedupeEvents,
+  isLegacyEvent, runTiming, dur,
+} from "../phases";
 import { mountReview, queriesTable } from "../hitl";
 import { rememberJob } from "../main";
 
@@ -40,6 +43,7 @@ export function renderRun(host: HTMLElement, jobId: string, opts: { embedded?: b
       <h1 id="run-title">Job <span class="mono">${esc(jobId)}</span></h1>
       <div class="lede" id="run-lede">Connecting…</div>
     </div>`}
+    <div id="run-live" class="run-live"></div>
     <div id="run-error"></div>
     <section class="section"><header><h2>Pipeline</h2><span class="hint" id="run-hint"></span></header>
       <div id="timeline" class="timeline"></div></section>
@@ -75,6 +79,30 @@ export function renderRun(host: HTMLElement, jobId: string, opts: { embedded?: b
   timer = window.setInterval(poll, 2000);
 }
 
+/** "Job running · step 2 of 6 · 3 min 12 s · last event 28 s ago"
+ *
+ *  Every part of it was missing while job ea70d51a ran: the page said the
+ *  pipeline had 0 events and every step was pending, forty-five seconds after
+ *  four events had been raised. */
+function liveLine(job: JobStatus, events: JobEvent[], states: Record<string, string>): string {
+  if (job.status === "completed" || job.status === "error") return "";
+  const idx = STEPS.findIndex((s) => states[s.key] === "running" || states[s.key] === "paused");
+  const t = runTiming(job, events);
+  const stale = t.sinceLastMs !== null && t.sinceLastMs > 120_000;
+  const bits = [
+    job.status === "waiting_for_hitl" ? "Job paused for review"
+      : job.status === "queued" ? "Job queued" : "Job running",
+    idx >= 0 ? `step ${idx + 1} of ${STEPS.length} · ${esc(STEPS[idx].label)}` : "",
+    dur(t.elapsedMs),
+    t.sinceLastMs === null ? "no events yet"
+      : `last event ${dur(t.sinceLastMs)} ago`,
+  ].filter(Boolean);
+  return `<div class="${stale ? "notice notice-warn" : "small muted"}">${esc(bits.join(" · "))}`
+    + (stale ? " — nothing has been reported for a while; it may be a long model call,"
+             + " or the container may not have CPU between requests" : "")
+    + "</div>";
+}
+
 function paint(jobId: string): void {
   if (!job) return;
   const states = stepStates(job, events);
@@ -93,6 +121,11 @@ function paint(jobId: string): void {
   }
   const hint = document.getElementById("run-hint");
   if (hint) hint.textContent = `${events.length} events`;
+
+  // One line that answers "is it working?" without reading anything else:
+  // which step, how long the job has been going, how long since it last spoke.
+  const head = document.getElementById("run-live");
+  if (head) head.innerHTML = liveLine(job, events, states);
 
   const errBox = document.getElementById("run-error")!;
   errBox.innerHTML = job.status === "error" ? errorBox(job.error || "The pipeline failed.") : "";
