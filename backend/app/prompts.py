@@ -204,8 +204,18 @@ def get(name: str) -> tuple[str, int | str]:
     return text, ver
 
 
+#: The prompt most recently rendered on this task, so a "calling <model>" event
+#: can say which prompt is running without every call site passing a label.
+_last_rendered: contextvars.ContextVar[str] = contextvars.ContextVar("last_prompt", default="")
+
+
+def last_rendered() -> str:
+    return _last_rendered.get()
+
+
 def render(prompt_name: str, /, **fields) -> str:
     text, _ = get(prompt_name)
+    _last_rendered.set(prompt_name)
     return text.format_map(_Safe(fields))
 
 

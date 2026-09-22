@@ -247,6 +247,90 @@ def _check_eval_budget() -> None:
             f"calls. Nothing after this point ran — treat the output as partial.")
 
 
+# ── telling the watcher what the model is doing ───────────────────────────────
+#
+# A phase whose work is one 90-second model call looked exactly like a phase
+# that had hung: no output, no timer, nothing. These raise an event when a call
+# starts, every HEARTBEAT_EVERY_S while it runs, and when it returns with what
+# it cost. They go to patent_analyzer.event_log, which any instance can read the
+# moment it is written, and outside a pipeline run there is no sink and they do
+# nothing at all.
+
+HEARTBEAT_EVERY_S = float(os.environ.get("LLM_EVENT_HEARTBEAT_S", "30"))
+
+_call_phase: contextvars.ContextVar[str] = contextvars.ContextVar("llm_call_phase", default="")
+
+
+def set_call_phase(phase: str) -> None:
+    """Which pipeline phase the calls on this task belong to."""
+    _call_phase.set(phase or "")
+
+
+def _llm_event(kind: str, message: str) -> None:
+    from datetime import datetime, timezone
+
+    from patent_analyzer import event_log
+    event_log.emit({"ts": datetime.now(timezone.utc).isoformat(),
+                    "phase": _call_phase.get() or "", "kind": kind, "message": message})
+
+
+def _toks(n: int) -> str:
+    return f"{n / 1000:.0f}k" if n >= 1000 else str(n)
+
+
+def _call_label() -> str:
+    return prompts.last_rendered()
+
+
+class _CallWatch:
+    """start / heartbeat / finish around one model call.
+
+    The heartbeat is the point: without it nothing distinguishes a long call
+    from a dead one, and "still running, 45s" is the most useful thing a slow
+    phase can say about itself.
+    """
+
+    def __init__(self, model: str):
+        self.model = model
+        self.label = _call_label()
+        self.t0 = time.monotonic()
+        self._task = None
+
+    async def start(self) -> "_CallWatch":
+        suffix = f" · {self.label}" if self.label else ""
+        _llm_event("llm_start", f"calling {self.model}{suffix}")
+
+        async def _beat():
+            while True:
+                await asyncio.sleep(HEARTBEAT_EVERY_S)
+                _llm_event("llm_running", f"still waiting on {self.model}{suffix}"
+                                          f" · {time.monotonic() - self.t0:.0f}s")
+        self._task = asyncio.create_task(_beat())
+        return self
+
+    def _stop(self) -> float:
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+        return time.monotonic() - self.t0
+
+    def done(self, resp) -> None:
+        secs = self._stop()
+        um = getattr(resp, "usage_metadata", None)
+        total = 0
+        if um is not None:
+            total = (int(getattr(um, "prompt_token_count", 0) or 0)
+                     + int(getattr(um, "candidates_token_count", 0) or 0)
+                     + int(getattr(um, "thoughts_token_count", 0) or 0))
+        tokens = f" · {_toks(total)} tokens" if total else ""
+        _llm_event("llm_done", f"returned · {secs:.0f}s{tokens} · {self.model}")
+
+    def failed(self, exc: BaseException) -> None:
+        secs = self._stop()
+        _llm_event("llm_failed",
+                   f"{self.model} failed after {secs:.0f}s: {type(exc).__name__}: {exc}"[:300])
+
+
 async def _smooth(model: str | None = None) -> None:
     """Shared per-minute gate across every process on this machine/instance, one per model."""
     _check_eval_budget()
@@ -385,11 +469,17 @@ async def call_llm(
     config = _build_config(system, max_tokens, thinking_budget, response_schema, model=model)
     await _smooth(model)
     t0 = time.monotonic()
-    resp = await client.aio.models.generate_content(
-        model=model,
-        contents=[types.Part.from_text(text=user)],
-        config=config,
-    )
+    watch = await _CallWatch(model).start()
+    try:
+        resp = await client.aio.models.generate_content(
+            model=model,
+            contents=[types.Part.from_text(text=user)],
+            config=config,
+        )
+    except BaseException as exc:
+        watch.failed(exc)
+        raise
+    watch.done(resp)
     _record_usage(model, resp, time.monotonic() - t0)
     text, thoughts = _extract_text_and_thoughts(resp)
     if text.startswith("```"):
@@ -469,11 +559,17 @@ async def call_llm_with_pdfs(
     config = _build_config(system, max_tokens, thinking_budget, response_schema, model=model)
     await _smooth(model)
     t0 = time.monotonic()
-    resp = await client.aio.models.generate_content(
-        model=model,
-        contents=parts,
-        config=config,
-    )
+    watch = await _CallWatch(model).start()
+    try:
+        resp = await client.aio.models.generate_content(
+            model=model,
+            contents=parts,
+            config=config,
+        )
+    except BaseException as exc:
+        watch.failed(exc)
+        raise
+    watch.done(resp)
     _record_usage(model, resp, time.monotonic() - t0)
     text, thoughts = _extract_text_and_thoughts(resp)
     if text.startswith("```"):
